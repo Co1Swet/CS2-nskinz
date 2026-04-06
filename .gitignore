@@ -1,0 +1,35 @@
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.vcxproj.user
+
+# Build output
+build/
+Debug/
+Release/
+x64/
+
+# Native binaries and debug artifacts
+*.obj
+*.o
+*.lib
+*.exp
+*.dll
+*.exe
+*.pdb
+*.idb
+*.ilk
+*.iobj
+*.ipdb
+
+# Logs and transient files
+*.log
+*.stderr.log
+*.stdout.log
+*.tmp
+
+# Reverse-engineering scratch artifacts
+*.dmp

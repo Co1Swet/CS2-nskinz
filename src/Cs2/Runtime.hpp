@@ -103,6 +103,13 @@ enum class KnifeViewmodelAbsenceAuditResult
     SyntheticAliasOnly,
 };
 
+enum class KnifePhase2TargetMode
+{
+    None,
+    FirstPersonRender,
+    WorldOnlyConsumer,
+};
+
 struct RuntimeGloveBindingInputs
 {
     bool stable_binding_valid = false;
@@ -155,7 +162,11 @@ bool StandardWeaponNeedsItemIdHighReset(std::uint32_t current_item_id_high, bool
 std::vector<std::pair<std::uint16_t, float>> BuildWeaponRefreshAttributes(const nskinzcs2::model::CosmeticProfile& profile);
 std::vector<std::uint16_t> BuildMissingWeaponAttributeDefinitionIndices(
     const nskinzcs2::model::CosmeticProfile& profile,
-    const std::vector<std::uint16_t>& existing_definition_indices);
+    const std::vector<std::uint16_t>& existing_definition_indices,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr);
+std::vector<std::pair<std::uint16_t, float>> BuildWeaponRefreshAttributes(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile);
 bool KnifeAnimationRemapTableHasDuplicateKeys();
 bool KnifeAnimationRemapTableSupportsDefinitions(const std::vector<int>& knife_definition_indices);
 bool KnifeAnimationRemapTableSupportsTransition(
@@ -406,6 +417,56 @@ KnifeViewmodelAbsenceAuditResult ProbeClassifyKnifeViewmodelAbsenceAuditForTests
     bool handle_entity_weapon_like,
     bool handle_entity_item_view_safe,
     int reverse_viewmodel_ref_count) noexcept;
+struct KnifePhase2TargetSelectionProbeInput
+{
+    bool has_real_first_person_render_target = false;
+    bool has_real_first_person_owner = false;
+    bool no_exposed_non_synthetic_render_owner = false;
+    KnifeViewmodelAbsenceAuditResult viewmodel_absence_result =
+        KnifeViewmodelAbsenceAuditResult::Skipped;
+    int consumer_clusters = 0;
+    int entity_bound_clusters = 0;
+    int anonymous_clusters = 0;
+    bool single_consumer_is_entity_bound_world = false;
+    bool caller_matches_valid_hit = false;
+};
+
+KnifePhase2TargetMode ProbeResolveKnifePhase2TargetSelectionForTests(
+    const KnifePhase2TargetSelectionProbeInput& input) noexcept;
+
+struct KnifeWorldOnlyRenderVerificationProbeInput
+{
+    bool world_render_state_resolved = false;
+    bool world_render_expected_model_resolved = false;
+    bool world_render_model_matches_target = false;
+    bool world_render_handle_matches_target_or_donor = false;
+    bool world_render_mesh_matches_target = false;
+    int resource_hits = 0;
+    bool resource_readback = false;
+};
+
+bool ProbeEvaluateKnifeWorldOnlyRenderVerificationForTests(
+    const KnifeWorldOnlyRenderVerificationProbeInput& input) noexcept;
+
+struct KnifePhase2ArmProbeInput
+{
+    KnifePhase2TargetMode target_mode = KnifePhase2TargetMode::None;
+    int world_render_entity_index = -1;
+    int first_person_render_entity_index = -1;
+    bool first_person_render_entity_synthetic = false;
+};
+
+struct KnifePhase2ArmProbeResult
+{
+    bool armed = false;
+    KnifePhase2TargetMode target_mode = KnifePhase2TargetMode::None;
+    int render_entity_index = -1;
+    bool synthetic_render_proxy = false;
+};
+
+KnifePhase2ArmProbeResult ProbeKnifePhase2ArmGateForTests(
+    const KnifePhase2ArmProbeInput& input) noexcept;
+
 std::wstring ProbeBuildKnifeCarrierRuntimeReasonTextForTests(
     bool no_exposed_non_synthetic_render_owner,
     KnifeCarrierDiscoveryResult carrier_result,
@@ -430,7 +491,11 @@ bool ProbeShouldBlockUnsafeKnifeSyntheticRenderProxyCarrierWriteForTests(
     std::uintptr_t first_person_render_item_view) noexcept;
 bool ProbeKnifeRefreshGuardBindingRestoresOnAbandonForTests() noexcept;
 bool ProbeKnifeRefreshAttachmentPromotionAllowedForTests(
-    const nskinzcs2::model::CosmeticProfile& profile) noexcept;
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr) noexcept;
+bool ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr) noexcept;
 bool ProbePassiveWatchedKnifeTraceGateForTests(
     const nskinzcs2::runtime::KnifeRuntimeContext& context,
     std::uint64_t xuid) noexcept;
@@ -512,6 +577,7 @@ private:
     Bindings TryResolveBindings(runtime::Status& status);
     bool TryInstallRuntimeHook(runtime::Status& status);
     bool TryRunManualCarrierOnlyProbe(const Bindings& bindings, runtime::Status& status);
+    void ConsumeDemoKeychainRefresh(runtime::Status& status);
     void ConsumeManualRefresh(runtime::Status& status);
     void AppendHookTelemetry(runtime::Status& status) const;
     void LogStatusIfChanged(const runtime::Status& status);

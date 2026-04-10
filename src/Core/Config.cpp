@@ -112,6 +112,38 @@ std::vector<Profile> DeduplicateProfilesByXuidKeepLast(const std::vector<Profile
     return deduplicated;
 }
 
+std::vector<KeychainProfile> DeduplicateKeychainProfilesKeepLast(
+    const std::vector<KeychainProfile>& profiles)
+{
+    std::unordered_map<std::uint64_t, std::size_t> last_index_by_binding_key;
+    last_index_by_binding_key.reserve(profiles.size());
+
+    auto binding_key_for =
+        [](const KeychainProfile& profile) noexcept
+        {
+            return (profile.xuid << 32ull) ^ static_cast<std::uint32_t>(profile.base_item);
+        };
+
+    for (std::size_t index = 0; index < profiles.size(); ++index)
+    {
+        last_index_by_binding_key[binding_key_for(profiles[index])] = index;
+    }
+
+    std::vector<KeychainProfile> deduplicated;
+    deduplicated.reserve(last_index_by_binding_key.size());
+    for (std::size_t index = 0; index < profiles.size(); ++index)
+    {
+        const auto key = binding_key_for(profiles[index]);
+        const auto it = last_index_by_binding_key.find(key);
+        if (it != last_index_by_binding_key.end() && it->second == index)
+        {
+            deduplicated.push_back(profiles[index]);
+        }
+    }
+
+    return deduplicated;
+}
+
 KnifeProfile ConvertLegacyKnifeProfile(const CosmeticProfile& profile)
 {
     KnifeProfile knife_profile;
@@ -322,23 +354,45 @@ static void from_json(const json& j, GloveProfile& value)
     value.wear = j.value("wear", 0.0000001f);
 }
 
+static void to_json(json& j, const KeychainProfile& value)
+{
+    j = json {
+        {"name", value.name},
+        {"enabled", value.enabled},
+        {"xuid", value.xuid},
+        {"base_item", value.base_item},
+        {"keychain_kit", value.keychain_kit},
+    };
+}
+
+static void from_json(const json& j, KeychainProfile& value)
+{
+    value.name = j.value("name", std::string("Default Keychain"));
+    value.enabled = j.value("enabled", false);
+    value.xuid = j.value("xuid", static_cast<std::uint64_t>(0));
+    value.base_item = j.value("base_item", 7);
+    value.keychain_kit = j.value("keychain_kit", 0);
+}
+
 static void to_json(json& j, const ConfigDocument& value)
 {
     j = json {
-        {"version", 3},
+        {"version", 4},
         {"profiles", value.profiles},
         {"knife_profiles", value.knife_profiles},
         {"glove_profiles", value.glove_profiles},
+        {"keychain_profiles", value.keychain_profiles},
         {"experimental_allow_hud_alias_synthetic_proxy_model_write", value.experimental_allow_hud_alias_synthetic_proxy_model_write},
     };
 }
 
 static void from_json(const json& j, ConfigDocument& value)
 {
-    value.version = j.value("version", 3);
+    value.version = j.value("version", 4);
     value.profiles = j.value("profiles", std::vector<CosmeticProfile> {});
     value.knife_profiles = j.value("knife_profiles", std::vector<KnifeProfile> {});
     value.glove_profiles = j.value("glove_profiles", std::vector<GloveProfile> {});
+    value.keychain_profiles = j.value("keychain_profiles", std::vector<KeychainProfile> {});
     value.experimental_allow_hud_alias_synthetic_proxy_model_write =
         j.value("experimental_allow_hud_alias_synthetic_proxy_model_write", false);
 }
@@ -350,6 +404,7 @@ nskinzcs2::model::ConfigDocument nskinzcs2::ConfigStore::CreateDefault()
     document.profiles.push_back(model::CosmeticProfile {});
     document.knife_profiles.push_back(model::KnifeProfile {});
     document.glove_profiles.push_back(model::GloveProfile {});
+    document.keychain_profiles.push_back(model::KeychainProfile {});
     return document;
 }
 
@@ -381,7 +436,14 @@ nskinzcs2::model::ConfigDocument nskinzcs2::ConfigStore::Load(const std::filesys
             parsed.glove_profiles.push_back(model::GloveProfile {});
         }
 
-        parsed.version = 3;
+        parsed.keychain_profiles =
+            model::DeduplicateKeychainProfilesKeepLast(parsed.keychain_profiles);
+        if (parsed.keychain_profiles.empty())
+        {
+            parsed.keychain_profiles.push_back(model::KeychainProfile {});
+        }
+
+        parsed.version = 4;
         return parsed;
     }
     catch (const std::exception&)
@@ -399,8 +461,10 @@ bool nskinzcs2::ConfigStore::Save(const std::filesystem::path& path, const model
     }
 
     auto normalized = document;
-    normalized.version = 3;
+    normalized.version = 4;
     normalized.knife_profiles = model::DeduplicateProfilesByXuidKeepLast(normalized.knife_profiles);
+    normalized.keychain_profiles =
+        model::DeduplicateKeychainProfilesKeepLast(normalized.keychain_profiles);
     normalized.profiles.erase(
         std::remove_if(
             normalized.profiles.begin(),
@@ -498,6 +562,42 @@ nskinzcs2::model::KnifeProfile* nskinzcs2::ConfigStore::FindMatchingKnifeProfile
         });
 
     return iterator == document.knife_profiles.rend() ? nullptr : &*iterator;
+}
+
+nskinzcs2::model::KeychainProfile* nskinzcs2::ConfigStore::FindMatchingKeychainProfile(
+    model::ConfigDocument& document,
+    const std::uint64_t xuid,
+    const int base_item)
+{
+    const auto iterator = std::find_if(
+        document.keychain_profiles.rbegin(),
+        document.keychain_profiles.rend(),
+        [xuid, base_item](const model::KeychainProfile& profile)
+        {
+            return profile.enabled &&
+                profile.xuid == xuid &&
+                profile.base_item == base_item;
+        });
+
+    return iterator == document.keychain_profiles.rend() ? nullptr : &*iterator;
+}
+
+const nskinzcs2::model::KeychainProfile* nskinzcs2::ConfigStore::FindMatchingKeychainProfile(
+    const model::ConfigDocument& document,
+    const std::uint64_t xuid,
+    const int base_item)
+{
+    const auto iterator = std::find_if(
+        document.keychain_profiles.rbegin(),
+        document.keychain_profiles.rend(),
+        [xuid, base_item](const model::KeychainProfile& profile)
+        {
+            return profile.enabled &&
+                profile.xuid == xuid &&
+                profile.base_item == base_item;
+        });
+
+    return iterator == document.keychain_profiles.rend() ? nullptr : &*iterator;
 }
 
 const nskinzcs2::model::KnifeProfile* nskinzcs2::ConfigStore::FindMatchingKnifeProfile(

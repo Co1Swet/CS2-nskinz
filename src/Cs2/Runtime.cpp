@@ -38,6 +38,12 @@
 namespace
 {
 using CreateInterfaceFn = void* (*)(const char* name, int* return_code);
+constexpr const char* kWearableClientClassName = "CEconWearable";
+constexpr const wchar_t* kWearableClientClassNameWide = L"CEconWearable";
+constexpr const char* kKeychainClientClassName = "C_KeychainModule";
+constexpr const wchar_t* kKeychainClientClassNameWide = L"C_KeychainModule";
+constexpr const char* kKeychainClientClassNameFallback = "CKeychainModule";
+constexpr const wchar_t* kKeychainClientClassNameFallbackWide = L"CKeychainModule";
 
 struct ModuleSpan
 {
@@ -2042,6 +2048,366 @@ bool SafeInvokeMethod0(void* instance, const std::size_t index, Result& out)
     }
 }
 
+template <typename Result, typename Arg1>
+bool SafeInvokeMethod1(void* instance, const std::size_t index, Result& out, Arg1 arg1)
+{
+    if (instance == nullptr)
+    {
+        return false;
+    }
+
+    void** vtable = nullptr;
+    if (!SafeReadValue(instance, vtable) || vtable == nullptr)
+    {
+        return false;
+    }
+
+    using Method = Result(__fastcall*)(void*, Arg1);
+    void* method_address = nullptr;
+    if (!SafeReadValue(vtable + index, method_address) || method_address == nullptr)
+    {
+        return false;
+    }
+
+    __try
+    {
+        out = reinterpret_cast<Method>(method_address)(instance, arg1);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        out = Result {};
+        return false;
+    }
+}
+
+template <typename Arg1>
+bool SafeInvokeMethod1Void(void* instance, const std::size_t index, Arg1 arg1)
+{
+    if (instance == nullptr)
+    {
+        return false;
+    }
+
+    void** vtable = nullptr;
+    if (!SafeReadValue(instance, vtable) || vtable == nullptr)
+    {
+        return false;
+    }
+
+    using Method = void(__fastcall*)(void*, Arg1);
+    void* method_address = nullptr;
+    if (!SafeReadValue(vtable + index, method_address) || method_address == nullptr)
+    {
+        return false;
+    }
+
+    __try
+    {
+        reinterpret_cast<Method>(method_address)(instance, arg1);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+struct NativeConsoleColor
+{
+    std::uint8_t r = 255;
+    std::uint8_t g = 255;
+    std::uint8_t b = 255;
+    std::uint8_t a = 255;
+};
+
+struct NativeConsoleDisplayFunc
+{
+    virtual void ColorPrint(const NativeConsoleColor& color, const char* text) = 0;
+    virtual void Print(const char* text) = 0;
+    virtual void DPrint(const char* text) = 0;
+};
+
+struct NativeCCommand
+{
+    static constexpr int kMaxCommandLength = 512;
+    static constexpr int kMaxCommandArgc = 64;
+
+    int m_nArgc = 0;
+    int m_nArgv0Size = 0;
+    char m_pArgSBuffer[kMaxCommandLength] {};
+    char m_pArgvBuffer[kMaxCommandLength] {};
+    const char* m_ppArgv[kMaxCommandArgc] {};
+
+    void Reset() noexcept
+    {
+        m_nArgc = 0;
+        m_nArgv0Size = 0;
+        std::memset(m_pArgSBuffer, 0, sizeof(m_pArgSBuffer));
+        std::memset(m_pArgvBuffer, 0, sizeof(m_pArgvBuffer));
+        std::memset(m_ppArgv, 0, sizeof(m_ppArgv));
+    }
+
+    bool Tokenize(const std::string_view command_text) noexcept
+    {
+        Reset();
+        if (command_text.empty() || command_text.size() >= static_cast<std::size_t>(kMaxCommandLength))
+        {
+            return false;
+        }
+
+        std::memcpy(m_pArgSBuffer, command_text.data(), command_text.size());
+        m_pArgSBuffer[command_text.size()] = '\0';
+
+        int argv_write = 0;
+        bool in_quotes = false;
+        bool token_active = false;
+        int token_start = -1;
+        int first_arg_length = 0;
+
+        for (std::size_t index = 0; index < command_text.size(); ++index)
+        {
+            const auto ch = command_text[index];
+            if (ch == '"')
+            {
+                in_quotes = !in_quotes;
+                if (!token_active)
+                {
+                    token_active = true;
+                    token_start = argv_write;
+                }
+                continue;
+            }
+
+            if (!in_quotes && std::isspace(static_cast<unsigned char>(ch)))
+            {
+                if (token_active)
+                {
+                    if (argv_write >= kMaxCommandLength - 1 || m_nArgc >= kMaxCommandArgc)
+                    {
+                        return false;
+                    }
+                    m_pArgvBuffer[argv_write++] = '\0';
+                    m_ppArgv[m_nArgc++] = &m_pArgvBuffer[token_start];
+                    token_active = false;
+                    token_start = -1;
+                }
+                continue;
+            }
+
+            if (!token_active)
+            {
+                token_active = true;
+                token_start = argv_write;
+            }
+
+            if (argv_write >= kMaxCommandLength - 1)
+            {
+                return false;
+            }
+            m_pArgvBuffer[argv_write++] = ch;
+        }
+
+        if (in_quotes || !token_active)
+        {
+            if (in_quotes)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (argv_write >= kMaxCommandLength - 1 || m_nArgc >= kMaxCommandArgc)
+            {
+                return false;
+            }
+            m_pArgvBuffer[argv_write++] = '\0';
+            m_ppArgv[m_nArgc++] = &m_pArgvBuffer[token_start];
+        }
+
+        if (m_nArgc <= 0)
+        {
+            return false;
+        }
+
+        first_arg_length = static_cast<int>(std::strlen(m_ppArgv[0]));
+        m_nArgv0Size = m_nArgc > 1 ? first_arg_length + 1 : 0;
+        return true;
+    }
+};
+
+constexpr std::array<std::size_t, 4> kICvarFindCommandIndices {{
+    14,
+    15,
+    10,
+    11,
+}};
+constexpr std::size_t kInvalidConsoleMethodIndex = static_cast<std::size_t>(-1);
+constexpr std::size_t kICvarInstallConsoleDisplayFuncIndex = 21;
+constexpr std::size_t kICvarRemoveConsoleDisplayFuncIndex = 22;
+constexpr std::size_t kConCommandBaseIsCommandIndex = 1;
+constexpr std::size_t kConCommandDispatchIndex = 12;
+constexpr std::uint64_t kConsolePlayerQueryCaptureWindowMs = 1200;
+constexpr std::uint64_t kConsolePlayerQueryInitialRetryMs = 2000;
+constexpr std::uint64_t kConsolePlayerQuerySteadyRetryMs = 10000;
+
+std::string TrimAsciiWhitespaceRuntime(std::string_view value)
+{
+    std::size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin])))
+    {
+        ++begin;
+    }
+
+    std::size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1])))
+    {
+        --end;
+    }
+
+    return std::string(value.substr(begin, end - begin));
+}
+
+std::string CollapseAsciiWhitespaceRuntime(std::string_view value)
+{
+    std::string result;
+    result.reserve(value.size());
+    bool previous_was_space = false;
+    for (const auto ch : value)
+    {
+        if (std::isspace(static_cast<unsigned char>(ch)))
+        {
+            if (!result.empty() && !previous_was_space)
+            {
+                result.push_back(' ');
+            }
+            previous_was_space = true;
+            continue;
+        }
+
+        result.push_back(ch);
+        previous_was_space = false;
+    }
+
+    if (!result.empty() && result.back() == ' ')
+    {
+        result.pop_back();
+    }
+    return result;
+}
+
+bool LooksLikeSteamXuidRuntime(const std::uint64_t xuid) noexcept
+{
+    return xuid >= 76561197960265728ull && xuid <= 76561209999999999ull;
+}
+
+std::vector<nskinzcs2::model::DemoMirvPlayerEntry> ParseConsolePlayerEntries(std::string_view text)
+{
+    std::vector<nskinzcs2::model::DemoMirvPlayerEntry> entries;
+    std::unordered_map<std::uint64_t, std::size_t> entry_indices_by_xuid;
+
+    std::size_t offset = 0;
+    while (offset <= text.size())
+    {
+        const auto line_end = text.find('\n', offset);
+        const auto raw_line =
+            line_end == std::string_view::npos
+                ? text.substr(offset)
+                : text.substr(offset, line_end - offset);
+        const auto trimmed_line = TrimAsciiWhitespaceRuntime(raw_line);
+        if (!trimmed_line.empty())
+        {
+            for (std::size_t index = 0; index < trimmed_line.size();)
+            {
+                if (!std::isdigit(static_cast<unsigned char>(trimmed_line[index])))
+                {
+                    ++index;
+                    continue;
+                }
+
+                const auto digit_begin = index;
+                while (index < trimmed_line.size() &&
+                    std::isdigit(static_cast<unsigned char>(trimmed_line[index])))
+                {
+                    ++index;
+                }
+
+                const auto digit_count = index - digit_begin;
+                if (digit_count < 15 || digit_count > 20)
+                {
+                    continue;
+                }
+
+                const auto digits = trimmed_line.substr(digit_begin, digit_count);
+                const auto xuid = std::strtoull(digits.c_str(), nullptr, 10);
+                if (!LooksLikeSteamXuidRuntime(xuid))
+                {
+                    continue;
+                }
+
+                const auto compact_label = CollapseAsciiWhitespaceRuntime(trimmed_line);
+                const auto iterator = entry_indices_by_xuid.find(xuid);
+                if (iterator == entry_indices_by_xuid.end())
+                {
+                    nskinzcs2::model::DemoMirvPlayerEntry entry;
+                    entry.xuid = xuid;
+                    entry.label = compact_label.empty() ? std::to_string(xuid) : compact_label;
+                    entry_indices_by_xuid.emplace(xuid, entries.size());
+                    entries.push_back(std::move(entry));
+                }
+            }
+        }
+
+        if (line_end == std::string_view::npos)
+        {
+            break;
+        }
+        offset = line_end + 1;
+    }
+
+    std::sort(
+        entries.begin(),
+        entries.end(),
+        [](const nskinzcs2::model::DemoMirvPlayerEntry& lhs, const nskinzcs2::model::DemoMirvPlayerEntry& rhs)
+        {
+            return lhs.xuid < rhs.xuid;
+        });
+    return entries;
+}
+
+int CountConsolePlayerCaptureLines(std::string_view text) noexcept
+{
+    if (text.empty())
+    {
+        return 0;
+    }
+
+    int lines = 1;
+    for (const auto ch : text)
+    {
+        if (ch == '\n')
+        {
+            ++lines;
+        }
+    }
+    return lines;
+}
+
+std::wstring BuildConsoleMethodIndexListText()
+{
+    std::wstring text;
+    for (std::size_t index = 0; index < kICvarFindCommandIndices.size(); ++index)
+    {
+        if (!text.empty())
+        {
+            text += L",";
+        }
+
+        text += std::to_wstring(kICvarFindCommandIndices[index]);
+    }
+    return text;
+}
+
 template <typename Result, typename... Args>
 bool SafeInvokeFunctionPointer(void* address, Result& out, Args... args)
 {
@@ -2310,6 +2676,7 @@ LONG CaptureCreateFunctionException(
 
     return EXCEPTION_EXECUTE_HANDLER;
 }
+
 
 bool TryGetValidatedInterfaceVtableEntry(
     void* iface,
@@ -7567,6 +7934,805 @@ bool TryResolveWearableClientClassFactory(
     return false;
 }
 
+bool TryResolveNamedClientClassFactoryForLayout(
+    void* client_class_chain_head,
+    HMODULE client_module,
+    const ModuleSpan& client_module_span,
+    const char* expected_network_name,
+    const wchar_t* expected_network_name_wide,
+    const WearableClientClassLayout& layout,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+    static_cast<void>(client_module_span);
+
+    if (client_class_chain_head == nullptr)
+    {
+        issue = L"Source2Client::GetAllClasses() returned a null client class head.";
+        return false;
+    }
+
+    const auto trusted_modules = BuildTrustedClientClassModuleSpans(client_module, client_class_chain_head);
+    if (trusted_modules.empty())
+    {
+        issue = L"No trusted module span was available for validating the " +
+            std::wstring(expected_network_name_wide) + L" client class chain.";
+        return false;
+    }
+
+    std::unordered_set<std::uintptr_t> visited;
+    visited.reserve(256);
+
+    auto* current = static_cast<std::uint8_t*>(client_class_chain_head);
+    int chain_length = 0;
+    while (current != nullptr && chain_length < 4096)
+    {
+        if (!IsReadableClientClassNodePointer(trusted_modules, current))
+        {
+            std::wstringstream stream;
+            stream << L"Client class node " << FormatPointer(current)
+                << L" is not readable inside client.dll or the trusted HLAE proxy chain.";
+            issue = stream.str();
+            return false;
+        }
+
+        if (!visited.insert(reinterpret_cast<std::uintptr_t>(current)).second)
+        {
+            issue = L"Source2Client::GetAllClasses() returned a looping client class chain.";
+            return false;
+        }
+
+        void* network_name_pointer = nullptr;
+        void* next = nullptr;
+        std::wstring name_resolution_kind;
+        std::wstring next_resolution_kind;
+        std::size_t name_encoded_size = 0;
+        std::size_t next_encoded_size = 0;
+        if (!TryResolveClientClassFieldPointerCandidate(
+                current,
+                current + layout.name_offset,
+                network_name_pointer,
+                &name_resolution_kind,
+                false,
+                false,
+                &name_encoded_size) ||
+            !TryResolveClientClassFieldPointerCandidate(
+                current,
+                current + layout.next_offset,
+                next,
+                &next_resolution_kind,
+                true,
+                false,
+                &next_encoded_size))
+        {
+            std::wstringstream stream;
+            stream << L"Failed to read client class node fields for layout name+0x"
+                << std::hex << std::uppercase << layout.name_offset
+                << L", next+0x" << layout.next_offset
+                << std::dec << std::nouppercase << L".";
+            issue = stream.str();
+            return false;
+        }
+
+        const auto* network_name = static_cast<const char*>(network_name_pointer);
+        if (ClientClassFieldRangesOverlap(layout.name_offset, name_encoded_size, layout.next_offset, next_encoded_size))
+        {
+            std::wstringstream stream;
+            stream << L"Client class node " << FormatPointer(current)
+                << L" used an overlapping name/next layout (name+0x"
+                << std::hex << std::uppercase << layout.name_offset
+                << L"/" << name_encoded_size
+                << L", next+0x" << layout.next_offset
+                << L"/" << next_encoded_size
+                << std::dec << std::nouppercase
+                << L", decode=name:"
+                << (!name_resolution_kind.empty() ? name_resolution_kind : L"n/a")
+                << L"/next:"
+                << (!next_resolution_kind.empty() ? next_resolution_kind : L"n/a")
+                << L").";
+            issue = stream.str();
+            return false;
+        }
+
+        std::string network_name_value;
+        if (!IsReadablePointer(network_name) ||
+            !TryReadClientClassName(network_name, network_name_value) ||
+            !IsReadableNullOrClientClassNodePointer(trusted_modules, next))
+        {
+            std::wstringstream stream;
+            stream << L"Client class node " << FormatPointer(current)
+                << L" failed validation for layout create+0x"
+                << std::hex << std::uppercase << layout.create_fn_offset
+                << L", name+0x" << layout.name_offset
+                << L", next+0x" << layout.next_offset
+                << std::dec << std::nouppercase
+                << L" (name=" << (network_name != nullptr ? NarrowToWide(network_name_value) : L"<null>")
+                << L", next=" << FormatPointer(next) << L", decode=name:"
+                << (!name_resolution_kind.empty() ? name_resolution_kind : L"n/a")
+                << L"/next:"
+                << (!next_resolution_kind.empty() ? next_resolution_kind : L"n/a")
+                << L").";
+            issue = stream.str();
+            return false;
+        }
+
+        ++chain_length;
+        if (network_name_value == expected_network_name)
+        {
+            void* create_fn = nullptr;
+            std::wstring create_resolution_hint;
+            std::size_t create_encoded_size = 0;
+            if (!TryResolveClientClassFieldPointerCandidate(
+                    current,
+                    current + layout.create_fn_offset,
+                    create_fn,
+                    &create_resolution_hint,
+                    false,
+                    true,
+                    &create_encoded_size))
+            {
+                std::wstringstream stream;
+                stream << expected_network_name_wide << L" client class node " << FormatPointer(current)
+                    << L" did not expose a readable create function at layout create+0x"
+                    << std::hex << std::uppercase << layout.create_fn_offset
+                    << std::dec << std::nouppercase << L".";
+                issue = stream.str();
+                return false;
+            }
+
+            if (ClientClassFieldRangesOverlap(layout.name_offset, name_encoded_size, layout.create_fn_offset, create_encoded_size) ||
+                ClientClassFieldRangesOverlap(layout.next_offset, next_encoded_size, layout.create_fn_offset, create_encoded_size))
+            {
+                std::wstringstream stream;
+                stream << expected_network_name_wide << L" client class node " << FormatPointer(current)
+                    << L" used an overlapping create/name/next layout (create+0x"
+                    << std::hex << std::uppercase << layout.create_fn_offset
+                    << L"/" << create_encoded_size
+                    << L", name+0x" << layout.name_offset
+                    << L"/" << name_encoded_size
+                    << L", next+0x" << layout.next_offset
+                    << L"/" << next_encoded_size
+                    << std::dec << std::nouppercase << L").";
+                issue = stream.str();
+                return false;
+            }
+
+            std::wstring create_module_name;
+            void* resolved_create_fn = nullptr;
+            std::wstring create_resolution_kind;
+            std::wstring create_issue_detail;
+            if (!TryResolveUsableClientClassCreateFunctionPointer(
+                    client_module,
+                    create_fn,
+                    resolved_create_fn,
+                    create_module_name,
+                    create_resolution_kind,
+                    &create_issue_detail))
+            {
+                std::wstringstream stream;
+                stream << expected_network_name_wide << L" client class node " << FormatPointer(current)
+                    << L" exposed an unusable create function " << FormatPointer(create_fn)
+                    << L" for layout create+0x"
+                    << std::hex << std::uppercase << layout.create_fn_offset
+                    << std::dec << std::nouppercase;
+                if (!create_resolution_hint.empty())
+                {
+                    stream << L" (decode=" << create_resolution_hint << L")";
+                }
+                stream << L".";
+                if (!create_issue_detail.empty())
+                {
+                    stream << L" " << create_issue_detail;
+                }
+
+                issue = stream.str();
+                return false;
+            }
+
+            binding.client_class = current;
+            binding.create_fn = resolved_create_fn;
+            binding.raw_create_fn = create_fn;
+            binding.network_name = network_name;
+            binding.create_fn_module_name = create_module_name;
+            binding.create_fn_resolution = create_resolution_kind;
+            binding.resolution_method = L"GetAllClasses";
+            binding.create_fn_offset = layout.create_fn_offset;
+            binding.name_offset = layout.name_offset;
+            binding.next_offset = layout.next_offset;
+            binding.chain_length = chain_length;
+            return true;
+        }
+
+        current = static_cast<std::uint8_t*>(next);
+    }
+
+    std::wstringstream stream;
+    stream << expected_network_name_wide << L" was not found for layout create+0x"
+        << std::hex << std::uppercase << layout.create_fn_offset
+        << L", name+0x" << layout.name_offset
+        << L", next+0x" << layout.next_offset
+        << std::dec << std::nouppercase
+        << L" after scanning " << chain_length << L" client classes.";
+    issue = stream.str();
+    return false;
+}
+
+bool TryResolveNamedClientClassFactoryByInferredLayout(
+    void* client_class_chain_head,
+    HMODULE client_module,
+    const char* expected_network_name,
+    const wchar_t* expected_network_name_wide,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    WearableClientClassLayout inferred_layout {};
+    int inferred_chain_length = 0;
+    std::wstring layout_issue;
+    if (!TryInferClientClassNameNextLayout(
+            client_class_chain_head,
+            client_module,
+            inferred_layout,
+            inferred_chain_length,
+            layout_issue))
+    {
+        issue = std::move(layout_issue);
+        return false;
+    }
+
+    std::size_t inferred_create_offset = 0;
+    std::wstring create_issue;
+    if (!TryInferClientClassCreateOffset(
+            client_class_chain_head,
+            client_module,
+            inferred_layout,
+            inferred_create_offset,
+            create_issue))
+    {
+        issue = std::move(create_issue);
+        return false;
+    }
+
+    const auto trusted_modules = BuildTrustedClientClassModuleSpans(client_module, client_class_chain_head);
+    if (trusted_modules.empty())
+    {
+        issue = L"No trusted module span was available after dynamic client class layout inference.";
+        return false;
+    }
+
+    std::unordered_set<std::uintptr_t> visited;
+    visited.reserve(256);
+    auto* current = static_cast<std::uint8_t*>(client_class_chain_head);
+    int chain_length = 0;
+    while (current != nullptr && chain_length < 4096)
+    {
+        if (!IsReadableClientClassNodePointer(trusted_modules, current))
+        {
+            issue = L"Inferred client class layout became unreadable while searching for " +
+                std::wstring(expected_network_name_wide) + L".";
+            return false;
+        }
+
+        if (!visited.insert(reinterpret_cast<std::uintptr_t>(current)).second)
+        {
+            issue = L"Inferred client class layout looped while searching for " +
+                std::wstring(expected_network_name_wide) + L".";
+            return false;
+        }
+
+        void* network_name_pointer = nullptr;
+        void* next = nullptr;
+        void* create_fn = nullptr;
+        std::size_t name_encoded_size = 0;
+        std::size_t next_encoded_size = 0;
+        std::size_t create_encoded_size = 0;
+        if (!TryResolveClientClassFieldPointerCandidate(
+                current,
+                current + inferred_layout.name_offset,
+                network_name_pointer,
+                nullptr,
+                false,
+                false,
+                &name_encoded_size) ||
+            !TryResolveClientClassFieldPointerCandidate(
+                current,
+                current + inferred_layout.next_offset,
+                next,
+                nullptr,
+                true,
+                false,
+                &next_encoded_size) ||
+            !TryResolveClientClassFieldPointerCandidate(
+                current,
+                current + inferred_create_offset,
+                create_fn,
+                nullptr,
+                false,
+                true,
+                &create_encoded_size))
+        {
+            issue = L"Inferred client class layout could not read " +
+                std::wstring(expected_network_name_wide) + L" node fields.";
+            return false;
+        }
+
+        const auto* network_name = static_cast<const char*>(network_name_pointer);
+        if (ClientClassFieldRangesOverlap(inferred_layout.name_offset, name_encoded_size, inferred_layout.next_offset, next_encoded_size) ||
+            ClientClassFieldRangesOverlap(inferred_layout.name_offset, name_encoded_size, inferred_create_offset, create_encoded_size) ||
+            ClientClassFieldRangesOverlap(inferred_layout.next_offset, next_encoded_size, inferred_create_offset, create_encoded_size))
+        {
+            issue = L"Inferred client class layout overlapped name/create/next fields while searching for " +
+                std::wstring(expected_network_name_wide) + L".";
+            return false;
+        }
+
+        std::string network_name_value;
+        std::wstring create_module_name;
+        if (!IsReadablePointer(network_name) ||
+            !TryReadClientClassName(network_name, network_name_value) ||
+            !IsReadableNullOrClientClassNodePointer(trusted_modules, next))
+        {
+            issue = L"Inferred client class layout produced an invalid name/next chain while searching for " +
+                std::wstring(expected_network_name_wide) + L".";
+            return false;
+        }
+
+        ++chain_length;
+        if (network_name_value == expected_network_name)
+        {
+            void* resolved_create_fn = nullptr;
+            std::wstring create_resolution_kind;
+            std::wstring create_issue_detail;
+            if (!TryResolveUsableClientClassCreateFunctionPointer(
+                    client_module,
+                    create_fn,
+                    resolved_create_fn,
+                    create_module_name,
+                    create_resolution_kind,
+                    &create_issue_detail))
+            {
+                issue = L"Inferred " + std::wstring(expected_network_name_wide) +
+                    L" node exposed an unusable create function.";
+                if (!create_issue_detail.empty())
+                {
+                    issue += L" " + create_issue_detail;
+                }
+                return false;
+            }
+
+            binding.client_class = current;
+            binding.create_fn = resolved_create_fn;
+            binding.raw_create_fn = create_fn;
+            binding.network_name = network_name;
+            binding.create_fn_module_name = create_module_name;
+            binding.create_fn_resolution = create_resolution_kind;
+            binding.resolution_method = L"GetAllClasses(inferred)";
+            binding.create_fn_offset = inferred_create_offset;
+            binding.name_offset = inferred_layout.name_offset;
+            binding.next_offset = inferred_layout.next_offset;
+            binding.chain_length = chain_length;
+            return true;
+        }
+
+        current = static_cast<std::uint8_t*>(next);
+    }
+
+    issue = L"Dynamic client class layout inference succeeded, but " +
+        std::wstring(expected_network_name_wide) +
+        L" was not present in the inferred GetAllClasses chain.";
+    return false;
+}
+
+bool TryResolveNamedClientClassFactoryByDataFirstNodeInference(
+    HMODULE client_module,
+    const char* expected_network_name,
+    const wchar_t* expected_network_name_wide,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    const auto module = GetModuleSpan(client_module);
+    if (!module.has_value())
+    {
+        issue = L"client.dll module span is unavailable, so data-first " +
+            std::wstring(expected_network_name_wide) + L" inference could not run.";
+        return false;
+    }
+
+    const auto trusted_modules = BuildTrustedClientClassModuleSpans(client_module, module->base);
+    if (trusted_modules.empty())
+    {
+        issue = L"No trusted module span was available for data-first " +
+            std::wstring(expected_network_name_wide) + L" inference.";
+        return false;
+    }
+
+    const auto names = FindAsciiStringOccurrencesInModules(trusted_modules, expected_network_name, 64);
+    if (names.empty())
+    {
+        issue = std::wstring(expected_network_name_wide) +
+            L" string literal was not found in trusted client-class modules for data-first inference.";
+        return false;
+    }
+
+    WearableClientClassFactoryBinding best_binding {};
+    bool found_binding = false;
+    std::wstring first_candidate_issue;
+    std::unordered_set<std::uintptr_t> attempted_nodes;
+    for (const auto* name_address : names)
+    {
+        const auto references = FindPointerReferencesInModules(trusted_modules, name_address, 256);
+        const auto* expected_name = static_cast<const char*>(name_address);
+        for (auto* reference : references)
+        {
+            const auto reference_address = reinterpret_cast<std::uintptr_t>(reference);
+            for (const auto name_offset : kClientClassFieldOffsetCandidates)
+            {
+                if (reference_address < name_offset)
+                {
+                    continue;
+                }
+
+                auto* node = reference - name_offset;
+                if (!IsReadableClientClassNodePointer(trusted_modules, node))
+                {
+                    continue;
+                }
+
+                const auto dedupe_key =
+                    (reinterpret_cast<std::uintptr_t>(node) << 8) ^
+                    static_cast<std::uintptr_t>(name_offset);
+                if (!attempted_nodes.insert(dedupe_key).second)
+                {
+                    continue;
+                }
+
+                for (const auto create_offset : kClientClassFieldOffsetCandidates)
+                {
+                    if (create_offset == name_offset)
+                    {
+                        continue;
+                    }
+
+                    for (const auto next_offset : kClientClassFieldOffsetCandidates)
+                    {
+                        if (next_offset == name_offset || next_offset == create_offset)
+                        {
+                            continue;
+                        }
+
+                        WearableClientClassFactoryBinding candidate_binding {};
+                        std::wstring candidate_issue;
+                        if (!TryResolveWearableClientClassBindingCandidate(
+                                client_module,
+                                trusted_modules,
+                                node,
+                                expected_name,
+                                create_offset,
+                                name_offset,
+                                next_offset,
+                                candidate_binding,
+                                &candidate_issue))
+                        {
+                            if (first_candidate_issue.empty() && !candidate_issue.empty())
+                            {
+                                first_candidate_issue = std::move(candidate_issue);
+                            }
+                            continue;
+                        }
+
+                        candidate_binding.resolution_method = L"data_first";
+                        if (!found_binding ||
+                            IsPreferredWearableClientClassFactoryBinding(candidate_binding, best_binding))
+                        {
+                            best_binding = std::move(candidate_binding);
+                            found_binding = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (found_binding)
+    {
+        binding = std::move(best_binding);
+        return true;
+    }
+
+    issue = std::wstring(expected_network_name_wide) +
+        L" exists in trusted client-class modules, but no readable node neighborhood yielded a stable data-first create/name/next layout.";
+    if (!first_candidate_issue.empty())
+    {
+        issue += L" First rejection: " + first_candidate_issue;
+    }
+    return false;
+}
+
+bool TryResolveNamedClientClassFactoryByGetAllClasses(
+    void* source2_client_interface,
+    void* source2_client_callback_instance,
+    HMODULE client_module,
+    const char* expected_network_name,
+    const wchar_t* expected_network_name_wide,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    const auto module = GetModuleSpan(client_module);
+    if (!module.has_value())
+    {
+        issue = L"client.dll module span is unavailable, so the " +
+            std::wstring(expected_network_name_wide) + L" client class factory could not be resolved.";
+        return false;
+    }
+
+    std::vector<std::wstring> get_all_class_candidate_issues;
+    std::array<std::pair<const wchar_t*, void*>, 2> provider_candidates {{
+        {L"callback", source2_client_callback_instance},
+        {L"interface", source2_client_interface},
+    }};
+    std::unordered_set<std::uintptr_t> attempted_candidates;
+    for (const auto& [candidate_tag, provider_candidate] : provider_candidates)
+    {
+        if (provider_candidate == nullptr ||
+            !attempted_candidates.insert(reinterpret_cast<std::uintptr_t>(provider_candidate)).second)
+        {
+            continue;
+        }
+
+        Source2ClientClassProviderResolution provider_resolution {};
+        std::wstring provider_issue;
+        if (!TryResolveWrappedSource2ClientClassProvider(
+                provider_candidate,
+                client_module,
+                provider_resolution,
+                provider_issue))
+        {
+            if (!provider_issue.empty())
+            {
+                get_all_class_candidate_issues.push_back(
+                    TruncateDiagnosticText(
+                        std::wstring(candidate_tag) + L": ClassProvider: " + provider_issue,
+                        kMaxRuntimeDiagnosticChars));
+            }
+            continue;
+        }
+
+        void* client_class_chain_head = provider_resolution.client_class_chain_head;
+        if (provider_resolution.wrapped)
+        {
+            std::wstringstream stream;
+            stream << L"Resolved client.dll-backed Source2Client class provider at "
+                << FormatPointer(provider_resolution.instance)
+                << L" from wrapper "
+                << FormatPointer(provider_candidate)
+                << L" via +0x" << std::hex << std::uppercase << provider_resolution.outer_offset;
+            if (provider_resolution.inner_offset != static_cast<std::size_t>(-1))
+            {
+                stream << L" -> +0x" << provider_resolution.inner_offset;
+            }
+            stream << std::dec << std::nouppercase
+                << L"; GetAllClasses head=" << FormatPointer(client_class_chain_head) << L".";
+            nskinzcs2::Logger::Info(stream.str());
+        }
+
+        WearableClientClassFactoryBinding inferred_binding {};
+        std::wstring inferred_issue;
+        if (TryResolveNamedClientClassFactoryByInferredLayout(
+                client_class_chain_head,
+                client_module,
+                expected_network_name,
+                expected_network_name_wide,
+                inferred_binding,
+                inferred_issue))
+        {
+            binding = inferred_binding;
+            return true;
+        }
+
+        std::wstring candidate_issue;
+        if (!inferred_issue.empty())
+        {
+            candidate_issue = L"InferredLayout: " + inferred_issue;
+        }
+
+        for (const auto& layout : kWearableClientClassLayoutCandidates)
+        {
+            WearableClientClassFactoryBinding candidate_binding {};
+            std::wstring layout_issue;
+            if (TryResolveNamedClientClassFactoryForLayout(
+                    client_class_chain_head,
+                    client_module,
+                    *module,
+                    expected_network_name,
+                    expected_network_name_wide,
+                    layout,
+                    candidate_binding,
+                    layout_issue))
+            {
+                binding = candidate_binding;
+                return true;
+            }
+
+            if (candidate_issue.empty() && !layout_issue.empty())
+            {
+                candidate_issue = std::move(layout_issue);
+            }
+        }
+
+        if (!candidate_issue.empty())
+        {
+            get_all_class_candidate_issues.push_back(
+                TruncateDiagnosticText(
+                    std::wstring(candidate_tag) + L": " + candidate_issue,
+                    kMaxRuntimeDiagnosticChars));
+        }
+    }
+
+    std::wstring get_all_classes_issue;
+    if (!get_all_class_candidate_issues.empty())
+    {
+        get_all_classes_issue =
+            TruncateDiagnosticText(
+                JoinDiagnosticSamples(get_all_class_candidate_issues),
+                kMaxRuntimeDiagnosticChars);
+    }
+    else
+    {
+        get_all_classes_issue =
+            L"Source2Client interface and callback instance were both unavailable, so GetAllClasses-based client-class discovery was skipped.";
+    }
+
+    if (!get_all_classes_issue.empty())
+    {
+        issue = L"GetAllClasses: " + get_all_classes_issue;
+    }
+    return false;
+}
+
+bool TryResolveNamedClientClassFactory(
+    void* source2_client_interface,
+    void* source2_client_callback_instance,
+    HMODULE client_module,
+    const char* expected_network_name,
+    const wchar_t* expected_network_name_wide,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    WearableClientClassFactoryBinding data_first_binding {};
+    std::wstring data_first_issue;
+    const auto data_first_resolved =
+        TryResolveNamedClientClassFactoryByDataFirstNodeInference(
+            client_module,
+            expected_network_name,
+            expected_network_name_wide,
+            data_first_binding,
+            data_first_issue);
+
+    WearableClientClassFactoryBinding get_all_classes_binding {};
+    std::wstring get_all_classes_issue;
+    const auto get_all_classes_resolved =
+        TryResolveNamedClientClassFactoryByGetAllClasses(
+            source2_client_interface,
+            source2_client_callback_instance,
+            client_module,
+            expected_network_name,
+            expected_network_name_wide,
+            get_all_classes_binding,
+            get_all_classes_issue);
+
+    if (data_first_resolved)
+    {
+        binding = data_first_binding;
+
+        if (get_all_classes_resolved)
+        {
+            if (!WearableClientClassBindingsMatch(data_first_binding, get_all_classes_binding))
+            {
+                std::wstringstream stream;
+                stream << L"Runtime diagnostic: GetAllClasses validator disagreed with data_first "
+                    << expected_network_name_wide
+                    << L" binding. data_first=create=" << FormatPointer(data_first_binding.create_fn)
+                    << L", raw=" << FormatPointer(data_first_binding.raw_create_fn)
+                    << L", layout=(" << data_first_binding.create_fn_offset
+                    << L"," << data_first_binding.name_offset
+                    << L"," << data_first_binding.next_offset << L")"
+                    << L"; get_all_classes=create=" << FormatPointer(get_all_classes_binding.create_fn)
+                    << L", raw=" << FormatPointer(get_all_classes_binding.raw_create_fn)
+                    << L", layout=(" << get_all_classes_binding.create_fn_offset
+                    << L"," << get_all_classes_binding.name_offset
+                    << L"," << get_all_classes_binding.next_offset << L").";
+                nskinzcs2::Logger::Info(stream.str());
+            }
+        }
+        else if (!get_all_classes_issue.empty())
+        {
+            nskinzcs2::Logger::Info(
+                L"Runtime diagnostic: GetAllClasses validator did not confirm the data_first " +
+                std::wstring(expected_network_name_wide) + L" binding: " +
+                get_all_classes_issue);
+        }
+
+        return true;
+    }
+
+    if (get_all_classes_resolved)
+    {
+        binding = get_all_classes_binding;
+        return true;
+    }
+
+    if (!data_first_issue.empty() && !get_all_classes_issue.empty())
+    {
+        issue = L"DataFirst: " + data_first_issue + L" | GetAllClasses: " + get_all_classes_issue;
+    }
+    else if (!data_first_issue.empty())
+    {
+        issue = L"DataFirst: " + data_first_issue;
+    }
+    else
+    {
+        issue = get_all_classes_issue;
+    }
+    return false;
+}
+
+bool TryResolveKeychainClientClassFactory(
+    void* source2_client_interface,
+    void* source2_client_callback_instance,
+    HMODULE client_module,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    std::vector<std::wstring> issues;
+    for (const auto& [expected_network_name, expected_network_name_wide] :
+         std::array<std::pair<const char*, const wchar_t*>, 2> {{
+             {kKeychainClientClassName, kKeychainClientClassNameWide},
+             {kKeychainClientClassNameFallback, kKeychainClientClassNameFallbackWide},
+         }})
+    {
+        WearableClientClassFactoryBinding candidate_binding {};
+        std::wstring candidate_issue;
+        if (TryResolveNamedClientClassFactory(
+                source2_client_interface,
+                source2_client_callback_instance,
+                client_module,
+                expected_network_name,
+                expected_network_name_wide,
+                candidate_binding,
+                candidate_issue))
+        {
+            binding = std::move(candidate_binding);
+            return true;
+        }
+
+        if (!candidate_issue.empty())
+        {
+            issues.push_back(std::wstring(expected_network_name_wide) + L": " + candidate_issue);
+        }
+    }
+
+    issue = !issues.empty()
+        ? JoinDiagnosticSamples(issues)
+        : L"Neither C_KeychainModule nor CKeychainModule exposed a usable client class factory.";
+    return false;
+}
+
 constexpr int kCs2FrameRenderPass = 11;
 constexpr int kCs2FrameStartStage = 0;
 constexpr int kMaxEntityIndex = 0x7FFE;
@@ -7683,6 +8849,7 @@ struct PendingWeaponRefreshRequest
     nskinzcs2::runtime::WeaponSkinRefreshTarget target =
         nskinzcs2::runtime::WeaponSkinRefreshTarget::SecondaryItemView;
     bool force_dispatch = false;
+    std::optional<nskinzcs2::model::KeychainProfile> keychain_profile;
 };
 
 struct TrackedWeaponAppearanceRestorePoint
@@ -7963,6 +9130,7 @@ struct KnifeModelPathState
     bool first_person_direct_render_source = false;
     bool direct_render_rebind_attempted = false;
     bool direct_render_rebind_succeeded = false;
+    bool resource_only_render_active = false;
     bool synthetic_world_visual_isolation_active = false;
     bool no_exposed_non_synthetic_render_owner = false;
     bool viewmodel_factory_observed = false;
@@ -7975,14 +9143,53 @@ struct KnifeModelPathState
         nskinzcs2::runtime::KnifeFirstPersonOwnerKind::None;
 };
 
+struct KnifePhase2TargetModeFacts
+{
+    bool has_real_first_person_render_target = false;
+    bool has_real_first_person_owner = false;
+    bool no_exposed_non_synthetic_render_owner = false;
+    nskinzcs2::runtime::KnifeViewmodelAbsenceAuditResult viewmodel_absence_result =
+        nskinzcs2::runtime::KnifeViewmodelAbsenceAuditResult::Skipped;
+    int consumer_clusters = 0;
+    int entity_bound_clusters = 0;
+    int anonymous_clusters = 0;
+    bool single_consumer_is_entity_bound_world = false;
+    bool caller_matches_valid_hit = false;
+};
+
+struct KnifePhase2TargetSelection
+{
+    nskinzcs2::runtime::KnifePhase2TargetMode mode =
+        nskinzcs2::runtime::KnifePhase2TargetMode::None;
+    int render_entity_index = -1;
+    void* render_entity = nullptr;
+    const wchar_t* render_source = L"owner";
+    bool synthetic_render_proxy = false;
+    const char* desired_world_model_name = nullptr;
+    const char* desired_first_person_model_name = nullptr;
+    const char* desired_model_name = nullptr;
+    const char* desired_model_name_pointer = nullptr;
+    std::uint64_t desired_model_handle = 0;
+    std::uint64_t desired_model_name_token = 0;
+    bool desired_model_handle_valid = false;
+    bool desired_model_name_token_valid = false;
+    std::uint64_t desired_mesh_group_mask = 1ull;
+    bool desired_mesh_group_mask_valid = false;
+    const wchar_t* refusal_reason = L"world_only_consumer_not_confirmed";
+};
+
 struct PendingKnifePostRefreshVerification
 {
     bool active = false;
     std::uint64_t xuid = 0;
     std::uint64_t desired_signature = 0;
+    nskinzcs2::runtime::KnifePhase2TargetMode target_mode =
+        nskinzcs2::runtime::KnifePhase2TargetMode::None;
     int target_definition_index = 0;
     const char* expected_world_render_model_name = nullptr;
     const char* expected_first_person_render_model_name = nullptr;
+    std::uint64_t expected_world_render_model_handle = 0;
+    bool expected_world_render_model_handle_valid = false;
     int world_entity_index = -1;
     void* world_entity = nullptr;
     void* world_item_view = nullptr;
@@ -8049,6 +9256,8 @@ struct PendingKnifeRebuildState
 struct KnifePhase2ModelBindInterceptionState
 {
     bool active = false;
+    nskinzcs2::runtime::KnifePhase2TargetMode target_mode =
+        nskinzcs2::runtime::KnifePhase2TargetMode::None;
     bool synthetic_render_proxy = false;
     bool world_visual_isolation_active = false;
     std::uint64_t xuid = 0;
@@ -8253,6 +9462,8 @@ constexpr const wchar_t* kKnifeModelPathSwapReasonQuerySwapperOwned =
     L"model path ownership is delegated to calibrated Query slot hooks";
 constexpr const wchar_t* kKnifeModelPathSwapReasonQuerySwapperInactive =
     L"Query swapper inactive or uncalibrated";
+constexpr const wchar_t* kKnifeModelPathSwapReasonDemoSeekSafetyCooldown =
+    L"demo seek safety cooldown";
 constexpr const wchar_t* kKnifeModelPathSwapBridgeReasonNone = L"";
 constexpr const wchar_t* kKnifeModelPathSwapBridgeReasonReady = L"ready";
 constexpr const wchar_t* kKnifeModelPathSwapBridgeReasonMissingSourceHandles =
@@ -8349,6 +9560,27 @@ struct KnifeModelPathSwapLiveResultRedirect
     const char* redirect_path = nullptr;
 };
 
+constexpr std::size_t kKnifeModelPathSwapQueryConsumerSampleCapacity = 12;
+constexpr std::size_t kKnifeModelPathSwapQueryConsumerPreviewCapacity = 160;
+
+struct KnifeModelPathSwapQueryConsumerSample
+{
+    bool active = false;
+    std::uintptr_t caller_return_address = 0;
+    std::uint64_t arg4 = 0;
+    std::uint64_t result_handle = 0;
+    std::uint64_t query_count = 0;
+    std::uint64_t matched_pair_count = 0;
+    std::uint64_t redirect_count = 0;
+    std::uint64_t valid_hit_count = 0;
+    std::uint64_t world_bucket_count = 0;
+    std::uint64_t view_bucket_count = 0;
+    std::uint64_t other_bucket_count = 0;
+    std::uint8_t result_shape_kind = 0;
+    std::array<char, kKnifeModelPathSwapQueryConsumerPreviewCapacity> path_preview {};
+    std::array<char, kKnifeModelPathSwapQueryConsumerPreviewCapacity> redirect_preview {};
+};
+
 struct KnifeModelPathSwapState
 {
     bool enabled = false;
@@ -8400,6 +9632,23 @@ struct KnifeModelPathSwapState
     std::uint64_t armed_frame = 0;
     std::uint64_t last_hit_tick = 0;
     const wchar_t* last_reason = kKnifeModelPathSwapReasonNone;
+};
+
+struct PublishedKnifeModelPathSwapBridgeState
+{
+    bool valid = false;
+    std::uint64_t xuid = 0;
+    int world_entity_index = -1;
+    int target_definition_index = 0;
+    int handle_redirect_pair_count = 0;
+    std::uint64_t preferred_source_handle = 0;
+    std::uint64_t preferred_target_handle = 0;
+    const char* source_world_path = nullptr;
+    const char* source_view_path = nullptr;
+    const char* target_world_path = nullptr;
+    const char* target_view_path = nullptr;
+    const wchar_t* bridge_reason = kKnifeModelPathSwapBridgeReasonNone;
+    std::uint64_t publish_generation = 0;
 };
 
 constexpr std::size_t kResourceHandleQueryCarrierPreviewCapacity = 320;
@@ -9226,6 +10475,8 @@ struct ClientSchemaOffsets
     std::ptrdiff_t econ_entity_fallback_wear = 0;
     std::ptrdiff_t econ_entity_fallback_stat_trak = 0;
     std::ptrdiff_t econ_entity_initialized = 0;
+    std::ptrdiff_t weapon_keychain_def_id = 0;
+    std::ptrdiff_t weapon_keychain_seed = 0;
     std::ptrdiff_t econ_wearable_force_skin = 0;
     std::ptrdiff_t econ_wearable_always_allow = 0;
     std::ptrdiff_t econ_entity_viewmodel_attachment = 0;
@@ -9358,6 +10609,7 @@ struct RuntimeOwnedAttributeListBinding
 };
 
 constexpr std::uint64_t kRuntimeOwnedGloveAttributeLeaseFrames = 16;
+constexpr std::uint64_t kRuntimeOwnedKeychainAttributeLeaseFrames = 8;
 constexpr auto kDefaultKnifeRefreshHelperPolicy =
     nskinzcs2::runtime::KnifeRefreshHelperPolicy::ManualOnly;
 
@@ -9394,12 +10646,15 @@ struct TemporaryAttributeListAttachment
     bool restore_custom_material_original = false;
     bool restore_custom_material_written = false;
     bool replaced_existing_vector = false;
+    bool restore_on_abandon_when_promoted = true;
 };
 
 constexpr std::uint16_t kAttributePaintKit = 6;
 constexpr std::uint16_t kAttributeSeed = 7;
 constexpr std::uint16_t kAttributeWear = 8;
 constexpr std::uint16_t kAttributeStatTrak = 80;
+constexpr std::uint16_t kAttributeKeychainId = 299;
+constexpr std::uint16_t kAttributeKeychainSeed = 306;
 constexpr std::uint16_t kAttributeStickerKitBase = 113;
 constexpr std::uint16_t kAttributeStickerStride = 4;
 constexpr std::uint16_t kAttributeStickerWear = 1;
@@ -9506,6 +10761,10 @@ struct KnifeModelPathSwapQueryHookTarget
     VmtPatch patch {};
     std::uint64_t calibrated_source_handle = 0;
     std::uint64_t calibrated_target_handle = 0;
+    const char* source_world_path = nullptr;
+    const char* source_view_path = nullptr;
+    const char* target_world_path = nullptr;
+    const char* target_view_path = nullptr;
     std::array<KnifeModelPathSwapHandleRedirect, kKnifeModelPathSwapHandleRedirectCapacity> handle_redirects {};
     std::size_t handle_redirect_count = 0;
     std::array<KnifeModelPathSwapHandleRedirect, kKnifeModelPathSwapHandleRedirectCapacity>
@@ -9516,12 +10775,28 @@ struct KnifeModelPathSwapQueryHookTarget
     std::size_t learned_live_result_redirect_count = 0;
     int live_handle_probe_budget = 0;
     int live_handle_probe_log_count = 0;
+    std::uint64_t last_safe_point_unreplayable_signature = 0;
     int bypass_log_count = 0;
     int miss_log_count = 0;
     int hit_count = 0;
+    int valid_resource_hit_count = 0;
+    int path_redirect_hit_count = 0;
+    int live_result_redirect_hit_count = 0;
+    int calibrated_handle_hit_count = 0;
+    int learned_handle_hit_count = 0;
+    int bridge_handle_hit_count = 0;
     int redirect_count = 0;
     const char* last_match_bucket = nullptr;
     const char* last_redirect_path = nullptr;
+    const wchar_t* last_hit_kind = L"none";
+    std::uintptr_t last_valid_hit_caller_return_address = 0;
+    std::uint64_t last_valid_hit_arg4 = 0;
+    std::uint64_t knife_query_total_count = 0;
+    std::uint64_t knife_query_matched_pair_count = 0;
+    std::uint64_t knife_query_summary_log_signature = 0;
+    int knife_query_consumer_overflow_count = 0;
+    std::array<KnifeModelPathSwapQueryConsumerSample, kKnifeModelPathSwapQueryConsumerSampleCapacity>
+        knife_query_consumers {};
 };
 
 struct KnifeModelWriteStabilityState
@@ -9529,6 +10804,27 @@ struct KnifeModelWriteStabilityState
     int consecutive_failures = 0;
     std::uint64_t cooldown_until_millis = 0;
     std::wstring last_failure_reason;
+};
+
+struct DemoKeychainControllerState
+{
+    std::uint64_t desired_profile_signature = 0;
+    std::uint64_t stable_weapon_signature = 0;
+    std::uint64_t owner_xuid = 0;
+    std::uint32_t weapon_handle = kInvalidEntityHandle;
+    int weapon_entity_index = -1;
+    int base_item = 0;
+    int keychain_module_entity_index = -1;
+    std::uint32_t live_keychain_kit = 0;
+    nskinzcs2::runtime::DemoKeychainState state =
+        nskinzcs2::runtime::DemoKeychainState::Idle;
+    std::uint64_t stable_frame_count = 0;
+    std::uint64_t last_frame_callback_count = 0;
+    std::uint64_t create_retry_not_before_ms = 0;
+    bool session_create_disabled = false;
+    bool live_module_runtime_created = false;
+    std::string matched_profile_name;
+    std::wstring last_issue;
 };
 
 struct HookState
@@ -9580,7 +10876,16 @@ struct HookState
     std::atomic<std::uint64_t> resource_handle_query_earliest_safe_tick {0};
     std::atomic<std::uint64_t> watched_xuid {0};
     std::atomic<std::uint64_t> probed_xuid {0};
+    std::atomic<std::uint64_t> demo_keychain_authoritative_xuid {0};
+    std::atomic_bool console_player_capture_ready {false};
+    std::atomic_bool console_player_query_inflight {false};
+    std::atomic_bool console_player_refresh_requested {false};
+    std::atomic<std::uint64_t> console_player_query_started_millis {0};
+    std::atomic<std::uint64_t> console_player_query_completed_millis {0};
+    std::atomic<std::uint64_t> console_player_query_not_before_millis {0};
+    std::atomic<int> console_player_count {0};
     std::atomic<std::uint64_t> runtime_rebuild_generation {0};
+    std::atomic<std::uint64_t> knife_model_path_swap_bridge_publish_generation {0};
     std::atomic<int> last_frame_stage {-1};
     std::atomic<int> demo_tick {-1};
     std::atomic<int> highest_live_entity_index {-1};
@@ -9607,12 +10912,17 @@ struct HookState
     std::mutex runtime_owned_attribute_mutex;
     std::unordered_map<void*, RuntimeOwnedAttributeListBinding> runtime_owned_attribute_bindings;
     std::unordered_map<void*, std::uint64_t> runtime_owned_attribute_release_frames;
+    std::mutex runtime_keychain_module_mutex;
+    std::unordered_set<int> runtime_created_keychain_module_entity_indices;
+    std::mutex demo_keychain_controller_mutex;
+    DemoKeychainControllerState demo_keychain_controller;
     std::unordered_map<void*, TrackedWeaponAppearanceRestorePoint> tracked_weapon_restore_points;
     std::unordered_set<std::uint64_t> warned_glove_signatures;
     std::unordered_set<std::uint64_t> warned_runtime_signatures;
     std::atomic<std::uint64_t> source2_client_provider_generation {1};
     std::atomic<void*> source2_client_interface {nullptr};
     std::atomic<void*> source2_client_callback_instance {nullptr};
+    void* engine_cvar = nullptr;
     void* engine_to_client = nullptr;
     void* game_ui_service = nullptr;
     void* schema_system_interface = nullptr;
@@ -9627,6 +10937,9 @@ struct HookState
     RuntimeFeatureAvailability cached_wearable_factory_availability = RuntimeFeatureAvailability::Unknown;
     WearableClientClassFactoryBinding cached_wearable_factory_binding;
     std::wstring cached_wearable_factory_issue;
+    RuntimeFeatureAvailability cached_keychain_factory_availability = RuntimeFeatureAvailability::Unknown;
+    WearableClientClassFactoryBinding cached_keychain_factory_binding;
+    std::wstring cached_keychain_factory_issue;
     VmtPatch connect_patch;
     VmtPatch frame_stage_patch;
     nskinzcs2::AppState* app_state = nullptr;
@@ -9635,6 +10948,10 @@ struct HookState
     ClientConnectFn original_connect = nullptr;
     ClientFrameStageNotifyFn original_frame_stage_notify = nullptr;
     std::mutex text_mutex;
+    std::mutex console_player_capture_mutex;
+    std::string console_player_capture_buffer;
+    std::wstring last_console_player_detail;
+    std::wstring last_console_player_issue;
     std::wstring level_name;
     std::wstring last_runtime_issue;
     std::wstring last_rebuild_reason;
@@ -9668,6 +10985,7 @@ struct HookState
     PendingKnifeFirstPersonReacquire pending_knife_first_person_reacquire {};
     KnifePersistentOwnerNegativeResolutionCache knife_persistent_owner_negative_cache {};
     std::atomic_int knife_animation_seek_cooldown_frames {0};
+    std::atomic<std::uint64_t> keychain_module_create_cooldown_until_millis {0};
     PendingKnifeRebuildState pending_knife_rebuild_state {};
     PendingKnifePostRefreshVerification pending_knife_post_refresh_verification {};
     KnifePhase2ModelBindInterceptionState knife_phase2_model_bind_interception {};
@@ -9687,6 +11005,7 @@ struct HookState
         original_knife_model_resource_global_detours {};
     bool minhook_initialized = false;
     KnifeModelPathSwapState knife_model_path_swap_state {};
+    PublishedKnifeModelPathSwapBridgeState published_knife_model_path_swap_bridge {};
     ResourceHandleQueryLiveProbeState resource_handle_query_live_probe {};
     std::atomic<std::uint32_t> resource_handle_query_safe_point_gate {
         static_cast<std::uint32_t>(ResourceHandleQuerySafePointGate::Unknown)};
@@ -9697,7 +11016,279 @@ struct HookState
 
 HookState g_hook_state;
 
+class RuntimeConsoleDisplaySink final : public NativeConsoleDisplayFunc
+{
+public:
+    void ColorPrint(const NativeConsoleColor&, const char* text) override
+    {
+        Append(text);
+    }
+
+    void Print(const char* text) override
+    {
+        Append(text);
+    }
+
+    void DPrint(const char* text) override
+    {
+        Append(text);
+    }
+
+private:
+    static void Append(const char* text) noexcept
+    {
+        if (text == nullptr || *text == '\0' ||
+            !g_hook_state.console_player_query_inflight.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_hook_state.console_player_capture_mutex);
+        g_hook_state.console_player_capture_buffer += text;
+    }
+};
+
+RuntimeConsoleDisplaySink g_runtime_console_display_sink;
+
+void SetConsolePlayerIssue(std::wstring issue)
+{
+    std::lock_guard<std::mutex> lock(g_hook_state.console_player_capture_mutex);
+    g_hook_state.last_console_player_issue = std::move(issue);
+}
+
+void SetConsolePlayerDetail(std::wstring detail)
+{
+    std::lock_guard<std::mutex> lock(g_hook_state.console_player_capture_mutex);
+    g_hook_state.last_console_player_detail = std::move(detail);
+}
+
+std::wstring SnapshotConsolePlayerDetail()
+{
+    std::lock_guard<std::mutex> lock(g_hook_state.console_player_capture_mutex);
+    return g_hook_state.last_console_player_detail;
+}
+
+std::wstring SnapshotConsolePlayerIssue()
+{
+    std::lock_guard<std::mutex> lock(g_hook_state.console_player_capture_mutex);
+    return g_hook_state.last_console_player_issue;
+}
+
+bool TryFindConsoleCommand(
+    void* engine_cvar,
+    const char* command_name,
+    void*& command,
+    std::size_t& resolved_index,
+    std::wstring& issue)
+{
+    command = nullptr;
+    resolved_index = kInvalidConsoleMethodIndex;
+    issue.clear();
+
+    if (engine_cvar == nullptr)
+    {
+        issue = L"VEngineCvar007 is not available yet.";
+        return false;
+    }
+
+    if (command_name == nullptr || *command_name == '\0')
+    {
+        issue = L"Requested command name is empty.";
+        return false;
+    }
+
+    for (const auto index : kICvarFindCommandIndices)
+    {
+        command = nullptr;
+        if (!SafeInvokeMethod1(engine_cvar, index, command, command_name) || command == nullptr)
+        {
+            continue;
+        }
+
+        bool is_command = false;
+        if (SafeInvokeMethod0(command, kConCommandBaseIsCommandIndex, is_command) && is_command)
+        {
+            resolved_index = index;
+            return true;
+        }
+    }
+
+    issue =
+        L"FindCommand failed for '" + NarrowToWide(command_name) + L"' after ICvar slots [" +
+        BuildConsoleMethodIndexListText() + L"].";
+    command = nullptr;
+    return false;
+}
+
+bool TryDispatchConsoleCommand(void* command, const char* command_text, std::wstring& issue)
+{
+    issue.clear();
+    if (command == nullptr)
+    {
+        issue = L"Console command pointer is null.";
+        return false;
+    }
+
+    if (command_text == nullptr || *command_text == '\0')
+    {
+        issue = L"Console command text is empty.";
+        return false;
+    }
+
+    NativeCCommand parsed_command;
+    if (!parsed_command.Tokenize(command_text))
+    {
+        issue = L"Failed to tokenize console command '" + NarrowToWide(command_text) + L"'.";
+        return false;
+    }
+
+    if (!SafeInvokeMethod1Void<const NativeCCommand&>(command, kConCommandDispatchIndex, parsed_command))
+    {
+        issue =
+            L"Dispatch failed for console command '" + NarrowToWide(command_text) +
+            L"' via ConCommand::Dispatch slot " + std::to_wstring(kConCommandDispatchIndex) + L".";
+        return false;
+    }
+
+    return true;
+}
+
+bool EnsureConsolePlayerCaptureInstalled(std::wstring& issue)
+{
+    issue.clear();
+
+    if (g_hook_state.engine_cvar == nullptr)
+    {
+        SetConsolePlayerDetail(L"Waiting for VEngineCvar007 resolution before console capture can attach.");
+        issue = L"VEngineCvar007 is not resolved yet.";
+        g_hook_state.console_player_capture_ready.store(false, std::memory_order_release);
+        return false;
+    }
+
+    if (g_hook_state.console_player_capture_ready.load(std::memory_order_acquire))
+    {
+        return true;
+    }
+
+    if (!SafeInvokeMethod1Void(
+            g_hook_state.engine_cvar,
+            kICvarInstallConsoleDisplayFuncIndex,
+            static_cast<NativeConsoleDisplayFunc*>(&g_runtime_console_display_sink)))
+    {
+        SetConsolePlayerDetail(
+            L"Failed to install console display capture on VEngineCvar007 via slot " +
+            std::to_wstring(kICvarInstallConsoleDisplayFuncIndex) + L".");
+        issue =
+            L"InstallConsoleDisplayFunc failed on VEngineCvar007 via slot " +
+            std::to_wstring(kICvarInstallConsoleDisplayFuncIndex) + L".";
+        g_hook_state.console_player_capture_ready.store(false, std::memory_order_release);
+        return false;
+    }
+
+    g_hook_state.console_player_capture_ready.store(true, std::memory_order_release);
+    SetConsolePlayerDetail(
+        L"Console display capture is installed on VEngineCvar007 via slot " +
+        std::to_wstring(kICvarInstallConsoleDisplayFuncIndex) + L".");
+    return true;
+}
+
+void RemoveConsolePlayerCapture() noexcept
+{
+    if (!g_hook_state.console_player_capture_ready.exchange(false, std::memory_order_acq_rel) ||
+        g_hook_state.engine_cvar == nullptr)
+    {
+        return;
+    }
+
+    static_cast<void>(SafeInvokeMethod1Void(
+        g_hook_state.engine_cvar,
+        kICvarRemoveConsoleDisplayFuncIndex,
+        static_cast<NativeConsoleDisplayFunc*>(&g_runtime_console_display_sink)));
+}
+
+void ReplaceCapturedConsolePlayers(std::vector<nskinzcs2::model::DemoMirvPlayerEntry> entries)
+{
+    g_hook_state.console_player_count.store(static_cast<int>(entries.size()), std::memory_order_release);
+    if (g_hook_state.app_state != nullptr)
+    {
+        g_hook_state.app_state->ReplaceDemoMirvPlayers(std::move(entries));
+    }
+}
+
+void FinalizeConsolePlayerQuery(const std::uint64_t now)
+{
+    std::string captured_text;
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.console_player_capture_mutex);
+        captured_text.swap(g_hook_state.console_player_capture_buffer);
+    }
+
+    const auto captured_bytes = static_cast<int>(captured_text.size());
+    const auto captured_lines = CountConsolePlayerCaptureLines(captured_text);
+    const auto parsed_players = ParseConsolePlayerEntries(captured_text);
+    if (!parsed_players.empty())
+    {
+        SetConsolePlayerDetail(
+            L"Captured " + std::to_wstring(captured_bytes) + L" byte(s) across " +
+            std::to_wstring(captured_lines) + L" line(s); parsed " +
+            std::to_wstring(parsed_players.size()) + L" SteamID64 player entr" +
+            (parsed_players.size() == 1 ? std::wstring(L"y.") : std::wstring(L"ies.")));
+        ReplaceCapturedConsolePlayers(parsed_players);
+        SetConsolePlayerIssue(std::wstring {});
+        g_hook_state.console_player_query_not_before_millis.store(
+            now + kConsolePlayerQuerySteadyRetryMs,
+            std::memory_order_release);
+    }
+    else
+    {
+        SetConsolePlayerDetail(
+            L"Captured " + std::to_wstring(captured_bytes) + L" byte(s) across " +
+            std::to_wstring(captured_lines) +
+            L" line(s) after dispatching 'mirv_deathmsg help players'.");
+        SetConsolePlayerIssue(
+            captured_text.empty()
+                ? std::wstring(L"Console player query produced no captured output.")
+                : std::wstring(L"Console player query completed, but no SteamID64 values were found."));
+        g_hook_state.console_player_query_not_before_millis.store(
+            now + kConsolePlayerQueryInitialRetryMs,
+            std::memory_order_release);
+    }
+
+    g_hook_state.console_player_query_completed_millis.store(now, std::memory_order_release);
+    g_hook_state.console_player_query_inflight.store(false, std::memory_order_release);
+}
+
+void TryUpdateConsolePlayerCapture(const std::uint64_t now, const bool demo_playing)
+{
+    const auto app_state = g_hook_state.app_state;
+    g_hook_state.console_player_refresh_requested.exchange(false, std::memory_order_acq_rel);
+    if (app_state != nullptr)
+    {
+        app_state->ConsumeDemoConsolePlayerRefreshRequest();
+        if (!app_state->SnapshotDemoMirvPlayers().empty())
+        {
+            app_state->ReplaceDemoMirvPlayers({});
+        }
+    }
+
+    static_cast<void>(now);
+    static_cast<void>(demo_playing);
+    RemoveConsolePlayerCapture();
+    g_hook_state.console_player_query_started_millis.store(0, std::memory_order_release);
+    g_hook_state.console_player_query_completed_millis.store(0, std::memory_order_release);
+    g_hook_state.console_player_query_not_before_millis.store(0, std::memory_order_release);
+    g_hook_state.console_player_query_inflight.store(false, std::memory_order_release);
+    g_hook_state.console_player_capture_ready.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.console_player_capture_mutex);
+        g_hook_state.console_player_capture_buffer.clear();
+    }
+    SetConsolePlayerDetail(std::wstring {});
+    SetConsolePlayerIssue(std::wstring {});
+}
+
 extern thread_local bool g_knife_model_path_swap_query_hook_reentry;
+extern thread_local bool g_knife_model_path_swap_force_demo_result_sampling;
 constexpr std::uint64_t kDemoPassiveMonitorPromotionEntryThreshold = 64;
 std::size_t CountKnifeModelPathSwapQueryHookRedirectPairs(
     const KnifeModelPathSwapQueryHookTarget& hook_target) noexcept;
@@ -10045,15 +11636,30 @@ std::uint64_t BumpSource2ClientProviderGeneration() noexcept
 void ClearCachedWearableFactoryResolution(const bool preserve_available) noexcept
 {
     std::scoped_lock lock(g_hook_state.wearable_factory_cache_mutex);
-    if (preserve_available &&
-        g_hook_state.cached_wearable_factory_availability == RuntimeFeatureAvailability::Available)
+    const auto preserve_wearable =
+        preserve_available &&
+        g_hook_state.cached_wearable_factory_availability == RuntimeFeatureAvailability::Available;
+    const auto preserve_keychain =
+        preserve_available &&
+        g_hook_state.cached_keychain_factory_availability == RuntimeFeatureAvailability::Available;
+    if (preserve_wearable && preserve_keychain)
     {
         return;
     }
 
-    g_hook_state.cached_wearable_factory_availability = RuntimeFeatureAvailability::Unknown;
-    g_hook_state.cached_wearable_factory_binding = {};
-    g_hook_state.cached_wearable_factory_issue.clear();
+    if (!preserve_wearable)
+    {
+        g_hook_state.cached_wearable_factory_availability = RuntimeFeatureAvailability::Unknown;
+        g_hook_state.cached_wearable_factory_binding = {};
+        g_hook_state.cached_wearable_factory_issue.clear();
+    }
+
+    if (!preserve_keychain)
+    {
+        g_hook_state.cached_keychain_factory_availability = RuntimeFeatureAvailability::Unknown;
+        g_hook_state.cached_keychain_factory_binding = {};
+        g_hook_state.cached_keychain_factory_issue.clear();
+    }
 }
 
 void InvalidateCachedWearableFactoryResolutionForProviderChange() noexcept
@@ -10225,7 +11831,7 @@ std::wstring BuildResourceHandleQueryRuntimeText()
     std::size_t max_pairs = 0;
     for (const auto& target : g_hook_state.knife_model_path_swap_query_hooks)
     {
-        total_hits += target.redirect_count;
+        total_hits += target.valid_resource_hit_count;
         max_pairs = std::max(max_pairs, CountKnifeModelPathSwapQueryHookRedirectPairs(target));
     }
 
@@ -10318,6 +11924,89 @@ std::wstring BuildResourceHandleQueryRuntimeText()
         text += L"NONE";
     }
     return text;
+}
+
+std::uint64_t BuildKnifeRuntimeChainDiagnosticSignature(
+    std::uint64_t signature,
+    const nskinzcs2::runtime::KnifeRuntimeContext& context,
+    const nskinzcs2::runtime::KnifeApplyGateResult& gate) noexcept
+{
+    const auto mix =
+        [&](const std::uint64_t value) noexcept
+        {
+            signature ^= value + (signature << 6) + (signature >> 2);
+        };
+
+    mix(context.resource_query_bridge_ready ? 1ull : 0ull);
+    mix(context.resource_query_target_handle_ready ? 1ull : 0ull);
+    mix(context.resource_model_swap_ready ? 1ull : 0ull);
+    mix(context.resource_model_path_readback_changed ? 1ull : 0ull);
+    mix(static_cast<std::uint64_t>(std::max(0, context.resource_query_redirect_pairs)));
+    mix(static_cast<std::uint64_t>(std::max(0, context.resource_query_redirect_hits)));
+    mix(gate.allow_finish_writes ? 1ull : 0ull);
+    mix(gate.allow_model_writes ? 1ull : 0ull);
+    mix(gate.allow_animation_remap ? 1ull : 0ull);
+    mix(static_cast<std::uint64_t>(gate.resolved_mode));
+    mix(g_hook_state.knife_model_path_swap_bridge_publish_generation.load(std::memory_order_acquire));
+    return signature;
+}
+
+void LogKnifeRuntimeChainResourceSnapshotAfterBridgePushLocked(
+    const ResourceHandleQueryBinding& binding,
+    const KnifeModelPathSwapQueryHookTarget& hook_target) noexcept
+{
+    const auto& swap_state = g_hook_state.knife_model_path_swap_state;
+    const auto hook_pairs = static_cast<int>(CountKnifeModelPathSwapQueryHookRedirectPairs(hook_target));
+    if (!swap_state.enabled ||
+        swap_state.xuid == 0 ||
+        binding.interface_kind != ResourceHandleQueryInterfaceKind::ResourceSystem ||
+        hook_pairs <= 0)
+    {
+        return;
+    }
+
+    int world_entity_index = -1;
+    if (const auto player_it = g_hook_state.runtime_entities.players_by_xuid.find(swap_state.xuid);
+        player_it != g_hook_state.runtime_entities.players_by_xuid.end())
+    {
+        world_entity_index = player_it->second.active_weapon_entity_index;
+    }
+    const bool snapshot_target_handle_ready =
+        (swap_state.target_world_path != nullptr &&
+         swap_state.target_world_path[0] != '\0' &&
+         ((swap_state.resolved_target_world_handle_valid &&
+           swap_state.resolved_target_world_handle != 0) ||
+          binding.last_target_handle != 0)) ||
+        (swap_state.target_view_path != nullptr &&
+         swap_state.target_view_path[0] != '\0' &&
+         ((swap_state.resolved_target_view_handle_valid &&
+           swap_state.resolved_target_view_handle != 0) ||
+          binding.last_target_handle != 0));
+    const bool snapshot_resource_swap_ready =
+        hook_target.valid_resource_hit_count > 0 || snapshot_target_handle_ready;
+
+    std::wstringstream stream;
+    stream << L"Knife runtime chain resource snapshot for XUID " << swap_state.xuid
+        << L": world_entity=" << world_entity_index
+        << L", resource_bridge_ready="
+        << ((swap_state.handle_redirect_pair_count > 0 && hook_pairs > 0) ? 1 : 0)
+        << L", resource_target_handle_ready="
+        << (snapshot_target_handle_ready ? 1 : 0)
+        << L", resource_swap_ready="
+        << (snapshot_resource_swap_ready ? 1 : 0)
+        << L", resource_pairs=" << hook_pairs
+        << L", resource_hits=" << hook_target.valid_resource_hit_count
+        << L", resource_total_hits=" << hook_target.hit_count
+        << L", bridge_reason="
+        << ((swap_state.bridge_last_reason != nullptr && swap_state.bridge_last_reason[0] != L'\0')
+                ? swap_state.bridge_last_reason
+                : L"none")
+        << L", preferred=0x" << std::hex << std::uppercase
+        << binding.last_source_handle << L"->0x" << binding.last_target_handle
+        << std::dec << std::nouppercase
+        << L", publish_generation="
+        << g_hook_state.knife_model_path_swap_bridge_publish_generation.load(std::memory_order_acquire);
+    nskinzcs2::Logger::Info(stream.str());
 }
 
 std::wstring BuildKnifeModelAndFinishRuntimePathText()
@@ -10482,7 +12171,17 @@ std::wstring BuildKnifeModelPathSwapHookSummaryText()
             << L", slot=" << target.slot
             << L", pairs=" << CountKnifeModelPathSwapQueryHookRedirectPairs(target)
             << L", hits=" << target.hit_count
+            << L", valid_hits=" << target.valid_resource_hit_count
+            << L", path_hits=" << target.path_redirect_hit_count
+            << L", live_result_hits=" << target.live_result_redirect_hit_count
+            << L", calibrated_hits=" << target.calibrated_handle_hit_count
+            << L", learned_hits=" << target.learned_handle_hit_count
+            << L", bridge_handle_hits=" << target.bridge_handle_hit_count
             << L", redirects=" << target.redirect_count;
+        if (target.last_hit_kind != nullptr && target.last_hit_kind[0] != L'\0')
+        {
+            stream << L", last_hit_kind=" << target.last_hit_kind;
+        }
         if (target.last_match_bucket != nullptr && target.last_match_bucket[0] != '\0')
         {
             stream << L", bucket=" << NarrowToWide(std::string(target.last_match_bucket));
@@ -10490,6 +12189,14 @@ std::wstring BuildKnifeModelPathSwapHookSummaryText()
         if (target.last_redirect_path != nullptr && target.last_redirect_path[0] != '\0')
         {
             stream << L", last_out=" << NarrowToWide(std::string(target.last_redirect_path));
+        }
+        if (target.last_valid_hit_caller_return_address != 0)
+        {
+            stream << L", valid_caller="
+                << FormatModuleOwnerWithOffset(
+                       reinterpret_cast<void*>(target.last_valid_hit_caller_return_address))
+                << L", valid_arg4=0x" << std::hex << std::uppercase << target.last_valid_hit_arg4
+                << std::dec << std::nouppercase;
         }
         stream << L"}";
     }
@@ -10527,9 +12234,17 @@ std::wstring BuildKnifeCarrierDiscoveryRuntimeReasonText(
 bool HasObservedKnifeModelResourceOverrideHit(const KnifeModelResourceOverrideState& state) noexcept;
 void ClearKnifeModelPathSwapQueryHooks() noexcept;
 void ClearKnifeModelPathSwapState(const bool clear_hook = true) noexcept;
+const wchar_t* KnifePhase2TargetModeText(
+    nskinzcs2::runtime::KnifePhase2TargetMode mode) noexcept;
 
 std::wstring BuildKnifeModelOnlyRuntimeReasonText(const KnifeModelPathState& state)
 {
+    if (state.resource_only_render_active &&
+        state.no_exposed_non_synthetic_render_owner)
+    {
+        return L"single world consumer active; no separate first-person consumer observed";
+    }
+
     if (HasObservedKnifeModelResourceOverrideHit(g_hook_state.knife_model_resource_override))
     {
         if (!state.animation_owner_verified ||
@@ -10665,8 +12380,8 @@ void ClearKnifeModelWriteFailureStateCache()
 bool IsKnifeModelPathRenderRebindReady(const KnifeModelPathState& state) noexcept
 {
     return state.active &&
-        state.direct_render_rebind_attempted &&
-        state.direct_render_rebind_succeeded;
+        (state.direct_render_rebind_succeeded ||
+         state.resource_only_render_active);
 }
 
 bool IsKnifeModelPathRenderRebindReadyFor(
@@ -10765,11 +12480,86 @@ void ClearKnifeModelResourceOverrideHook() noexcept
 
 void ClearKnifeModelPathSwapState(const bool clear_hook) noexcept
 {
-    g_hook_state.knife_model_path_swap_state = {};
+    {
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        g_hook_state.knife_model_path_swap_state = {};
+        g_hook_state.published_knife_model_path_swap_bridge = {};
+        g_hook_state.knife_model_path_swap_bridge_publish_generation.store(
+            0,
+            std::memory_order_release);
+    }
     if (clear_hook)
     {
         ClearKnifeModelResourceOverrideHook();
     }
+}
+
+bool DoesKnifeModelPathSwapStateBelongToXuid(const std::uint64_t xuid) noexcept
+{
+    if (xuid == 0)
+    {
+        return false;
+    }
+
+    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+    return (g_hook_state.knife_model_path_swap_state.enabled &&
+            g_hook_state.knife_model_path_swap_state.xuid == xuid) ||
+        (g_hook_state.published_knife_model_path_swap_bridge.valid &&
+         g_hook_state.published_knife_model_path_swap_bridge.xuid == xuid);
+}
+
+bool IsKnifeModelPathSwapDemoSeekSafetyWindowActive() noexcept
+{
+    return g_hook_state.pending_runtime_reset_after_seek.load(std::memory_order_acquire) ||
+        g_hook_state.knife_animation_seek_cooldown_frames.load(std::memory_order_acquire) > 0;
+}
+
+bool HasConfiguredKnifeModelSwapRequest(const nskinzcs2::model::ConfigDocument& config) noexcept
+{
+    for (const auto& knife_profile : config.knife_profiles)
+    {
+        if (!knife_profile.enabled || knife_profile.xuid == 0)
+        {
+            continue;
+        }
+
+        const auto request = nskinzcs2::runtime::BuildKnifeAppearanceRequest(knife_profile);
+        if (request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish &&
+            request.model_definition != 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool ShouldRunKnifeModelPathSwapQueryRuntime() noexcept
+{
+    if (g_hook_state.app_state == nullptr)
+    {
+        return false;
+    }
+
+    return HasConfiguredKnifeModelSwapRequest(g_hook_state.app_state->SnapshotConfig());
+}
+
+bool ShouldRetainPublishedKnifeModelPathSwapBridgeLocked() noexcept
+{
+    const auto& swap_state = g_hook_state.knife_model_path_swap_state;
+    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+    return published_bridge.valid &&
+        published_bridge.publish_generation != 0 &&
+        published_bridge.xuid != 0 &&
+        published_bridge.target_definition_index != 0 &&
+        published_bridge.handle_redirect_pair_count > 0 &&
+        published_bridge.preferred_source_handle != 0 &&
+        published_bridge.preferred_target_handle != 0 &&
+        swap_state.enabled &&
+        swap_state.xuid != 0 &&
+        swap_state.target_definition_index != 0 &&
+        published_bridge.xuid == swap_state.xuid &&
+        published_bridge.target_definition_index == swap_state.target_definition_index;
 }
 
 void ClearKnifeModelPathState() noexcept
@@ -10778,7 +12568,6 @@ void ClearKnifeModelPathState() noexcept
     g_hook_state.pending_knife_rebuild_state = {};
     g_hook_state.pending_knife_post_refresh_verification = {};
     g_hook_state.knife_phase2_model_bind_interception = {};
-    ClearKnifeModelPathSwapState(true);
     ClearPendingKnifeFirstPersonReacquire();
 }
 
@@ -10877,6 +12666,108 @@ RuntimeFeatureAvailability SnapshotCachedWearableFactoryResolution(
     binding = g_hook_state.cached_wearable_factory_binding;
     issue = g_hook_state.cached_wearable_factory_issue;
     return g_hook_state.cached_wearable_factory_availability;
+}
+
+void StoreCachedKeychainFactoryResolution(
+    const RuntimeFeatureAvailability availability,
+    const WearableClientClassFactoryBinding& binding,
+    const std::wstring& issue)
+{
+    std::scoped_lock lock(g_hook_state.wearable_factory_cache_mutex);
+    g_hook_state.cached_keychain_factory_availability = availability;
+    g_hook_state.cached_keychain_factory_binding = binding;
+    g_hook_state.cached_keychain_factory_issue = issue;
+}
+
+bool StoreCachedKeychainFactoryResolutionIfCurrent(
+    const std::uint64_t expected_generation,
+    const RuntimeFeatureAvailability availability,
+    const WearableClientClassFactoryBinding& binding,
+    const std::wstring& issue) noexcept
+{
+    std::scoped_lock lock(g_hook_state.wearable_factory_cache_mutex);
+    if (g_hook_state.source2_client_provider_generation.load() != expected_generation)
+    {
+        return false;
+    }
+
+    g_hook_state.cached_keychain_factory_availability = availability;
+    g_hook_state.cached_keychain_factory_binding = binding;
+    g_hook_state.cached_keychain_factory_issue = issue;
+    return true;
+}
+
+RuntimeFeatureAvailability SnapshotCachedKeychainFactoryResolution(
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    std::scoped_lock lock(g_hook_state.wearable_factory_cache_mutex);
+    binding = g_hook_state.cached_keychain_factory_binding;
+    issue = g_hook_state.cached_keychain_factory_issue;
+    return g_hook_state.cached_keychain_factory_availability;
+}
+
+RuntimeFeatureAvailability SnapshotOrResolveCachedKeychainFactoryResolution(
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    auto availability = SnapshotCachedKeychainFactoryResolution(binding, issue);
+    if (availability != RuntimeFeatureAvailability::Unknown)
+    {
+        return availability;
+    }
+
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    if (client_module == nullptr)
+    {
+        issue = L"client.dll is unavailable while resolving the C_KeychainModule client class factory.";
+        return RuntimeFeatureAvailability::Unknown;
+    }
+
+    const auto providers = SnapshotSource2ClientProviders();
+    if (providers.callback_instance == nullptr && providers.interface_instance == nullptr)
+    {
+        issue = L"Source2Client provider pointers are unavailable while resolving the C_KeychainModule client class factory.";
+        return RuntimeFeatureAvailability::Unknown;
+    }
+
+    WearableClientClassFactoryBinding resolved_binding {};
+    std::wstring resolved_issue;
+    if (TryResolveKeychainClientClassFactory(
+            providers.interface_instance,
+            providers.callback_instance,
+            client_module,
+            resolved_binding,
+            resolved_issue))
+    {
+        if (!StoreCachedKeychainFactoryResolutionIfCurrent(
+                providers.generation,
+                RuntimeFeatureAvailability::Available,
+                resolved_binding,
+                {}))
+        {
+            binding = {};
+            issue = L"Source2Client provider generation changed while resolving the C_KeychainModule client class factory.";
+            return RuntimeFeatureAvailability::Unknown;
+        }
+        binding = std::move(resolved_binding);
+        issue.clear();
+        return RuntimeFeatureAvailability::Available;
+    }
+
+    if (!StoreCachedKeychainFactoryResolutionIfCurrent(
+            providers.generation,
+            RuntimeFeatureAvailability::Unavailable,
+            {},
+            resolved_issue))
+    {
+        binding = {};
+        issue = L"Source2Client provider generation changed while caching the C_KeychainModule factory failure.";
+        return RuntimeFeatureAvailability::Unknown;
+    }
+    binding = {};
+    issue = resolved_issue;
+    return RuntimeFeatureAvailability::Unavailable;
 }
 
 void ResolveWearableFactoryCacheIfNeeded(const nskinzcs2::model::ConfigDocument& config)
@@ -11219,6 +13110,8 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
     success = success && lookup("C_EconEntity", "m_flFallbackWear", offsets.econ_entity_fallback_wear);
     success = success && lookup("C_EconEntity", "m_nFallbackStatTrak", offsets.econ_entity_fallback_stat_trak);
     lookup("C_EconEntity", "m_bInitialized", offsets.econ_entity_initialized);
+    lookup("C_KeychainModule", "m_nKeychainDefID", offsets.weapon_keychain_def_id);
+    lookup("C_KeychainModule", "m_nKeychainSeed", offsets.weapon_keychain_seed);
     lookup("C_EconWearable", "m_nForceSkin", offsets.econ_wearable_force_skin);
     lookup("C_EconWearable", "m_bAlwaysAllow", offsets.econ_wearable_always_allow);
     lookup("C_EconEntity", "m_hViewmodelAttachment", offsets.econ_entity_viewmodel_attachment);
@@ -12381,10 +14274,20 @@ bool UsesTemporaryWorldWeaponRefreshModel(const nskinzcs2::model::CosmeticProfil
 }
 
 bool ShouldPromoteWeaponRefreshAttachmentToRuntimeOwned(
-    const nskinzcs2::model::CosmeticProfile& profile) noexcept
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr) noexcept
 {
-    return IsKnifeProfile(profile) &&
-        nskinzcs2::runtime::ShouldInstallRuntimeOwnedAttributeListForProfile(profile);
+    return (keychain_profile != nullptr && UsesTemporaryWorldWeaponRefreshModel(profile)) ||
+        (IsKnifeProfile(profile) &&
+            nskinzcs2::runtime::ShouldInstallRuntimeOwnedAttributeListForProfile(profile));
+}
+
+bool ShouldRestorePromotedWeaponRefreshAttachmentOnAbandon(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr) noexcept
+{
+    static_cast<void>(keychain_profile);
+    return IsKnifeProfile(profile);
 }
 
 bool StandardWeaponNeedsItemIdHighResetImpl(
@@ -12453,10 +14356,12 @@ std::uint64_t BuildProfileApplySignature(
     const nskinzcs2::model::CosmeticProfile& profile,
     const std::uint64_t xuid,
     const int current_definition_index,
-    const std::uint64_t target_tag);
+    const std::uint64_t target_tag,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr);
 
 std::vector<std::pair<std::uint16_t, float>> BuildWeaponRefreshAttributesImpl(
-    const nskinzcs2::model::CosmeticProfile& profile);
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr);
 
 bool TryReadNetworkVectorView(const void* address, NetworkVectorView& out);
 bool TryReadAttributeValue(
@@ -12475,8 +14380,218 @@ void ReleaseRuntimeOwnedAttributeListBindings(
 void RestoreRuntimeOwnedAttributeListBinding(
     RuntimeOwnedAttributeListBinding binding,
     AttributeBindingReleaseMode mode = AttributeBindingReleaseMode::RestoreOriginal);
+bool HasRuntimeOwnedAttributeListBinding(void* item_view);
+void ReleaseRuntimeOwnedAttributeListBindingForItemView(
+    void* item_view,
+    AttributeBindingReleaseMode mode);
+void RememberRuntimeCreatedKeychainModuleEntityIndex(const int entity_index);
+void ReleaseRuntimeCreatedKeychainModuleEntities(
+    const ClientSchemaOffsets& offsets,
+    const wchar_t* reason = nullptr);
 
 void RestoreWeaponSkinRefreshBinding(WeaponSkinRefreshBinding& binding);
+
+using RuntimeCleanupStepFn = void (*)() noexcept;
+
+LONG CaptureRuntimeCleanupStepException(
+    EXCEPTION_POINTERS* exception_info,
+    DWORD& exception_code,
+    void*& exception_address) noexcept
+{
+    if (exception_info != nullptr && exception_info->ExceptionRecord != nullptr)
+    {
+        exception_code = exception_info->ExceptionRecord->ExceptionCode;
+        exception_address = exception_info->ExceptionRecord->ExceptionAddress;
+    }
+    else
+    {
+        exception_code = 0xFFFFFFFFu;
+        exception_address = nullptr;
+    }
+
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+bool TryRunRuntimeCleanupStepSeh(
+    const RuntimeCleanupStepFn step,
+    DWORD& exception_code,
+    void*& exception_address) noexcept
+{
+    exception_code = 0;
+    exception_address = nullptr;
+
+    __try
+    {
+        step();
+        return true;
+    }
+    __except (CaptureRuntimeCleanupStepException(
+        GetExceptionInformation(),
+        exception_code,
+        exception_address))
+    {
+        return false;
+    }
+}
+
+void LogRuntimeCleanupStepBoundary(
+    const wchar_t* phase,
+    const wchar_t* step_name,
+    const wchar_t* boundary)
+{
+    std::wstringstream stream;
+    stream << phase << L": " << boundary << L" [" << step_name << L"]";
+    nskinzcs2::Logger::Info(stream.str());
+}
+
+void LogRuntimeCleanupStepCppException(
+    const wchar_t* phase,
+    const wchar_t* step_name,
+    const char* what)
+{
+    std::wstringstream stream;
+    stream << phase << L": C++ exception while running [" << step_name << L"]";
+    if (what != nullptr && what[0] != '\0')
+    {
+        stream << L" (" << NarrowToWide(what) << L")";
+    }
+    nskinzcs2::Logger::Error(stream.str());
+}
+
+void LogRuntimeCleanupStepSehException(
+    const wchar_t* phase,
+    const wchar_t* step_name,
+    const DWORD exception_code,
+    void* const exception_address)
+{
+    std::wstringstream stream;
+    stream << phase << L": SEH 0x" << std::hex << std::uppercase << exception_code
+           << L" while running [" << step_name << L"]";
+    if (exception_address != nullptr)
+    {
+        stream << L" at " << exception_address;
+    }
+    nskinzcs2::Logger::Error(stream.str());
+}
+
+void RemoveFrameStagePatchCleanupStep() noexcept
+{
+    g_hook_state.frame_stage_patch.Remove();
+}
+
+void RemoveConnectPatchCleanupStep() noexcept
+{
+    g_hook_state.connect_patch.Remove();
+}
+
+void RemoveConsolePlayerCaptureCleanupStep() noexcept
+{
+    RemoveConsolePlayerCapture();
+}
+
+void ClearKnifeModelPathSwapQueryHooksCleanupStep() noexcept
+{
+    ClearKnifeModelPathSwapQueryHooks();
+}
+
+void RemoveGlobalResourceSwapperCleanupStep() noexcept
+{
+    nskinzcs2::RemoveGlobalResourceSwapper();
+}
+
+void ReleaseRuntimeOwnedAttributeListBindingsCleanupStep() noexcept
+{
+    ReleaseRuntimeOwnedAttributeListBindings(AttributeBindingReleaseMode::AbandonInstalled);
+}
+
+void RestoreWeaponSkinRefreshBindingCleanupStep() noexcept
+{
+    RestoreWeaponSkinRefreshBinding(g_hook_state.weapon_skin_refresh);
+}
+
+void RunRuntimeCleanupStep(
+    const wchar_t* phase,
+    const wchar_t* step_name,
+    const RuntimeCleanupStepFn step) noexcept
+{
+    LogRuntimeCleanupStepBoundary(phase, step_name, L"begin");
+
+    try
+    {
+        DWORD exception_code = 0;
+        void* exception_address = nullptr;
+        if (!TryRunRuntimeCleanupStepSeh(step, exception_code, exception_address))
+        {
+            LogRuntimeCleanupStepSehException(phase, step_name, exception_code, exception_address);
+            return;
+        }
+    }
+    catch (const std::exception& exception)
+    {
+        LogRuntimeCleanupStepCppException(phase, step_name, exception.what());
+        return;
+    }
+    catch (...)
+    {
+        LogRuntimeCleanupStepCppException(phase, step_name, nullptr);
+        return;
+    }
+
+    LogRuntimeCleanupStepBoundary(phase, step_name, L"end");
+}
+
+void RunRuntimeCleanupSequence(
+    const wchar_t* phase,
+    const bool clear_runtime_interfaces,
+    const bool clear_manual_refresh) noexcept
+{
+    nskinzcs2::Logger::Info(std::wstring(phase) + L": started.");
+    RunRuntimeCleanupStep(phase, L"RemoveConsolePlayerCapture", RemoveConsolePlayerCaptureCleanupStep);
+    RunRuntimeCleanupStep(phase, L"frame_stage_patch.Remove", RemoveFrameStagePatchCleanupStep);
+    RunRuntimeCleanupStep(phase, L"connect_patch.Remove", RemoveConnectPatchCleanupStep);
+    RunRuntimeCleanupStep(
+        phase,
+        L"ClearKnifeModelPathSwapQueryHooks",
+        ClearKnifeModelPathSwapQueryHooksCleanupStep);
+    RunRuntimeCleanupStep(
+        phase,
+        L"RemoveGlobalResourceSwapper",
+        RemoveGlobalResourceSwapperCleanupStep);
+    RunRuntimeCleanupStep(
+        phase,
+        L"ReleaseRuntimeOwnedAttributeListBindings",
+        ReleaseRuntimeOwnedAttributeListBindingsCleanupStep);
+    RunRuntimeCleanupStep(
+        phase,
+        L"RestoreWeaponSkinRefreshBinding",
+        RestoreWeaponSkinRefreshBindingCleanupStep);
+
+    g_hook_state.frame_stage_hook_installed.store(false);
+    g_hook_state.connect_hook_installed.store(false);
+    g_hook_state.runtime_faulted.store(false);
+    if (clear_manual_refresh)
+    {
+        g_hook_state.manual_refresh_requested.store(false);
+    }
+    g_hook_state.weapon_skin_refresh_ready.store(false);
+    g_hook_state.weapon_skin_refresh_state.store(nskinzcs2::runtime::WeaponSkinRefreshState::Disabled);
+    g_hook_state.knife_refresh_helper_policy.store(kDefaultKnifeRefreshHelperPolicy);
+    g_hook_state.knife_refresh_helper_epoch_generation.store(0);
+    ClearKnifeRefreshHelperEpoch();
+    g_hook_state.weapon_skin_refresh_attempted_since_rearm.store(false);
+    g_hook_state.weapon_skin_refresh_unavailable_logged.store(false);
+    g_hook_state.weapon_skin_refresh_fault_logged.store(false);
+    g_hook_state.weapon_skin_refresh_rearm_logged.store(false);
+    g_hook_state.resource_handle_query_earliest_safe_tick.store(0);
+    if (clear_runtime_interfaces)
+    {
+        g_hook_state.engine_cvar = nullptr;
+        g_hook_state.resource_system_interface = nullptr;
+        g_hook_state.resource_handle_utils_interface = nullptr;
+        SyncResourceHandleQueryBindings();
+    }
+    nskinzcs2::Logger::Info(std::wstring(phase) + L": finished.");
+}
 
 bool TryResolveWeaponSkinRefreshBinding(
     HMODULE client_module,
@@ -12610,7 +14725,8 @@ std::uint64_t BuildProfileApplySignature(
     const nskinzcs2::model::CosmeticProfile& profile,
     const std::uint64_t xuid,
     const int current_definition_index,
-    const std::uint64_t target_tag)
+    const std::uint64_t target_tag,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     std::uint64_t signature = 0xD6E8FEB86659FD93ull;
     HashCombine(signature, target_tag);
@@ -12631,6 +14747,13 @@ std::uint64_t BuildProfileApplySignature(
         HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.wear)));
         HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.scale)));
         HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.rotation)));
+    }
+
+    if (keychain_profile != nullptr)
+    {
+        HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->xuid));
+        HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->base_item));
+        HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->keychain_kit));
     }
 
     return signature;
@@ -12704,7 +14827,7 @@ constexpr int kWatchedKnifeFrameStageTraceCallbackBudget = 0;
 constexpr bool kEnableAutomaticWatchedKnifeTracingOnUpdate = false;
 constexpr bool kKnifeModelResourceOverrideEnableGlobalDetours = false;
 constexpr std::size_t kKnifeModelResourceOverrideMaxActiveProbeHooks = 1;
-constexpr bool kKnifeModelResourceOverrideEnableExactPostCallApply = false;
+constexpr bool kKnifeModelResourceOverrideEnableExactPostCallApply = true;
 constexpr bool kKnifeModelResourceOverrideEnableSyntheticProbeHooks = false;
 bool TryReadEntityModelNameString(
     void* entity,
@@ -13987,6 +16110,18 @@ ObserverTargetResolution ResolveObserverFirstWatchedTarget(
     best_resolved.score = -1;
     bool saw_observer_context = false;
 
+    const auto entity_looks_like_observer_pawn =
+        [](void* entity) noexcept
+        {
+            if (entity == nullptr)
+            {
+                return false;
+            }
+
+            const auto rtti = BuildRuntimeEntityRttiDescriptor(entity);
+            return rtti.find(L"ObserverPawn") != std::wstring::npos;
+        };
+
     auto score_candidate =
         [](const ObserverTargetResolution& candidate) noexcept
         {
@@ -14311,6 +16446,12 @@ ObserverTargetResolution ResolveObserverFirstWatchedTarget(
                         candidate.observer_pawn_entity);
                 }
 
+                if (candidate.observer_pawn_entity != nullptr &&
+                    !entity_looks_like_observer_pawn(candidate.observer_pawn_entity))
+                {
+                    continue;
+                }
+
                 consider_candidate(std::move(candidate));
             }
         }
@@ -14328,6 +16469,11 @@ ObserverTargetResolution ResolveObserverFirstWatchedTarget(
                 candidate.observer_pawn_entity = entity;
                 candidate.observer_services = observer_services;
                 candidate.observer_services_present = true;
+
+                if (!entity_looks_like_observer_pawn(entity))
+                {
+                    continue;
+                }
 
                 if (offsets.pawn_controller != 0)
                 {
@@ -17582,6 +19728,111 @@ nskinzcs2::runtime::KnifeRuntimeContext ResolveKnifeRuntimeContext(
             return true;
         };
 
+    auto log_providee_candidate_diagnostic_once =
+        [&](const wchar_t* stage)
+        {
+            const auto* resolution_source = context.viewmodel_resolution_source;
+            if (!context.providee_carrier_valid ||
+                context.viewmodel_carrier_valid ||
+                resolution_source == nullptr ||
+                std::wcscmp(resolution_source, L"providee_render_child") != 0 ||
+                !IsResolvedRuntimeEntityIndex(context.providee_entity_index) ||
+                IsSyntheticRuntimeEntityIndex(context.providee_entity_index))
+            {
+                return;
+            }
+
+            const auto signature =
+                xuid ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         world_weapon_entity_index >= 0 ? world_weapon_entity_index : 0))
+                 << 32) ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         context.providee_entity_index >= 0 ? context.providee_entity_index : 0))
+                 << 8) ^
+                0x5052564449414731ull;
+
+            void* providee_entity = nullptr;
+            if (static_cast<std::size_t>(context.providee_entity_index) < entity_cache.size())
+            {
+                providee_entity = entity_cache[static_cast<std::size_t>(context.providee_entity_index)];
+            }
+            if (providee_entity == nullptr &&
+                (!TryGetEntityFromIndex(entity_list, context.providee_entity_index, providee_entity) ||
+                 providee_entity == nullptr))
+            {
+                std::wstringstream stream;
+                stream << L"Knife providee candidate diagnostic: stage="
+                    << (stage != nullptr ? stage : L"runtime_context")
+                    << L", world_entity=" << world_weapon_entity_index
+                    << L", providee_entity=" << context.providee_entity_index
+                    << L", entity_ptr=0x0"
+                    << L", entity_resolved=0"
+                    << L", resolution_source=" << resolution_source;
+                LogProfileDiagnosticOnce(signature, stream.str());
+                return;
+            }
+
+            auto* providee_item_view = ResolveWeaponItemView(providee_entity, offsets);
+            int providee_definition_index = 0;
+            if (providee_item_view != nullptr)
+            {
+                TryReadItemDefinitionIndex(providee_item_view, offsets, providee_definition_index);
+            }
+            const auto providee_model_kind =
+                ClassifyKnifeFirstPersonRenderableModel(providee_entity, offsets);
+            const auto* providee_model_kind_text =
+                providee_model_kind == KnifeFirstPersonRenderableModelKind::WeaponLike
+                    ? L"weapon"
+                    : providee_model_kind == KnifeFirstPersonRenderableModelKind::CharacterLike
+                        ? L"character"
+                        : L"unknown";
+            int safe_definition_index = 0;
+            const auto parent_definition_index =
+                current_definition_index != 0
+                    ? current_definition_index
+                    : (context.providee_definition_index != 0
+                           ? context.providee_definition_index
+                           : context.live_definition_index);
+            const auto safe_linked =
+                providee_item_view != nullptr &&
+                IsSafeLinkedWeaponItemView(
+                    providee_item_view,
+                    offsets,
+                    xuid,
+                    parent_definition_index,
+                    known_definition_indices,
+                    knife_definition_indices,
+                    glove_definition_indices,
+                    safe_definition_index);
+
+            std::string model_name;
+            TryReadEntityModelNameString(providee_entity, offsets, model_name);
+
+            std::wstringstream stream;
+            stream << L"Knife providee candidate diagnostic: stage="
+                << (stage != nullptr ? stage : L"runtime_context")
+                << L", world_entity=" << world_weapon_entity_index
+                << L", providee_entity=" << context.providee_entity_index
+                << L", entity_ptr=" << FormatPointer(providee_entity)
+                << L", item_view=" << FormatPointer(providee_item_view)
+                << L", definition=" << providee_definition_index
+                << L", model_kind=" << providee_model_kind_text
+                << L", safe_linked=" << (safe_linked ? 1 : 0)
+                << L", safe_definition=" << safe_definition_index
+                << L", current_definition=" << current_definition_index
+                << L", providee_definition=" << context.providee_definition_index
+                << L", live_definition=" << context.live_definition_index
+                << L", source=" << resolution_source;
+            if (!model_name.empty())
+            {
+                stream << L", model_name=" << NarrowToWide(model_name);
+            }
+            LogProfileDiagnosticOnce(signature, stream.str());
+        };
+
     auto try_promote_real_viewmodel_carrier =
         [&](const int entity_index,
             const int fallback_definition_index,
@@ -17766,6 +20017,78 @@ nskinzcs2::runtime::KnifeRuntimeContext ResolveKnifeRuntimeContext(
         offsets,
         world_weapon_entity_index,
         current_definition_index);
+    if (effective_owner_state.providee_valid &&
+        ShouldLogWatchedKnifeAnimationTrace(xuid))
+    {
+        void* effective_providee_entity = nullptr;
+        if (static_cast<std::size_t>(effective_owner_state.providee_entity_index) < entity_cache.size())
+        {
+            effective_providee_entity =
+                entity_cache[static_cast<std::size_t>(effective_owner_state.providee_entity_index)];
+        }
+        if (effective_providee_entity == nullptr)
+        {
+            TryGetEntityFromIndex(
+                entity_list,
+                effective_owner_state.providee_entity_index,
+                effective_providee_entity);
+        }
+        if (effective_providee_entity != nullptr &&
+            ClassifyKnifeFirstPersonRenderableModel(effective_providee_entity, offsets) ==
+                KnifeFirstPersonRenderableModelKind::CharacterLike)
+        {
+            const auto signature =
+                xuid ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         world_weapon_entity_index >= 0 ? world_weapon_entity_index : 0))
+                 << 32) ^
+                static_cast<std::uint64_t>(
+                    static_cast<std::uint32_t>(
+                        effective_owner_state.providee_entity_index >= 0
+                            ? effective_owner_state.providee_entity_index
+                            : 0)) ^
+                0x4546465052563031ull;
+            auto* effective_item_view = ResolveWeaponItemView(effective_providee_entity, offsets);
+            std::uint32_t old_providee_handle = kInvalidEntityHandle;
+            const auto old_providee_field_present =
+                offsets.econ_entity_old_providee != 0 &&
+                world_weapon_entity != nullptr &&
+                SafeReadField(world_weapon_entity, offsets.econ_entity_old_providee, old_providee_handle);
+            std::uint32_t providee_viewmodel_handle = kInvalidEntityHandle;
+            const auto providee_viewmodel_field_present =
+                offsets.econ_entity_viewmodel_attachment != 0 &&
+                SafeReadField(
+                    effective_providee_entity,
+                    offsets.econ_entity_viewmodel_attachment,
+                    providee_viewmodel_handle);
+            std::string model_name;
+            TryReadEntityModelNameString(effective_providee_entity, offsets, model_name);
+            std::wstringstream stream;
+            stream << L"Knife effective providee retention: world_entity=" << world_weapon_entity_index
+                << L", context_providee_entity=" << context.providee_entity_index
+                << L", effective_providee_entity=" << effective_owner_state.providee_entity_index
+                << L", same_as_context="
+                << (effective_owner_state.providee_entity_index == context.providee_entity_index ? 1 : 0)
+                << L", from_player_binding="
+                << (effective_owner_state.providee_from_player_binding ? 1 : 0)
+                << L", definition=" << effective_owner_state.providee_definition_index
+                << L", item_view=" << FormatPointer(effective_item_view)
+                << L", old_providee_field_present=" << (old_providee_field_present ? 1 : 0)
+                << L", old_providee_handle=0x" << std::hex << std::uppercase << old_providee_handle
+                << L", providee_viewmodel_field_present=" << (providee_viewmodel_field_present ? 1 : 0)
+                << L", providee_viewmodel_handle=0x" << providee_viewmodel_handle
+                << std::dec << std::nouppercase
+                << L", current_viewmodel_entity=" << context.viewmodel_entity_index
+                << L", current_viewmodel_valid=" << (context.viewmodel_carrier_valid ? 1 : 0)
+                << L", reason=character_like_item_view_accepted";
+            if (!model_name.empty())
+            {
+                stream << L", model_name=" << NarrowToWide(model_name);
+            }
+            LogProfileDiagnosticOnce(signature, stream.str());
+        }
+    }
     if (!context.providee_carrier_valid && effective_owner_state.providee_valid)
     {
         remember_providee_diagnostic(
@@ -17833,6 +20156,8 @@ nskinzcs2::runtime::KnifeRuntimeContext ResolveKnifeRuntimeContext(
         }
     }
 
+    log_providee_candidate_diagnostic_once(L"post_owner_resolution");
+
     if ((observer_context_matches_xuid || bridge_context_matches_xuid) &&
         (context.real_viewmodel_entity_index >= 0 ||
          context.real_viewmodel_handle_valid ||
@@ -17874,6 +20199,7 @@ nskinzcs2::runtime::KnifeRuntimeContext ResolveKnifeRuntimeContext(
             context.direct_first_person_render_valid = resolution.clue_found;
             context.direct_first_person_render_only = resolution.clue_render_only;
             context.direct_first_person_render_entity_index = resolution.clue_entity_index;
+            context.direct_first_person_render_entity = resolution.clue_entity;
             context.direct_first_person_render_definition_index =
                 resolution.clue_definition_index != 0
                     ? resolution.clue_definition_index
@@ -17925,6 +20251,8 @@ nskinzcs2::runtime::KnifeRuntimeContext ResolveKnifeRuntimeContext(
             }
         }
     }
+
+    log_providee_candidate_diagnostic_once(L"post_direct_render_resolution");
 
     if (context.viewmodel_carrier_valid)
     {
@@ -18017,6 +20345,47 @@ nskinzcs2::runtime::KnifeRuntimeContext ResolveKnifeRuntimeContext(
         context.world_carrier_valid &&
         context.world_item_view_valid &&
         has_persistent_first_person_binding;
+    if (!context.knife_sync_ready &&
+        context.providee_carrier_valid &&
+        !context.viewmodel_carrier_valid &&
+        context.viewmodel_resolution_source != nullptr &&
+        std::wcscmp(context.viewmodel_resolution_source, L"providee_render_child") == 0)
+    {
+        const auto signature =
+            xuid ^
+            (static_cast<std::uint64_t>(
+                 static_cast<std::uint32_t>(
+                     world_weapon_entity_index >= 0 ? world_weapon_entity_index : 0))
+             << 32) ^
+            (static_cast<std::uint64_t>(
+                 static_cast<std::uint32_t>(
+                     context.providee_entity_index >= 0 ? context.providee_entity_index : 0))
+             << 8) ^
+            0x53594E4347415445ull;
+        std::wstringstream stream;
+        stream << L"Knife sync gate diagnostic: world_entity=" << world_weapon_entity_index
+            << L", providee_entity=" << context.providee_entity_index
+            << L", resolution_source=" << context.viewmodel_resolution_source
+            << L", demo_playing=" << (context.demo_playing ? 1 : 0)
+            << L", schema_ready=" << (context.schema_ready ? 1 : 0)
+            << L", entity_system_ready=" << (context.entity_system_ready ? 1 : 0)
+            << L", watched_target=" << (context.watched_target ? 1 : 0)
+            << L", watched_active_knife=" << (authoritative_watched_active_knife ? 1 : 0)
+            << L", world_carrier_valid=" << (context.world_carrier_valid ? 1 : 0)
+            << L", world_item_view_valid=" << (context.world_item_view_valid ? 1 : 0)
+            << L", first_person_source_valid=" << (context.first_person_source_valid ? 1 : 0)
+            << L", viewmodel_carrier_valid=" << (context.viewmodel_carrier_valid ? 1 : 0)
+            << L", direct_render_valid=" << (context.direct_first_person_render_valid ? 1 : 0)
+            << L", direct_render_owner_valid="
+            << (context.direct_first_person_animation_owner_valid ? 1 : 0)
+            << L", owner_kind="
+            << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(context.first_person_owner_kind)
+            << L", absence_result="
+            << KnifeViewmodelAbsenceAuditResultTextForTrace(context.viewmodel_absence_audit_result)
+            << L", has_persistent_first_person_binding="
+            << (has_persistent_first_person_binding ? 1 : 0);
+        LogProfileDiagnosticOnce(signature, stream.str());
+    }
     LogWatchedKnifeViewmodelResolutionTrace(L"runtime_context_resolved", xuid, context);
     return context;
 }
@@ -18037,6 +20406,265 @@ bool TryResolveTargetXuidForWeaponEntity(
     const std::unordered_map<int, std::uint64_t>& pawn_xuids,
     const std::unordered_map<std::uint32_t, std::uint64_t>& target_xuids_by_account,
     std::uint64_t& xuid);
+bool TryReadEntityModelHandle(
+    void* entity,
+    const ClientSchemaOffsets& offsets,
+    std::uint64_t& model_handle);
+bool TryReadEntityModelNameToken(
+    void* entity,
+    const ClientSchemaOffsets& offsets,
+    std::uint64_t& model_name_token);
+
+std::uint64_t BuildDemoKeychainWeaponSignature(
+    const std::uint64_t owner_xuid,
+    const int base_item,
+    const int weapon_entity_index)
+{
+    std::uint64_t signature = 0x4B43485944454D4Full;
+    HashCombine(signature, owner_xuid);
+    HashCombine(signature, static_cast<std::uint64_t>(static_cast<std::uint32_t>(base_item)));
+    HashCombine(signature, static_cast<std::uint64_t>(static_cast<std::uint32_t>(weapon_entity_index)));
+    return signature;
+}
+
+std::uint64_t BuildDemoKeychainProfileSignature(
+    const nskinzcs2::model::KeychainProfile* keychain_profile,
+    const std::uint64_t owner_xuid,
+    const int base_item)
+{
+    std::uint64_t signature = 0x4B4348595052464Cull;
+    HashCombine(signature, owner_xuid);
+    HashCombine(signature, static_cast<std::uint64_t>(static_cast<std::uint32_t>(base_item)));
+    if (keychain_profile != nullptr)
+    {
+        HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->xuid));
+        HashCombine(signature, static_cast<std::uint64_t>(static_cast<std::uint32_t>(keychain_profile->base_item)));
+        HashCombine(signature, static_cast<std::uint64_t>(static_cast<std::uint32_t>(keychain_profile->keychain_kit)));
+        HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string> {}(keychain_profile->name)));
+    }
+    return signature;
+}
+
+bool IsRuntimeCreatedKeychainModuleEntityIndexTracked(const int entity_index)
+{
+    if (entity_index < 0)
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(g_hook_state.runtime_keychain_module_mutex);
+    return g_hook_state.runtime_created_keychain_module_entity_indices.find(entity_index) !=
+        g_hook_state.runtime_created_keychain_module_entity_indices.end();
+}
+
+void ResetDemoKeychainControllerState(const bool preserve_session_create_disabled = true)
+{
+    std::lock_guard<std::mutex> lock(g_hook_state.demo_keychain_controller_mutex);
+    const auto session_create_disabled =
+        preserve_session_create_disabled
+            ? g_hook_state.demo_keychain_controller.session_create_disabled
+            : false;
+    const auto last_issue =
+        session_create_disabled
+            ? g_hook_state.demo_keychain_controller.last_issue
+            : std::wstring {};
+
+    g_hook_state.demo_keychain_controller = {};
+    g_hook_state.demo_keychain_controller.session_create_disabled = session_create_disabled;
+    if (session_create_disabled)
+    {
+        g_hook_state.demo_keychain_controller.last_issue = last_issue;
+    }
+}
+
+DemoKeychainControllerState SnapshotDemoKeychainControllerState()
+{
+    std::lock_guard<std::mutex> lock(g_hook_state.demo_keychain_controller_mutex);
+    return g_hook_state.demo_keychain_controller;
+}
+
+void StoreDemoKeychainControllerState(DemoKeychainControllerState state)
+{
+    std::lock_guard<std::mutex> lock(g_hook_state.demo_keychain_controller_mutex);
+    g_hook_state.demo_keychain_controller = std::move(state);
+}
+
+bool TryReadLiveKeychainModuleState(
+    void* keychain_module_entity,
+    const ClientSchemaOffsets& offsets,
+    std::uint32_t& keychain_def_id,
+    std::uint32_t& keychain_seed)
+{
+    keychain_def_id = 0;
+    keychain_seed = 0;
+
+    if (keychain_module_entity == nullptr)
+    {
+        return false;
+    }
+
+    bool success = true;
+    if (offsets.weapon_keychain_def_id != 0)
+    {
+        success =
+            SafeReadField(keychain_module_entity, offsets.weapon_keychain_def_id, keychain_def_id) &&
+            success;
+    }
+
+    if (offsets.weapon_keychain_seed != 0)
+    {
+        success =
+            SafeReadField(keychain_module_entity, offsets.weapon_keychain_seed, keychain_seed) &&
+            success;
+    }
+
+    return success;
+}
+
+bool IsDemoWeaponModelReadyForKeychainMutation(
+    void* weapon_entity,
+    const ClientSchemaOffsets& offsets,
+    std::wstring& issue)
+{
+    issue.clear();
+
+    if (weapon_entity == nullptr)
+    {
+        issue = L"Current demo weapon entity is null.";
+        return false;
+    }
+
+    if (offsets.base_entity_game_scene_node == 0 ||
+        offsets.skeleton_instance_model_state == 0)
+    {
+        issue = L"Client schema does not expose the weapon scene-node/model-state path yet.";
+        return false;
+    }
+
+    void* scene_node = nullptr;
+    if (!SafeReadField(weapon_entity, offsets.base_entity_game_scene_node, scene_node) ||
+        scene_node == nullptr)
+    {
+        issue = L"Current demo weapon scene node is unavailable; the entity may still be dormant or rebuilding.";
+        return false;
+    }
+
+    std::uint64_t model_handle = 0;
+    const auto has_model_handle =
+        TryReadEntityModelHandle(weapon_entity, offsets, model_handle) &&
+        model_handle != 0;
+
+    std::uint64_t model_name_token = 0;
+    const auto has_model_name_token =
+        TryReadEntityModelNameToken(weapon_entity, offsets, model_name_token) &&
+        model_name_token != 0;
+
+    if (!has_model_handle && !has_model_name_token)
+    {
+        issue =
+            L"Current demo weapon model state is not ready yet; skipping keychain mutation until the model is live.";
+        return false;
+    }
+
+    return true;
+}
+
+bool IsDemoKeychainModuleReadyForMutation(
+    void* keychain_module_entity,
+    const ClientSchemaOffsets& offsets,
+    std::wstring& issue)
+{
+    issue.clear();
+
+    if (keychain_module_entity == nullptr)
+    {
+        issue = L"Live demo keychain module is null.";
+        return false;
+    }
+
+    std::uintptr_t model_state_address = 0;
+    if (!TryResolveEntityModelStateAddress(keychain_module_entity, offsets, model_state_address) ||
+        model_state_address == 0)
+    {
+        issue = L"Live demo keychain module model state is unavailable; waiting for the entity to settle.";
+        return false;
+    }
+
+    std::uint64_t model_handle = 0;
+    const auto has_model_handle =
+        TryReadEntityModelHandle(keychain_module_entity, offsets, model_handle) &&
+        model_handle != 0;
+
+    std::uint64_t model_name_token = 0;
+    const auto has_model_name_token =
+        TryReadEntityModelNameToken(keychain_module_entity, offsets, model_name_token) &&
+        model_name_token != 0;
+
+    if (!has_model_handle && !has_model_name_token)
+    {
+        issue =
+            L"Live demo keychain module model state is not ready yet; skipping mutation until the render model is live.";
+        return false;
+    }
+
+    return true;
+}
+
+void ForgetRuntimeCreatedKeychainModuleEntityIndex(const int entity_index)
+{
+    if (entity_index < 0)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_hook_state.runtime_keychain_module_mutex);
+    g_hook_state.runtime_created_keychain_module_entity_indices.erase(entity_index);
+}
+
+void ReleaseSingleRuntimeCreatedKeychainModuleEntity(
+    void* entity_list,
+    const int entity_index,
+    const ClientSchemaOffsets& offsets,
+    const wchar_t* reason = nullptr)
+{
+    if (entity_index < 0)
+    {
+        return;
+    }
+
+    void* entity = nullptr;
+    if (entity_list != nullptr &&
+        TryGetEntityFromIndex(entity_list, entity_index, entity) &&
+        entity != nullptr)
+    {
+        if (offsets.base_owner_entity != 0)
+        {
+            SafeWriteField(entity, offsets.base_owner_entity, kInvalidEntityHandle);
+        }
+        if (offsets.base_old_move_parent != 0)
+        {
+            SafeWriteField(entity, offsets.base_old_move_parent, kInvalidEntityHandle);
+        }
+        if (offsets.weapon_keychain_def_id != 0)
+        {
+            SafeWriteField(entity, offsets.weapon_keychain_def_id, static_cast<std::uint32_t>(0));
+        }
+        if (offsets.weapon_keychain_seed != 0)
+        {
+            SafeWriteField(entity, offsets.weapon_keychain_seed, static_cast<std::uint32_t>(0));
+        }
+    }
+
+    ForgetRuntimeCreatedKeychainModuleEntityIndex(entity_index);
+
+    std::wstringstream stream;
+    stream << L"Released tracked demo keychain module entity " << entity_index;
+    if (reason != nullptr && *reason != L'\0')
+    {
+        stream << L": reason=" << reason;
+    }
+    nskinzcs2::Logger::Info(stream.str());
+}
 
 AttributeBindingReleaseMode ResolveKnifeModelPathReleaseModeForReset(
     const std::wstring& reason,
@@ -18070,6 +20698,8 @@ void ResetAppliedStateCaches(
 {
     g_hook_state.pending_runtime_reset_after_seek.store(false);
     g_hook_state.last_applied_demo_tick = -1;
+    ResetDemoKeychainControllerState();
+    ReleaseRuntimeCreatedKeychainModuleEntities(g_hook_state.schema_offsets, L"reset");
     RestoreTrackedWeaponAppearanceRestorePoints(
         g_hook_state.schema_offsets,
         attribute_binding_release_mode,
@@ -18090,6 +20720,7 @@ void ResetAppliedStateCaches(
         g_hook_state.schema_offsets,
         L"reset",
         knife_model_path_release_mode);
+    ClearKnifeModelPathSwapState(true);
     ClearCachedKnifeFirstPersonBinding();
     UpdateKnifeRuntimeStatusText({}, {});
 }
@@ -18106,6 +20737,10 @@ void RestoreAppliedCosmeticStateForOriginalFrameStage(
     const wchar_t* reason = nullptr)
 {
     g_hook_state.last_applied_demo_tick = -1;
+    ResetDemoKeychainControllerState();
+    ReleaseRuntimeCreatedKeychainModuleEntities(
+        g_hook_state.schema_offsets,
+        reason != nullptr ? reason : L"frame_stage_restore");
     RestoreTrackedWeaponAppearanceRestorePoints(
         g_hook_state.schema_offsets,
         mode,
@@ -18120,6 +20755,7 @@ void RestoreAppliedCosmeticStateForOriginalFrameStage(
     g_hook_state.applied_preview_glove_signatures.clear();
     ClearKnifeModelWriteFailureStateCache();
     TryRestoreAndClearKnifeModelPathState(g_hook_state.schema_offsets, reason, mode);
+    ClearKnifeModelPathSwapState(true);
     ClearCachedKnifeFirstPersonBinding();
     g_hook_state.next_runtime_poll_millis.store(0);
 }
@@ -18127,6 +20763,10 @@ void RestoreAppliedCosmeticStateForOriginalFrameStage(
 void PrepareAppliedCosmeticStateForDemoSeekBeforeOriginalFrameStage(const wchar_t* reason = nullptr)
 {
     g_hook_state.last_applied_demo_tick = -1;
+    ResetDemoKeychainControllerState();
+    ReleaseRuntimeCreatedKeychainModuleEntities(
+        g_hook_state.schema_offsets,
+        reason != nullptr ? reason : L"demo_seek_prepare");
     RestoreTrackedWeaponAppearanceRestorePoints(
         g_hook_state.schema_offsets,
         AttributeBindingReleaseMode::AbandonInstalled,
@@ -18146,6 +20786,7 @@ void PrepareAppliedCosmeticStateForDemoSeekBeforeOriginalFrameStage(const wchar_
         g_hook_state.schema_offsets,
         reason,
         AttributeBindingReleaseMode::AbandonInstalled);
+    ClearKnifeModelPathSwapState(true);
     ClearCachedKnifeFirstPersonBinding();
     g_hook_state.next_runtime_poll_millis.store(0);
 }
@@ -18154,6 +20795,7 @@ void ClearRuntimeEntityManager(
     const std::wstring& reason,
     const AttributeBindingReleaseMode knife_model_path_release_mode = AttributeBindingReleaseMode::RestoreOriginal)
 {
+    ResetDemoKeychainControllerState();
     g_hook_state.runtime_entities.players_by_xuid.clear();
     g_hook_state.runtime_entities.logged_profile_diagnostics.clear();
     g_hook_state.runtime_entities.runtime_wearable_handle_buffers.clear();
@@ -18168,6 +20810,11 @@ void ClearRuntimeEntityManager(
     g_hook_state.viewmodel_factory_discovery_ran.store(false);
     g_hook_state.viewmodel_factory_observed.store(false);
     g_hook_state.watched_xuid.store(0);
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.runtime_keychain_module_mutex);
+        g_hook_state.runtime_created_keychain_module_entity_indices.clear();
+    }
+    g_hook_state.keychain_module_create_cooldown_until_millis.store(0);
     ClearKnifeModelWriteFailureStateCache();
     g_hook_state.runtime_rebuilding.store(!reason.empty());
     g_hook_state.runtime_rebuild_generation.fetch_add(1);
@@ -18199,6 +20846,13 @@ void ResetRuntimeState(
     g_hook_state.client_entity_factory_ready.store(false);
     g_hook_state.viewmodel_factory_discovery_ran.store(false);
     g_hook_state.viewmodel_factory_observed.store(false);
+    {
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        g_hook_state.published_knife_model_path_swap_bridge = {};
+        g_hook_state.knife_model_path_swap_bridge_publish_generation.store(
+            0,
+            std::memory_order_release);
+    }
     ClearWeaponAppearanceTelemetry();
 }
 
@@ -18542,7 +21196,9 @@ bool ShouldAttemptKnifeModelPathStateRestore(
     const KnifeModelPathState& state,
     const AttributeBindingReleaseMode release_mode) noexcept
 {
-    if (!state.active || !state.direct_render_rebind_attempted)
+    if (!state.active ||
+        !state.direct_render_rebind_attempted ||
+        state.resource_only_render_active)
     {
         return false;
     }
@@ -20889,6 +23545,24 @@ void ScheduleRuntimeOwnedGloveAttributeBindingRelease(
     }
 }
 
+void ScheduleRuntimeOwnedKeychainAttributeBindingRelease(void* item_view)
+{
+    if (item_view == nullptr)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_hook_state.runtime_owned_attribute_mutex);
+    if (g_hook_state.runtime_owned_attribute_bindings.find(item_view) ==
+        g_hook_state.runtime_owned_attribute_bindings.end())
+    {
+        return;
+    }
+
+    g_hook_state.runtime_owned_attribute_release_frames[item_view] =
+        g_hook_state.frame_callback_count.load() + kRuntimeOwnedKeychainAttributeLeaseFrames;
+}
+
 void ReleaseRuntimeOwnedAttributeListBindings(const AttributeBindingReleaseMode mode)
 {
     std::vector<RuntimeOwnedAttributeListBinding> bindings;
@@ -20909,6 +23583,132 @@ void ReleaseRuntimeOwnedAttributeListBindings(const AttributeBindingReleaseMode 
     {
         RestoreRuntimeOwnedAttributeListBinding(std::move(binding), mode);
     }
+}
+
+void RememberRuntimeCreatedKeychainModuleEntityIndex(const int entity_index)
+{
+    if (entity_index < 0)
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_hook_state.runtime_keychain_module_mutex);
+    g_hook_state.runtime_created_keychain_module_entity_indices.insert(entity_index);
+}
+
+void ReleaseRuntimeCreatedKeychainModuleEntities(
+    const ClientSchemaOffsets& offsets,
+    const wchar_t* reason)
+{
+    std::vector<int> entity_indices;
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.runtime_keychain_module_mutex);
+        if (g_hook_state.runtime_created_keychain_module_entity_indices.empty())
+        {
+            return;
+        }
+
+        entity_indices.reserve(g_hook_state.runtime_created_keychain_module_entity_indices.size());
+        for (const auto entity_index : g_hook_state.runtime_created_keychain_module_entity_indices)
+        {
+            entity_indices.push_back(entity_index);
+        }
+        g_hook_state.runtime_created_keychain_module_entity_indices.clear();
+    }
+
+    auto* const entity_list = g_hook_state.runtime_entities.last_entity_list;
+    std::size_t detached_count = 0;
+    for (const auto entity_index : entity_indices)
+    {
+        void* entity = nullptr;
+        if (entity_list == nullptr ||
+            !TryGetEntityFromIndex(entity_list, entity_index, entity) ||
+            entity == nullptr)
+        {
+            continue;
+        }
+
+        bool detached = true;
+        if (offsets.base_owner_entity != 0)
+        {
+            detached = SafeWriteField(entity, offsets.base_owner_entity, kInvalidEntityHandle) && detached;
+        }
+        if (offsets.base_old_move_parent != 0)
+        {
+            detached = SafeWriteField(entity, offsets.base_old_move_parent, kInvalidEntityHandle) && detached;
+        }
+        if (offsets.weapon_keychain_def_id != 0)
+        {
+            detached =
+                SafeWriteField(entity, offsets.weapon_keychain_def_id, static_cast<std::uint32_t>(0)) &&
+                detached;
+        }
+        if (offsets.weapon_keychain_seed != 0)
+        {
+            detached =
+                SafeWriteField(entity, offsets.weapon_keychain_seed, static_cast<std::uint32_t>(0)) &&
+                detached;
+        }
+
+        if (detached)
+        {
+            ++detached_count;
+        }
+    }
+
+    if (!entity_indices.empty())
+    {
+        std::wstringstream stream;
+        stream << L"Released runtime-created keychain modules"
+            << L": tracked=" << entity_indices.size()
+            << L", detached=" << detached_count;
+        if (reason != nullptr && *reason != L'\0')
+        {
+            stream << L", reason=" << reason;
+        }
+        nskinzcs2::Logger::Info(stream.str());
+    }
+}
+
+bool HasDemoSeekSensitiveRuntimeMutations()
+{
+    if (!g_hook_state.tracked_weapon_restore_points.empty() ||
+        g_hook_state.knife_model_path_state.active ||
+        g_hook_state.pending_knife_rebuild_state.active ||
+        g_hook_state.pending_knife_post_refresh_verification.active ||
+        g_hook_state.knife_phase2_model_bind_interception.active ||
+        g_hook_state.knife_model_override_ready.load() ||
+        g_hook_state.knife_viewmodel_sync_ready.load())
+    {
+        return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.runtime_owned_attribute_mutex);
+        if (!g_hook_state.runtime_owned_attribute_bindings.empty())
+        {
+            return true;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.runtime_keychain_module_mutex);
+        if (!g_hook_state.runtime_created_keychain_module_entity_indices.empty())
+        {
+            return true;
+        }
+    }
+
+    {
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        if (g_hook_state.knife_model_path_swap_state.enabled ||
+            g_hook_state.published_knife_model_path_swap_bridge.valid)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 struct AttributeStorageRecord
@@ -21178,7 +23978,9 @@ bool TryInstallRuntimeOwnedAttributeList(
     return VerifyAttributeValues(item_view, offsets, desired_attributes);
 }
 
-bool PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(TemporaryAttributeListAttachment& attachment)
+bool PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(
+    TemporaryAttributeListAttachment& attachment,
+    const bool restore_on_abandon = true)
 {
     if (attachment.item_view == nullptr ||
         attachment.vector_address == nullptr ||
@@ -21202,7 +24004,7 @@ bool PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(TemporaryAttributeLis
     binding.allocated_block = attachment.allocated_block;
     binding.restore_custom_material_original = attachment.restore_custom_material_original;
     binding.restore_custom_material_written = attachment.restore_custom_material_written;
-    binding.restore_on_abandon = true;
+    binding.restore_on_abandon = restore_on_abandon;
 
     RuntimeOwnedAttributeListBinding existing_binding {};
     bool had_existing_binding = false;
@@ -21704,6 +24506,94 @@ bool TryCreateRuntimeGloveEntity(
     return glove_handle != kInvalidEntityHandle;
 }
 
+bool TryCreateRuntimeKeychainModuleEntity(
+    void* entity_list,
+    const int highest_live_entity_index,
+    const WearableClientClassFactoryBinding& factory,
+    int& keychain_module_entity_index,
+    void*& keychain_module_entity,
+    std::wstring& issue)
+{
+    keychain_module_entity_index = -1;
+    keychain_module_entity = nullptr;
+    issue.clear();
+
+    if (factory.create_fn == nullptr)
+    {
+        issue = L"C_KeychainModule create function is unavailable.";
+        return false;
+    }
+
+    if (!TryFindAvailableRuntimeEntityIndex(
+            entity_list,
+            highest_live_entity_index + 1,
+            keychain_module_entity_index,
+            issue))
+    {
+        return false;
+    }
+
+    constexpr std::uint16_t kInitialEntitySerial = 1;
+    DWORD create_exception_code = 0;
+    void* create_exception_address = nullptr;
+    if (!TryInvokeClientClassCreateFunction(
+            factory.create_fn,
+            keychain_module_entity_index,
+            kInitialEntitySerial,
+            create_exception_code,
+            create_exception_address))
+    {
+        std::wstringstream stream;
+        stream << L"C_KeychainModule client class create function raised an exception 0x"
+            << std::hex << std::uppercase << create_exception_code
+            << std::dec << std::nouppercase
+            << L" at " << FormatPointer(create_exception_address)
+            << L" (normalized=" << FormatPointer(factory.create_fn)
+            << L", raw=" << FormatPointer(factory.raw_create_fn)
+            << L", entity_index=" << keychain_module_entity_index
+            << L", serial=" << kInitialEntitySerial << L"). create_region="
+            << DescribeReadableMemoryRegion(factory.create_fn)
+            << L" client_class_region=" << DescribeReadableMemoryRegion(factory.client_class);
+        issue = stream.str();
+        keychain_module_entity_index = -1;
+        return false;
+    }
+
+    if (!TryGetEntityFromIndex(entity_list, keychain_module_entity_index, keychain_module_entity) ||
+        keychain_module_entity == nullptr)
+    {
+        issue = L"C_KeychainModule create function returned without materializing a client entity.";
+        keychain_module_entity_index = -1;
+        return false;
+    }
+
+    return true;
+}
+
+bool TryBindKeychainModuleEntityToWeapon(
+    void* keychain_module_entity,
+    const std::uint32_t weapon_handle,
+    const ClientSchemaOffsets& offsets)
+{
+    if (keychain_module_entity == nullptr || weapon_handle == kInvalidEntityHandle)
+    {
+        return false;
+    }
+
+    bool success = true;
+    if (offsets.base_owner_entity != 0)
+    {
+        success = success && SafeWriteField(keychain_module_entity, offsets.base_owner_entity, weapon_handle);
+    }
+
+    if (offsets.base_old_move_parent != 0)
+    {
+        success = success && SafeWriteField(keychain_module_entity, offsets.base_old_move_parent, weapon_handle);
+    }
+
+    return success;
+}
+
 bool TryBindWearableEntityToPawn(
     RuntimeEntityManager& runtime_entities,
     const RuntimePlayerBinding& player_binding,
@@ -22074,6 +24964,128 @@ float ReadAttributeValueOrDefault(
     return value;
 }
 
+bool IsDefaultStickerProfile(const nskinzcs2::model::StickerProfile& sticker) noexcept
+{
+    return sticker.kit_id == 0 &&
+        std::fabs(sticker.wear - 0.0000001f) <= 0.0000001f &&
+        std::fabs(sticker.scale - 1.0f) <= 0.0001f &&
+        std::fabs(sticker.rotation) <= 0.0001f;
+}
+
+bool IsKeychainOnlyApplyRequest(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile) noexcept
+{
+    return keychain_profile != nullptr &&
+        profile.override_item == 0 &&
+        profile.paint_kit == 0 &&
+        profile.quality == 0 &&
+        profile.seed == 0 &&
+        profile.stat_trak == 0 &&
+        std::fabs(profile.wear - 0.0000001f) <= 0.0000001f &&
+        profile.custom_name.empty() &&
+        std::all_of(
+            profile.stickers.begin(),
+            profile.stickers.end(),
+            [](const nskinzcs2::model::StickerProfile& sticker)
+            {
+                return IsDefaultStickerProfile(sticker);
+            });
+}
+
+bool TryBuildLiveStandardWeaponProfile(
+    void* econ_entity,
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const std::uint64_t xuid,
+    const int base_item_definition_index,
+    const nskinzcs2::model::KeychainProfile* keychain_profile,
+    nskinzcs2::model::CosmeticProfile& profile)
+{
+    constexpr float kDefaultWear = 0.0000001f;
+
+    profile = {};
+    profile.enabled = true;
+    profile.name =
+        keychain_profile != nullptr && !keychain_profile->name.empty()
+            ? keychain_profile->name
+            : std::string("Default");
+    profile.xuid = xuid;
+    profile.base_item = base_item_definition_index;
+    profile.wear = kDefaultWear;
+
+    if (econ_entity == nullptr || item_view == nullptr)
+    {
+        return false;
+    }
+
+    bool success = true;
+
+    if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_paint_kit, profile.paint_kit))
+    {
+        success = false;
+    }
+
+    float paint_kit = static_cast<float>(profile.paint_kit);
+    if (TryReadAttributeValue(item_view, offsets, kAttributePaintKit, paint_kit))
+    {
+        profile.paint_kit = static_cast<int>(paint_kit);
+        success = true;
+    }
+
+    if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_seed, profile.seed))
+    {
+        success = false;
+    }
+
+    float seed = static_cast<float>(profile.seed);
+    if (TryReadAttributeValue(item_view, offsets, kAttributeSeed, seed))
+    {
+        profile.seed = static_cast<int>(seed);
+        success = true;
+    }
+
+    if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_wear, profile.wear))
+    {
+        success = false;
+    }
+
+    float wear = profile.wear;
+    if (TryReadAttributeValue(item_view, offsets, kAttributeWear, wear))
+    {
+        profile.wear = wear;
+        success = true;
+    }
+
+    if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_stat_trak, profile.stat_trak))
+    {
+        success = false;
+    }
+
+    float stat_trak = static_cast<float>(profile.stat_trak);
+    if (TryReadAttributeValue(item_view, offsets, kAttributeStatTrak, stat_trak))
+    {
+        profile.stat_trak = static_cast<int>(stat_trak);
+        success = true;
+    }
+
+    if (offsets.item_view_entity_quality != 0)
+    {
+        std::uint8_t quality = 0;
+        if (SafeReadField(item_view, offsets.item_view_entity_quality, quality))
+        {
+            profile.quality = static_cast<int>(quality);
+            success = true;
+        }
+        else
+        {
+            success = false;
+        }
+    }
+
+    return success;
+}
+
 constexpr std::uint64_t kDefaultWeaponMeshGroupMask = 1;
 constexpr std::uint64_t kLegacyWeaponMeshGroupMask = 2;
 
@@ -22097,14 +25109,29 @@ std::uint64_t ResolveWeaponMeshGroupMaskImpl(const int base_item_definition_inde
     return kDefaultWeaponMeshGroupMask;
 }
 
-bool ProfileNeedsDynamicAttributeWrites(const nskinzcs2::model::CosmeticProfile& profile)
+bool ProfileNeedsDynamicAttributeWrites(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr)
 {
-    return !BuildWeaponRefreshAttributesImpl(profile).empty();
+    return !BuildWeaponRefreshAttributesImpl(profile, keychain_profile).empty();
 }
 
-bool NeedsWeaponSkinRefresh(const nskinzcs2::model::CosmeticProfile& profile)
+bool NeedsWeaponSkinRefresh(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr)
 {
-    return !IsGloveProfile(profile) && ProfileNeedsDynamicAttributeWrites(profile);
+    return !IsGloveProfile(profile) &&
+        !IsKeychainOnlyApplyRequest(profile, keychain_profile) &&
+        ProfileNeedsDynamicAttributeWrites(profile, keychain_profile);
+}
+
+bool ShouldSuppressUnsafeKeychainOnlyApply(
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile) noexcept
+{
+    return IsKeychainOnlyApplyRequest(profile, keychain_profile) &&
+        !ShouldAllowDirectAttributeListWrites(offsets);
 }
 
 bool RequiresExactHudViewmodelPathImpl(const bool watched_weapon_xuid, const bool active_weapon) noexcept
@@ -22409,6 +25436,37 @@ std::optional<std::string> TryResolveKnifeDirectRenderModelName(
     return resource_path;
 }
 
+std::optional<std::string> TryResolveKeychainModuleModelName(
+    const nskinzcs2::model::Catalog& catalog,
+    const int keychain_kit)
+{
+    const auto visual_it = catalog.keychain_visuals.find(keychain_kit);
+    if (visual_it == catalog.keychain_visuals.end())
+    {
+        return std::nullopt;
+    }
+
+    std::string source_model_path = visual_it->second.resolved_model_resource_path;
+    if (source_model_path.empty())
+    {
+        source_model_path = visual_it->second.model_path;
+    }
+
+    if (source_model_path.empty())
+    {
+        return std::nullopt;
+    }
+
+    auto resource_path = TryMapModelPathToResourcePath(source_model_path);
+    if (!resource_path.has_value() ||
+        TryResolveModelResourceMetadata(*resource_path) == nullptr)
+    {
+        return std::nullopt;
+    }
+
+    return resource_path;
+}
+
 KnifeModelOverrideTargetBucket ClassifyKnifeModelOverrideTargetBucket(const std::string& model_path) noexcept
 {
     const auto normalized = NormalizeResourcePath(model_path);
@@ -22618,18 +25676,25 @@ const char* ResolveKnifeModelPathSwapEffectiveSourcePath(
     const KnifeModelPathSwapState& swap_state,
     const KnifeModelPathSwapHandleBucket bucket) noexcept
 {
+    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
     switch (bucket)
     {
     case KnifeModelPathSwapHandleBucket::World:
         return (swap_state.query_source_world_path != nullptr &&
                 swap_state.query_source_world_path[0] != '\0')
             ? swap_state.query_source_world_path
-            : swap_state.source_world_path;
+            : (swap_state.source_world_path != nullptr &&
+                    swap_state.source_world_path[0] != '\0')
+                ? swap_state.source_world_path
+                : published_bridge.source_world_path;
     case KnifeModelPathSwapHandleBucket::View:
         return (swap_state.query_source_view_path != nullptr &&
                 swap_state.query_source_view_path[0] != '\0')
             ? swap_state.query_source_view_path
-            : swap_state.source_view_path;
+            : (swap_state.source_view_path != nullptr &&
+                    swap_state.source_view_path[0] != '\0')
+                ? swap_state.source_view_path
+                : published_bridge.source_view_path;
     case KnifeModelPathSwapHandleBucket::Hud:
     case KnifeModelPathSwapHandleBucket::Unknown:
     default:
@@ -22644,16 +25709,23 @@ const char* ResolveKnifeModelPathSwapBucketPath(
     const bool compiled_variant) noexcept
 {
     const char* base_path = nullptr;
+    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
     switch (bucket)
     {
     case KnifeModelPathSwapHandleBucket::World:
         base_path = target_path
-            ? swap_state.target_world_path
+            ? ((swap_state.target_world_path != nullptr &&
+                    swap_state.target_world_path[0] != '\0')
+                    ? swap_state.target_world_path
+                    : published_bridge.target_world_path)
             : ResolveKnifeModelPathSwapEffectiveSourcePath(swap_state, bucket);
         break;
     case KnifeModelPathSwapHandleBucket::View:
         base_path = target_path
-            ? swap_state.target_view_path
+            ? ((swap_state.target_view_path != nullptr &&
+                    swap_state.target_view_path[0] != '\0')
+                    ? swap_state.target_view_path
+                    : published_bridge.target_view_path)
             : ResolveKnifeModelPathSwapEffectiveSourcePath(swap_state, bucket);
         break;
     case KnifeModelPathSwapHandleBucket::Hud:
@@ -22829,6 +25901,30 @@ const char* KnifeModelPathSwapHandleBucketLabel(
     }
 }
 
+KnifeModelPathSwapHandleBucket ResolveKnifeModelPathSwapHandleBucketFromLabel(
+    const char* bucket_label) noexcept
+{
+    if (bucket_label != nullptr)
+    {
+        if (std::strcmp(bucket_label, "world") == 0)
+        {
+            return KnifeModelPathSwapHandleBucket::World;
+        }
+
+        if (std::strcmp(bucket_label, "hud") == 0)
+        {
+            return KnifeModelPathSwapHandleBucket::Hud;
+        }
+
+        if (std::strcmp(bucket_label, "view") == 0)
+        {
+            return KnifeModelPathSwapHandleBucket::View;
+        }
+    }
+
+    return KnifeModelPathSwapHandleBucket::Unknown;
+}
+
 std::size_t CountKnifeModelPathSwapQueryHookRedirectPairs(
     const KnifeModelPathSwapQueryHookTarget& hook_target) noexcept
 {
@@ -22845,6 +25941,418 @@ std::size_t CountKnifeModelPathSwapQueryHookRedirectPairs(
     return base_count + learned_count + learned_live_count;
 }
 
+bool HasEstablishedKnifeModelPathSwapResourceBridge(
+    const KnifeModelPathSwapQueryHookTarget& hook_target,
+    const KnifeModelPathSwapState& swap_state) noexcept
+{
+    return swap_state.enabled &&
+        swap_state.handle_redirect_pair_count > 0 &&
+        CountKnifeModelPathSwapQueryHookRedirectPairs(hook_target) > 0;
+}
+
+void LogPopulateKnifeResourceModelSwapEvidenceDiagnostic(
+    const wchar_t* stage,
+    const std::uint64_t xuid,
+    const std::uint64_t watched_xuid,
+    const int world_entity_index,
+    const int active_weapon_entity_index,
+    const std::uint64_t publish_generation,
+    const bool swap_enabled,
+    const std::uint64_t swap_xuid,
+    const int swap_pairs,
+    const std::size_t hook_index,
+    const bool hook_valid,
+    const bool hook_installed,
+    const std::size_t hook_slot,
+    const int hook_base_pairs,
+    const int hook_pairs,
+    const int hook_hits,
+    const int hook_valid_hits,
+    const int binding_pairs,
+    const std::uint64_t binding_source_handle,
+    const std::uint64_t binding_target_handle,
+    const wchar_t* reason) noexcept
+{
+    const auto stable_reason = reason != nullptr ? reason : L"none";
+    const auto stable_stage = stage != nullptr ? stage : L"none";
+    auto signature = publish_generation;
+    const auto mix =
+        [&](const std::uint64_t value) noexcept
+        {
+            signature ^= value + 0x9E3779B97F4A7C15ull + (signature << 6) + (signature >> 2);
+        };
+
+    mix(xuid);
+    mix(watched_xuid);
+    mix(static_cast<std::uint64_t>(std::max(world_entity_index, -1) + 1));
+    mix(static_cast<std::uint64_t>(std::max(active_weapon_entity_index, -1) + 1));
+    mix(swap_enabled ? 1ull : 0ull);
+    mix(swap_xuid);
+    mix(static_cast<std::uint64_t>(std::max(swap_pairs, 0)));
+    mix(static_cast<std::uint64_t>(hook_index));
+    mix(hook_valid ? 1ull : 0ull);
+    mix(hook_installed ? 1ull : 0ull);
+    mix(static_cast<std::uint64_t>(hook_slot));
+    mix(static_cast<std::uint64_t>(std::max(hook_base_pairs, 0)));
+    mix(static_cast<std::uint64_t>(std::max(hook_pairs, 0)));
+    mix(static_cast<std::uint64_t>(std::max(hook_hits, 0)));
+    mix(static_cast<std::uint64_t>(std::max(hook_valid_hits, 0)));
+    mix(static_cast<std::uint64_t>(std::max(binding_pairs, 0)));
+    mix(binding_source_handle);
+    mix(binding_target_handle);
+    for (const auto* cursor = stable_reason; *cursor != L'\0'; ++cursor)
+    {
+        mix(static_cast<std::uint64_t>(*cursor));
+    }
+    for (const auto* cursor = stable_stage; *cursor != L'\0'; ++cursor)
+    {
+        mix(static_cast<std::uint64_t>(*cursor));
+    }
+
+    std::wstringstream stream;
+    stream << L"PopulateKnifeResourceModelSwapEvidence diagnostic: stage=" << stable_stage
+        << L", reason=" << stable_reason
+        << L", xuid=" << xuid
+        << L", watched_xuid=" << watched_xuid
+        << L", world_entity=" << world_entity_index
+        << L", active_weapon_entity=" << active_weapon_entity_index
+        << L", publish_generation=" << publish_generation
+        << L", swap_enabled=" << (swap_enabled ? 1 : 0)
+        << L", swap_xuid=" << swap_xuid
+        << L", swap_pairs=" << swap_pairs
+        << L", hook_index=" << hook_index
+        << L", hook_valid=" << (hook_valid ? 1 : 0)
+        << L", hook_installed=" << (hook_installed ? 1 : 0)
+        << L", hook_slot=" << hook_slot
+        << L", hook_base_pairs=" << hook_base_pairs
+        << L", hook_pairs=" << hook_pairs
+        << L", hook_hits=" << hook_hits
+        << L", hook_valid_hits=" << hook_valid_hits
+        << L", binding_pairs=" << binding_pairs
+        << L", binding_preferred=0x" << std::hex << std::uppercase
+        << binding_source_handle << L"->0x" << binding_target_handle
+        << std::dec << std::nouppercase;
+    LogProfileDiagnosticOnce(signature ^ 0x6D504B52534D4555ull, stream.str());
+}
+
+void PopulateKnifeResourceModelSwapEvidence(
+    nskinzcs2::runtime::KnifeRuntimeContext& context,
+    const std::uint64_t xuid,
+    const std::uint64_t watched_xuid,
+    const int world_entity_index,
+    const int active_weapon_entity_index,
+    const int requested_model_definition,
+    const std::vector<void*>& entity_cache,
+    const ClientSchemaOffsets& offsets) noexcept
+{
+    context.resource_query_bridge_ready = false;
+    context.resource_query_target_handle_ready = false;
+    context.resource_model_swap_ready = false;
+    context.resource_model_path_readback_changed = false;
+    context.resource_world_model_matches_target = false;
+    context.resource_first_person_model_matches_target = false;
+    context.resource_query_redirect_pairs = 0;
+    context.resource_query_redirect_hits = 0;
+
+    bool swap_enabled = false;
+    std::uint64_t swap_xuid = 0;
+    int swap_pairs = 0;
+    std::size_t hook_index = kInvalidResourceHandleQuerySlot;
+    bool hook_valid = false;
+    bool hook_installed = false;
+    std::size_t hook_slot = kInvalidResourceHandleQuerySlot;
+    int hook_base_pairs = 0;
+    int hook_pairs = 0;
+    int hook_hits = 0;
+    int hook_valid_hits = 0;
+    const char* hook_last_match_bucket = nullptr;
+    const char* hook_last_redirect_path = nullptr;
+    const wchar_t* hook_last_hit_kind = L"none";
+    int binding_pairs = 0;
+    std::uint64_t binding_source_handle = 0;
+    std::uint64_t binding_target_handle = 0;
+    bool published_valid = false;
+    std::uint64_t published_xuid = 0;
+    int published_world_entity_index = -1;
+    int published_target_definition_index = 0;
+    int published_pairs = 0;
+    std::uint64_t published_source_handle = 0;
+    std::uint64_t published_target_handle = 0;
+    const char* published_target_world_path = nullptr;
+    const char* published_target_view_path = nullptr;
+    std::uint64_t published_generation = 0;
+
+    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+    const auto& swap_state = g_hook_state.knife_model_path_swap_state;
+    swap_enabled = swap_state.enabled;
+    swap_xuid = swap_state.xuid;
+    swap_pairs = swap_state.handle_redirect_pair_count;
+    binding_pairs = static_cast<int>(g_hook_state.resource_system_query.handle_redirect_count);
+    binding_source_handle = g_hook_state.resource_system_query.last_source_handle;
+    binding_target_handle = g_hook_state.resource_system_query.last_target_handle;
+    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+    published_valid = published_bridge.valid;
+    published_xuid = published_bridge.xuid;
+    published_world_entity_index = published_bridge.world_entity_index;
+    published_target_definition_index = published_bridge.target_definition_index;
+    published_pairs = published_bridge.handle_redirect_pair_count;
+    published_source_handle = published_bridge.preferred_source_handle;
+    published_target_handle = published_bridge.preferred_target_handle;
+    published_target_world_path = published_bridge.target_world_path;
+    published_target_view_path = published_bridge.target_view_path;
+    published_generation = published_bridge.publish_generation;
+
+    hook_index = ResourceHandleQueryHookIndex(ResourceHandleQueryInterfaceKind::ResourceSystem);
+    if (hook_index != kInvalidResourceHandleQuerySlot &&
+        hook_index < g_hook_state.knife_model_path_swap_query_hooks.size())
+    {
+        const auto& hook_target = g_hook_state.knife_model_path_swap_query_hooks[hook_index];
+        hook_valid = hook_target.valid;
+        hook_installed = hook_target.patch.installed && hook_target.original != nullptr;
+        hook_slot = hook_target.slot;
+        hook_base_pairs = static_cast<int>(std::min(
+            hook_target.handle_redirect_count,
+            hook_target.handle_redirects.size()));
+        hook_pairs = static_cast<int>(CountKnifeModelPathSwapQueryHookRedirectPairs(hook_target));
+        hook_hits = hook_target.hit_count;
+        hook_valid_hits = hook_target.valid_resource_hit_count;
+        hook_last_match_bucket = hook_target.last_match_bucket;
+        hook_last_redirect_path = hook_target.last_redirect_path;
+        hook_last_hit_kind = hook_target.last_hit_kind;
+    }
+
+    const bool target_definition_matches_live =
+        requested_model_definition != 0 &&
+        swap_state.target_definition_index == requested_model_definition;
+    const bool target_definition_matches_published =
+        requested_model_definition != 0 &&
+        published_target_definition_index == requested_model_definition;
+    const bool live_bridge_identity_matches =
+        swap_enabled &&
+        swap_xuid == xuid &&
+        (requested_model_definition == 0 || target_definition_matches_live);
+    const bool published_bridge_identity_matches =
+        published_valid &&
+        published_xuid == xuid &&
+        (requested_model_definition == 0 || target_definition_matches_published);
+    if (xuid == 0 ||
+        world_entity_index < 0 ||
+        active_weapon_entity_index != world_entity_index ||
+        (!live_bridge_identity_matches && !published_bridge_identity_matches))
+    {
+        const wchar_t* precheck_reason = L"bridge_context_mismatch";
+        if (xuid == 0)
+        {
+            precheck_reason = L"xuid_missing";
+        }
+        else if (world_entity_index < 0)
+        {
+            precheck_reason = L"world_entity_invalid";
+        }
+        else if (active_weapon_entity_index != world_entity_index)
+        {
+            precheck_reason = L"active_weapon_mismatch";
+        }
+        else if (requested_model_definition != 0 &&
+                 !target_definition_matches_live &&
+                 !target_definition_matches_published)
+        {
+            precheck_reason = L"target_definition_mismatch";
+        }
+        else if (swap_xuid != xuid && published_xuid != xuid)
+        {
+            precheck_reason = L"bridge_xuid_mismatch";
+        }
+
+        if (published_generation != 0)
+        {
+            LogPopulateKnifeResourceModelSwapEvidenceDiagnostic(
+                L"precheck",
+                xuid,
+                watched_xuid,
+                world_entity_index,
+                active_weapon_entity_index,
+                published_generation,
+                swap_enabled,
+                swap_xuid,
+                swap_pairs,
+                hook_index,
+                hook_valid,
+                hook_installed,
+                hook_slot,
+                hook_base_pairs,
+                hook_pairs,
+                hook_hits,
+                hook_valid_hits,
+                binding_pairs,
+                binding_source_handle,
+                binding_target_handle,
+                precheck_reason);
+        }
+        return;
+    }
+
+    const bool published_entity_index_known = published_world_entity_index >= 0;
+    const bool live_bridge_ready =
+        swap_enabled &&
+        swap_xuid == xuid &&
+        target_definition_matches_live &&
+        swap_pairs > 0;
+    const bool published_bridge_ready =
+        published_valid &&
+        published_xuid == xuid &&
+        published_entity_index_known &&
+        target_definition_matches_published &&
+        published_pairs > 0 &&
+        published_source_handle != 0 &&
+        published_target_handle != 0 &&
+        published_generation != 0;
+    const auto effective_pairs =
+        std::max(
+            std::max(std::max(swap_pairs, published_pairs), binding_pairs),
+            hook_pairs);
+    context.resource_query_redirect_pairs = effective_pairs;
+    context.resource_query_redirect_hits = hook_valid_hits;
+    context.resource_query_bridge_ready = live_bridge_ready || published_bridge_ready;
+
+    const auto entity_model_matches_expected =
+        [&](const int entity_index, const char* expected_model_path) noexcept
+        {
+            if (expected_model_path == nullptr ||
+                expected_model_path[0] == '\0' ||
+                entity_index < 0 ||
+                static_cast<std::size_t>(entity_index) >= entity_cache.size())
+            {
+                return false;
+            }
+
+            void* entity = entity_cache[static_cast<std::size_t>(entity_index)];
+            if (entity == nullptr)
+            {
+                return false;
+            }
+
+            std::string live_model_name;
+            return TryReadEntityModelNameString(entity, offsets, live_model_name) &&
+                ModelIdentityPathMatches(live_model_name, std::string(expected_model_path));
+        };
+
+    const char* effective_target_world_path =
+        published_target_world_path != nullptr && published_target_world_path[0] != '\0'
+            ? published_target_world_path
+            : swap_state.target_world_path;
+    const char* effective_target_view_path =
+        published_target_view_path != nullptr && published_target_view_path[0] != '\0'
+            ? published_target_view_path
+            : swap_state.target_view_path;
+    const bool live_target_handle_ready =
+        (live_bridge_identity_matches &&
+         effective_target_world_path != nullptr &&
+         effective_target_world_path[0] != '\0' &&
+         swap_state.resolved_target_world_handle_valid &&
+         swap_state.resolved_target_world_handle != 0) ||
+        (live_bridge_identity_matches &&
+         effective_target_view_path != nullptr &&
+         effective_target_view_path[0] != '\0' &&
+         swap_state.resolved_target_view_handle_valid &&
+         swap_state.resolved_target_view_handle != 0);
+    const bool published_target_handle_ready =
+        published_bridge_ready &&
+        published_target_handle != 0 &&
+        ((effective_target_world_path != nullptr && effective_target_world_path[0] != '\0') ||
+         (effective_target_view_path != nullptr && effective_target_view_path[0] != '\0'));
+    context.resource_query_target_handle_ready =
+        live_target_handle_ready || published_target_handle_ready;
+
+    context.resource_world_model_matches_target =
+        entity_model_matches_expected(active_weapon_entity_index, effective_target_world_path);
+    context.resource_first_person_model_matches_target =
+        entity_model_matches_expected(context.direct_first_person_render_entity_index, effective_target_view_path) ||
+        entity_model_matches_expected(context.viewmodel_render_entity_index, effective_target_view_path) ||
+        entity_model_matches_expected(context.viewmodel_entity_index, effective_target_view_path) ||
+        entity_model_matches_expected(context.real_viewmodel_entity_index, effective_target_view_path) ||
+        entity_model_matches_expected(context.providee_entity_index, effective_target_view_path);
+
+    const bool has_direct_world_readback =
+        active_weapon_entity_index >= 0 &&
+        context.resource_world_model_matches_target;
+    const bool has_direct_first_person_readback =
+        context.resource_first_person_model_matches_target;
+    const bool query_consumed_target_world_path =
+        !has_direct_world_readback &&
+        hook_valid_hits > 0 &&
+        hook_last_match_bucket != nullptr &&
+        std::strcmp(hook_last_match_bucket, "world") == 0 &&
+        hook_last_redirect_path != nullptr &&
+        effective_target_world_path != nullptr &&
+        hook_last_hit_kind != nullptr &&
+        std::wcscmp(hook_last_hit_kind, L"none") != 0 &&
+        ModelIdentityPathMatches(
+            std::string(hook_last_redirect_path),
+            std::string(effective_target_world_path));
+    const bool query_consumed_target_view_path =
+        !has_direct_first_person_readback &&
+        hook_valid_hits > 0 &&
+        hook_last_match_bucket != nullptr &&
+        std::strcmp(hook_last_match_bucket, "view") == 0 &&
+        hook_last_redirect_path != nullptr &&
+        effective_target_view_path != nullptr &&
+        hook_last_hit_kind != nullptr &&
+        std::wcscmp(hook_last_hit_kind, L"none") != 0 &&
+        ModelIdentityPathMatches(
+            std::string(hook_last_redirect_path),
+            std::string(effective_target_view_path));
+
+    context.resource_world_model_matches_target =
+        context.resource_world_model_matches_target || query_consumed_target_world_path;
+    context.resource_first_person_model_matches_target =
+        context.resource_first_person_model_matches_target || query_consumed_target_view_path;
+    context.resource_model_path_readback_changed =
+        context.resource_world_model_matches_target ||
+        context.resource_first_person_model_matches_target;
+    context.resource_model_swap_ready =
+        context.resource_query_bridge_ready &&
+        effective_pairs > 0 &&
+        (hook_valid_hits > 0 ||
+         context.resource_model_path_readback_changed ||
+         context.resource_query_target_handle_ready);
+
+    if (published_generation != 0 &&
+        !context.resource_model_swap_ready &&
+        (swap_pairs > 0 ||
+            published_pairs > 0 ||
+            hook_pairs > 0 ||
+            hook_hits > 0 ||
+            hook_valid_hits > 0 ||
+            binding_pairs > 0 ||
+            binding_source_handle != 0 ||
+            binding_target_handle != 0))
+    {
+        LogPopulateKnifeResourceModelSwapEvidenceDiagnostic(
+            L"post_read",
+                xuid,
+                watched_xuid,
+                world_entity_index,
+                active_weapon_entity_index,
+                published_generation,
+                swap_enabled,
+                swap_xuid,
+                swap_pairs,
+            hook_index,
+            hook_valid,
+            hook_installed,
+            hook_slot,
+            hook_base_pairs,
+            hook_pairs,
+            hook_hits,
+            hook_valid_hits,
+            binding_pairs,
+            binding_source_handle,
+            binding_target_handle,
+            L"resource_context_not_ready_after_publish");
+    }
+}
+
 void ResetKnifeModelPathSwapQueryHookLearnedRedirects(
     KnifeModelPathSwapQueryHookTarget& hook_target,
     const bool enable_live_probe) noexcept
@@ -22856,6 +26364,7 @@ void ResetKnifeModelPathSwapQueryHookLearnedRedirects(
     hook_target.live_handle_probe_budget =
         enable_live_probe ? kKnifeModelPathSwapLiveHandleProbeBudget : 0;
     hook_target.live_handle_probe_log_count = 0;
+    hook_target.last_safe_point_unreplayable_signature = 0;
     hook_target.bypass_log_count = 0;
     hook_target.miss_log_count = 0;
 }
@@ -24354,6 +27863,171 @@ bool TryResolveKnifeDirectRenderModelHandle(
             ? L"resource_handle_query_unavailable"
             : JoinDiagnosticSamples(failure_reasons);
     return false;
+}
+
+bool TryResolveKnifeDirectRenderModelHandleFromBridgeCache(
+    const std::string& desired_model_name,
+    const std::uint64_t xuid,
+    std::uint64_t& resolved_handle,
+    std::wstring& resolved_source,
+    std::wstring& resolved_reason)
+{
+    resolved_handle = 0;
+    resolved_source.clear();
+    resolved_reason.clear();
+
+    if (desired_model_name.empty())
+    {
+        resolved_reason = L"bridge_cache_desired_model_empty";
+        return false;
+    }
+
+    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+
+    const auto& swap_state = g_hook_state.knife_model_path_swap_state;
+    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+    const auto swap_state_matches_xuid =
+        swap_state.enabled &&
+        swap_state.xuid != 0 &&
+        (xuid == 0 || swap_state.xuid == xuid);
+    const auto published_bridge_matches_xuid =
+        published_bridge.valid &&
+        published_bridge.xuid != 0 &&
+        (xuid == 0 || published_bridge.xuid == xuid);
+
+    if (!swap_state_matches_xuid && !published_bridge_matches_xuid)
+    {
+        resolved_reason = L"bridge_cache_xuid_unavailable";
+        return false;
+    }
+
+    const char* effective_target_world_path =
+        swap_state_matches_xuid &&
+                swap_state.target_world_path != nullptr &&
+                swap_state.target_world_path[0] != '\0'
+            ? swap_state.target_world_path
+            : published_bridge_matches_xuid
+                ? published_bridge.target_world_path
+                : nullptr;
+    const char* effective_target_view_path =
+        swap_state_matches_xuid &&
+                swap_state.target_view_path != nullptr &&
+                swap_state.target_view_path[0] != '\0'
+            ? swap_state.target_view_path
+            : published_bridge_matches_xuid
+                ? published_bridge.target_view_path
+                : nullptr;
+
+    bool path_matched = false;
+    const auto try_resolve_cached_handle =
+        [&](const char* target_path,
+            const bool handle_valid,
+            const std::uint64_t handle,
+            const wchar_t* source_label) noexcept
+        {
+            if (target_path == nullptr || target_path[0] == '\0')
+            {
+                return false;
+            }
+
+            if (!ModelIdentityPathMatches(desired_model_name, std::string(target_path)))
+            {
+                return false;
+            }
+
+            path_matched = true;
+            if (!handle_valid || handle == 0)
+            {
+                return false;
+            }
+
+            resolved_handle = handle;
+            resolved_source = source_label;
+            return true;
+        };
+
+    if (try_resolve_cached_handle(
+            effective_target_world_path,
+            swap_state_matches_xuid &&
+                swap_state.resolved_target_world_handle_valid &&
+                swap_state.resolved_target_world_handle != 0,
+            swap_state.resolved_target_world_handle,
+            L"bridge_cache[state_world]"))
+    {
+        return true;
+    }
+
+    if (try_resolve_cached_handle(
+            effective_target_view_path,
+            swap_state_matches_xuid &&
+                swap_state.resolved_target_view_handle_valid &&
+                swap_state.resolved_target_view_handle != 0,
+            swap_state.resolved_target_view_handle,
+            L"bridge_cache[state_view]"))
+    {
+        return true;
+    }
+
+    if (try_resolve_cached_handle(
+            effective_target_world_path,
+            published_bridge_matches_xuid && published_bridge.preferred_target_handle != 0,
+            published_bridge.preferred_target_handle,
+            L"bridge_cache[published_world]"))
+    {
+        return true;
+    }
+
+    if (try_resolve_cached_handle(
+            effective_target_view_path,
+            published_bridge_matches_xuid && published_bridge.preferred_target_handle != 0,
+            published_bridge.preferred_target_handle,
+            L"bridge_cache[published_view]"))
+    {
+        return true;
+    }
+
+    resolved_reason = path_matched
+        ? L"bridge_cache_handle_missing"
+        : L"bridge_cache_path_mismatch";
+    return false;
+}
+
+bool TryResolveKnifeDirectRenderModelHandleForWrite(
+    const std::string& desired_model_name,
+    const std::string& calibration_model_name,
+    const std::uint64_t calibration_model_handle,
+    const std::uint64_t xuid,
+    std::uint64_t& resolved_handle,
+    std::wstring& resolved_source,
+    std::wstring& resolved_reason)
+{
+    if (TryResolveKnifeDirectRenderModelHandleFromBridgeCache(
+            desired_model_name,
+            xuid,
+            resolved_handle,
+            resolved_source,
+            resolved_reason))
+    {
+        return true;
+    }
+
+    if constexpr (kKnifeModelOnlyPathEnabled)
+    {
+        if (resolved_reason.empty())
+        {
+            resolved_reason = L"bridge_cache_unavailable_model_only";
+        }
+        return false;
+    }
+
+    return TryResolveKnifeDirectRenderModelHandle(
+        desired_model_name,
+        calibration_model_name,
+        calibration_model_handle,
+        xuid,
+        resolved_handle,
+        resolved_source,
+        resolved_reason);
 }
 
 struct KnifeDirectRenderModelDonor
@@ -25913,10 +29587,8 @@ bool TrySyncKnifeModelPathSwapBindingIntoInstalledHookTargetLocked(
     return true;
 }
 
-void SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooks() noexcept
+void SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooksLocked() noexcept
 {
-    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
-
     auto& binding = g_hook_state.resource_system_query;
     if (binding.interface_kind != ResourceHandleQueryInterfaceKind::ResourceSystem ||
         binding.interface_instance == nullptr ||
@@ -25950,6 +29622,32 @@ void SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooks() noexcept
 
     const auto synced_installed_hook =
         TrySyncKnifeModelPathSwapBindingIntoInstalledHookTargetLocked(binding, hook_target);
+    if (const auto* stable_world_source =
+            ResolveKnifeModelPathSwapEffectiveSourcePath(
+                g_hook_state.knife_model_path_swap_state,
+                KnifeModelPathSwapHandleBucket::World);
+        stable_world_source != nullptr && stable_world_source[0] != '\0')
+    {
+        hook_target.source_world_path = stable_world_source;
+    }
+    if (const auto* stable_view_source =
+            ResolveKnifeModelPathSwapEffectiveSourcePath(
+                g_hook_state.knife_model_path_swap_state,
+                KnifeModelPathSwapHandleBucket::View);
+        stable_view_source != nullptr && stable_view_source[0] != '\0')
+    {
+        hook_target.source_view_path = stable_view_source;
+    }
+    if (g_hook_state.knife_model_path_swap_state.target_world_path != nullptr &&
+        g_hook_state.knife_model_path_swap_state.target_world_path[0] != '\0')
+    {
+        hook_target.target_world_path = g_hook_state.knife_model_path_swap_state.target_world_path;
+    }
+    if (g_hook_state.knife_model_path_swap_state.target_view_path != nullptr &&
+        g_hook_state.knife_model_path_swap_state.target_view_path[0] != '\0')
+    {
+        hook_target.target_view_path = g_hook_state.knife_model_path_swap_state.target_view_path;
+    }
     const auto binding_changed =
         !KnifeModelPathSwapHandleRedirectTableEquals(
             previous_binding_redirects,
@@ -25965,13 +29663,87 @@ void SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooks() noexcept
              previous_hook_redirect_count,
              hook_target.handle_redirects,
              hook_target.handle_redirect_count) ||
-            previous_hook_source_handle != hook_target.calibrated_source_handle ||
+             previous_hook_source_handle != hook_target.calibrated_source_handle ||
             previous_hook_target_handle != hook_target.calibrated_target_handle ||
             previous_hook_monitor_only != hook_target.monitor_only);
 
-    if (!binding_changed && !hook_changed)
+    int published_world_entity_index = -1;
+    if (const auto player_it = g_hook_state.runtime_entities.players_by_xuid.find(
+            g_hook_state.knife_model_path_swap_state.xuid);
+        player_it != g_hook_state.runtime_entities.players_by_xuid.end())
+    {
+        published_world_entity_index = player_it->second.active_weapon_entity_index;
+    }
+
+    const auto hook_pairs = CountKnifeModelPathSwapQueryHookRedirectPairs(hook_target);
+    const auto publishable =
+        g_hook_state.knife_model_path_swap_state.enabled &&
+        g_hook_state.knife_model_path_swap_state.xuid != 0 &&
+        published_world_entity_index >= 0 &&
+        g_hook_state.knife_model_path_swap_state.target_definition_index != 0 &&
+        binding.handle_redirect_count > 0 &&
+        hook_pairs > 0 &&
+        binding.last_source_handle != 0 &&
+        binding.last_target_handle != 0;
+    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+    const auto published_bridge_matches_current =
+        published_bridge.valid &&
+        published_bridge.xuid == g_hook_state.knife_model_path_swap_state.xuid &&
+        published_bridge.world_entity_index == published_world_entity_index &&
+        published_bridge.target_definition_index ==
+            g_hook_state.knife_model_path_swap_state.target_definition_index &&
+        published_bridge.handle_redirect_pair_count > 0 &&
+        published_bridge.preferred_source_handle == binding.last_source_handle &&
+        published_bridge.preferred_target_handle == binding.last_target_handle &&
+        published_bridge.publish_generation != 0;
+    const auto publish_refresh_required =
+        publishable &&
+        !published_bridge_matches_current;
+
+    if (!binding_changed && !hook_changed && !publish_refresh_required)
     {
         return;
+    }
+
+    if (!publishable)
+    {
+        if (!ShouldRetainPublishedKnifeModelPathSwapBridgeLocked())
+        {
+            g_hook_state.published_knife_model_path_swap_bridge = {};
+        }
+    }
+    else
+    {
+        const auto publish_generation =
+            g_hook_state.knife_model_path_swap_bridge_publish_generation.fetch_add(
+                1,
+                std::memory_order_acq_rel) + 1;
+        auto& published_bridge_state = g_hook_state.published_knife_model_path_swap_bridge;
+        published_bridge_state.valid = true;
+        published_bridge_state.xuid = g_hook_state.knife_model_path_swap_state.xuid;
+        published_bridge_state.world_entity_index = published_world_entity_index;
+        published_bridge_state.target_definition_index =
+            g_hook_state.knife_model_path_swap_state.target_definition_index;
+        published_bridge_state.handle_redirect_pair_count = std::max(
+            static_cast<int>(binding.handle_redirect_count),
+            static_cast<int>(hook_pairs));
+        published_bridge_state.preferred_source_handle = binding.last_source_handle;
+        published_bridge_state.preferred_target_handle = binding.last_target_handle;
+        published_bridge_state.source_world_path =
+            ResolveKnifeModelPathSwapEffectiveSourcePath(
+                g_hook_state.knife_model_path_swap_state,
+                KnifeModelPathSwapHandleBucket::World);
+        published_bridge_state.source_view_path =
+            ResolveKnifeModelPathSwapEffectiveSourcePath(
+                g_hook_state.knife_model_path_swap_state,
+                KnifeModelPathSwapHandleBucket::View);
+        published_bridge_state.target_world_path =
+            g_hook_state.knife_model_path_swap_state.target_world_path;
+        published_bridge_state.target_view_path =
+            g_hook_state.knife_model_path_swap_state.target_view_path;
+        published_bridge_state.bridge_reason = g_hook_state.knife_model_path_swap_state.bridge_last_reason;
+        published_bridge_state.publish_generation = publish_generation;
+        LogKnifeRuntimeChainResourceSnapshotAfterBridgePushLocked(binding, hook_target);
     }
 
     std::wstringstream stream;
@@ -25979,7 +29751,7 @@ void SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooks() noexcept
         << ResourceHandleQueryInterfaceKindText(binding.interface_kind)
         << L", slot=" << binding.path_to_handle_slot
         << L", binding_pairs=" << binding.handle_redirect_count
-        << L", hook_pairs=" << CountKnifeModelPathSwapQueryHookRedirectPairs(hook_target)
+        << L", hook_pairs=" << hook_pairs
         << L", preferred=0x" << std::hex << std::uppercase << binding.last_source_handle
         << L"->0x" << binding.last_target_handle
         << std::dec << std::nouppercase;
@@ -25999,6 +29771,7 @@ std::size_t RefreshKnifeModelPathSwapHandleRedirectBridge(
     const ClientSchemaOffsets& offsets,
     KnifeModelPathSwapState& swap_state)
 {
+    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
     if (!swap_state.enabled || entity_cache.empty())
     {
         return static_cast<std::size_t>(std::max(0, swap_state.handle_redirect_pair_count));
@@ -26243,7 +30016,7 @@ std::size_t RefreshKnifeModelPathSwapHandleRedirectBridge(
     if (published_count != 0)
     {
         swap_state.handle_redirect_pair_count = static_cast<int>(published_count);
-        SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooks();
+        SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooksLocked();
     }
 
     return published_count != 0
@@ -26685,26 +30458,15 @@ bool TryWriteKnifeDirectRenderModelState(
     std::uint64_t resource_model_handle = 0;
     std::wstring resource_model_handle_source;
     std::wstring resource_model_handle_reason;
-    bool resource_model_handle_found = false;
-    if constexpr (kKnifeModelOnlyPathEnabled)
-    {
-        resource_model_handle_reason = L"resource_query_skipped_model_only";
-    }
-    else
-    {
-        resource_model_handle_found =
-            before_model_handle_valid &&
-            before_model_handle != 0 &&
-            before_model_name_valid &&
-            TryResolveKnifeDirectRenderModelHandle(
-                desired_model_name,
-                before_model_name,
-                before_model_handle,
-                xuid,
-                resource_model_handle,
-                resource_model_handle_source,
-                resource_model_handle_reason);
-    }
+    const auto resource_model_handle_found =
+        TryResolveKnifeDirectRenderModelHandleForWrite(
+            desired_model_name,
+            before_model_name_valid ? before_model_name : std::string(),
+            before_model_handle_valid ? before_model_handle : 0,
+            xuid,
+            resource_model_handle,
+            resource_model_handle_source,
+            resource_model_handle_reason);
 
     KnifeDirectRenderModelDonor donor {};
     const auto donor_found =
@@ -26822,7 +30584,9 @@ bool TryWriteKnifeDirectRenderModelState(
         after_model_handle == resource_model_handle;
     const auto verified = model_name_matches && model_handle_reloaded;
 
-    if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+    const auto watched_xuid = g_hook_state.watched_xuid.load();
+    const auto force_log_direct_rebind = xuid != 0 && watched_xuid == xuid;
+    if (force_log_direct_rebind || ShouldLogWatchedKnifeAnimationTrace(xuid))
     {
         std::wstringstream stream;
         stream << L"Knife direct render rebind for XUID " << xuid
@@ -26905,7 +30669,23 @@ bool TryWriteKnifeDirectRenderModelState(
             << L", model_handle_reloaded=" << (model_handle_reloaded ? 1 : 0)
             << L", model_handle_matches_resolved=" << (model_handle_matches_resolved ? 1 : 0)
             << L", verified=" << (verified ? 1 : 0);
-        nskinzcs2::Logger::Info(stream.str());
+        if (force_log_direct_rebind)
+        {
+            std::uint64_t rebind_signature = desired_signature ^ 0x78A1ull;
+            rebind_signature ^= static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(std::max(0, entity_index))) << 32;
+            rebind_signature ^= wrote_model_name ? 0x1ull : 0x2ull;
+            rebind_signature ^= wrote_resource_model_handle ? 0x10ull : 0x20ull;
+            rebind_signature ^= wrote_donor_model_handle ? 0x100ull : 0x200ull;
+            rebind_signature ^= donor_found ? 0x1000ull : 0x2000ull;
+            rebind_signature ^= resource_model_handle_found ? 0x10000ull : 0x20000ull;
+            rebind_signature ^= verified ? 0x100000ull : 0x200000ull;
+            LogProfileDiagnosticOnce(rebind_signature, stream.str());
+        }
+        if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+        {
+            nskinzcs2::Logger::Info(stream.str());
+        }
     }
 
     return verified;
@@ -26950,9 +30730,13 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
         TryReadEntityModelNameString(entity, offsets, before_model_name);
     const auto before_mesh_group_mask_valid =
         TryReadWeaponMeshGroupMaskRaw(entity, offsets, before_mesh_group_mask);
+    const auto effective_desired_mesh_group_mask =
+        before_mesh_group_mask_valid && before_mesh_group_mask != 0
+            ? before_mesh_group_mask
+            : desired_mesh_group_mask;
     const auto mesh_group_already_matches =
         before_mesh_group_mask_valid &&
-        before_mesh_group_mask == desired_mesh_group_mask;
+        before_mesh_group_mask == effective_desired_mesh_group_mask;
     const auto desired_model_already_bound =
         before_model_name_valid &&
         ModelIdentityPathMatches(before_model_name, desired_model_name) &&
@@ -26970,25 +30754,15 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
     bool resource_model_handle_found = false;
     if (!desired_model_already_bound)
     {
-        if constexpr (kKnifeModelOnlyPathEnabled)
-        {
-            resource_model_handle_reason = L"resource_query_skipped_model_only";
-        }
-        else
-        {
-            resource_model_handle_found =
-                before_model_handle_valid &&
-                before_model_handle != 0 &&
-                before_model_name_valid &&
-                TryResolveKnifeDirectRenderModelHandle(
-                    desired_model_name,
-                    before_model_name,
-                    before_model_handle,
-                    xuid,
-                    resource_model_handle,
-                    resource_model_handle_source,
-                    resource_model_handle_reason);
-        }
+        resource_model_handle_found =
+            TryResolveKnifeDirectRenderModelHandleForWrite(
+                desired_model_name,
+                before_model_name_valid ? before_model_name : std::string(),
+                before_model_handle_valid ? before_model_handle : 0,
+                xuid,
+                resource_model_handle,
+                resource_model_handle_source,
+                resource_model_handle_reason);
         if (!resource_model_handle_found && resource_model_handle_reason.empty())
         {
             resource_model_handle_reason = L"synthetic_resource_query_unavailable";
@@ -27014,7 +30788,9 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
     const auto donor_found =
         !desired_model_already_bound &&
         TryFindKnifeDirectRenderModelDonor(entity_cache, offsets, desired_model_name, entity, donor);
-    const auto should_log_trace = ShouldLogWatchedKnifeAnimationTrace(xuid);
+    const auto watched_xuid = g_hook_state.watched_xuid.load();
+    const auto force_log_synthetic_rebind = xuid != 0 && watched_xuid == xuid;
+    const auto should_log_trace = force_log_synthetic_rebind || ShouldLogWatchedKnifeAnimationTrace(xuid);
     KnifeRenderModelIdentitySnapshot target_before_identity {};
     KnifeRenderModelIdentitySnapshot donor_identity {};
     KnifeRenderModelIdentitySnapshot desired_identity {};
@@ -27215,7 +30991,7 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
             entity_index,
             entity,
             offsets,
-            desired_mesh_group_mask,
+            effective_desired_mesh_group_mask,
             desired_signature ^ 0x78A4ull);
 
     std::uint64_t after_model_handle = 0;
@@ -27247,7 +31023,7 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
                 after_model_handle == donor.model_handle));
     const auto mesh_group_matches =
         after_mesh_group_mask_valid &&
-        after_mesh_group_mask == desired_mesh_group_mask;
+        after_mesh_group_mask == effective_desired_mesh_group_mask;
     const auto model_write_satisfied =
         desired_model_already_bound ||
         (wrote_model_name &&
@@ -27276,6 +31052,7 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
             << L", wrote_donor_model_handle=" << (wrote_donor_model_handle ? 1 : 0)
             << L", wrote_mesh_group_mask=" << (wrote_mesh_group_mask ? 1 : 0)
             << L", desired_mesh_group_mask=" << desired_mesh_group_mask
+            << L", effective_mesh_group_mask=" << effective_desired_mesh_group_mask
             << L", before_handle=";
         if (before_model_handle_valid)
         {
@@ -27357,7 +31134,22 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
             << L", mesh_group_matches=" << (mesh_group_matches ? 1 : 0)
             << L", verified=" << (verified ? 1 : 0)
             << L", note=synthetic_proxy_safe_resource_or_donor_rebind";
-        nskinzcs2::Logger::Info(stream.str());
+        if (force_log_synthetic_rebind)
+        {
+            std::uint64_t synthetic_signature = desired_signature ^ 0x78A2ull;
+            synthetic_signature ^= static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(std::max(0, entity_index))) << 32;
+            synthetic_signature ^= verified ? 0x1ull : 0x2ull;
+            synthetic_signature ^= wrote_model_name ? 0x10ull : 0x20ull;
+            synthetic_signature ^= wrote_resource_model_handle ? 0x100ull : 0x200ull;
+            synthetic_signature ^= wrote_donor_model_handle ? 0x1000ull : 0x2000ull;
+            synthetic_signature ^= donor_found ? 0x10000ull : 0x20000ull;
+            LogProfileDiagnosticOnce(synthetic_signature, stream.str());
+        }
+        if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+        {
+            nskinzcs2::Logger::Info(stream.str());
+        }
     }
 
     if (should_log_trace)
@@ -27781,8 +31573,12 @@ void TryApplyKnifePhase2ModelBindInterceptionBeforeOriginal(const ClientSchemaOf
             if (ShouldLogWatchedKnifeAnimationTrace(state.xuid))
             {
                 std::wstringstream stream;
-                stream << L"Knife phase2 model-bind intercept cleared for XUID " << state.xuid
+                stream << (state.target_mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer
+                        ? L"Knife phase2 world-only bind cleared for XUID "
+                        : L"Knife phase2 model-bind intercept cleared for XUID ")
+                    << state.xuid
                     << L": reason=" << (reason != nullptr ? reason : L"unknown")
+                    << L", target_mode=" << KnifePhase2TargetModeText(state.target_mode)
                     << L", render_entity=" << state.render_entity_index;
                 nskinzcs2::Logger::Info(stream.str());
             }
@@ -27857,6 +31653,10 @@ void TryApplyKnifePhase2ModelBindInterceptionBeforeOriginal(const ClientSchemaOf
         }
     }
 
+    const auto target_label =
+        state.target_mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer
+            ? L"phase2_world_consumer"
+            : L"phase2_pre_render";
     const auto applied =
         TryApplyKnifeExactRenderModelState(
             state.render_entity_index,
@@ -27871,9 +31671,19 @@ void TryApplyKnifePhase2ModelBindInterceptionBeforeOriginal(const ClientSchemaOf
             state.desired_mesh_group_mask,
             state.render_signature,
             state.xuid,
-            L"phase2_pre_render",
+            target_label,
             state.desired_model_name);
-    if (!applied && ShouldLogWatchedKnifeAnimationTrace(state.xuid))
+    if (state.target_mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer &&
+        ShouldLogWatchedKnifeAnimationTrace(state.xuid))
+    {
+        std::wstringstream stream;
+        stream << L"Knife phase2 world-only bind verified=" << (applied ? 1 : 0)
+            << L" for XUID " << state.xuid
+            << L": render_entity=" << state.render_entity_index
+            << L", render_source=" << state.render_source;
+        nskinzcs2::Logger::Info(stream.str());
+    }
+    else if (!applied && ShouldLogWatchedKnifeAnimationTrace(state.xuid))
     {
         std::wstringstream stream;
         stream << L"Knife phase2 pre-render bind did not verify for XUID " << state.xuid
@@ -28658,11 +32468,20 @@ std::uintptr_t HandleKnifeModelResourceOverrideCall(
 
     state.observed_slot_mask |= (1ull << hook_index);
 
-    bool exact_apply_succeeded = false;
-    if (kKnifeModelResourceOverrideEnableExactPostCallApply &&
-        (argument_is_knife_model || allow_override) &&
+    const auto target_bucket_classified =
+        target_bucket == KnifeModelOverrideTargetBucket::WorldRender ||
+        target_bucket == KnifeModelOverrideTargetBucket::FirstPerson;
+    const auto should_attempt_exact_post_apply =
+        kKnifeModelResourceOverrideEnableExactPostCallApply &&
         desired_model_name_pointer != nullptr &&
-        desired_model_name_pointer[0] != '\0')
+        desired_model_name_pointer[0] != '\0' &&
+        ((argument_is_knife_model || allow_override) ||
+         (target_bucket_classified &&
+          (is_render_entity || is_world_entity) &&
+          (desired_model_handle_valid || desired_model_name_token_valid)));
+
+    bool exact_apply_succeeded = false;
+    if (should_attempt_exact_post_apply)
     {
         exact_apply_succeeded =
             TryApplyKnifeExactRenderModelState(
@@ -28792,6 +32611,7 @@ std::uintptr_t HandleKnifeModelResourceOverrideCall(
             << L", knife_model=" << (argument_is_knife_model ? 1 : 0)
             << L", override_applied=" << (allow_override ? 1 : 0)
             << L", exact_post_apply=" << (exact_apply_succeeded ? 1 : 0)
+            << L", exact_post_apply_eligible=" << (should_attempt_exact_post_apply ? 1 : 0)
             << L", model_path="
             << (inbound_model_path.empty() ? L"<none>" : NarrowToWide(inbound_model_path))
             << L", rtti=" << BuildRuntimeEntityRttiDescriptor(this_ptr);
@@ -29487,6 +33307,7 @@ bool ShouldKeepKnifeSyntheticRenderIsolationActive(const KnifeModelPathState& st
 {
     return state.active &&
         state.direct_render_rebind_succeeded &&
+        !state.resource_only_render_active &&
         state.synthetic_world_visual_isolation_active &&
         IsResolvedRuntimeEntityIndex(state.world_render_entity_index) &&
         state.world_render_entity != nullptr &&
@@ -29921,6 +33742,154 @@ std::wstring BuildWeaponRenderConsumerEntityDiagnostic(
     return stream.str();
 }
 
+enum class KnifeWorldOnlyRenderVerificationReason
+{
+    Verified,
+    MissingWorldRenderState,
+    MissingWorldRenderModel,
+    WorldRenderModelMismatch,
+    WorldRenderHandleMismatch,
+    WorldRenderMeshMismatch,
+    MissingResourceHits,
+    MissingResourceReadback,
+};
+
+struct KnifeWorldOnlyRenderVerificationInputs
+{
+    bool world_render_state_resolved = false;
+    bool world_render_expected_model_resolved = false;
+    bool world_render_model_matches_target = false;
+    bool world_render_handle_matches_target_or_donor = false;
+    bool world_render_mesh_matches_target = false;
+    int resource_hits = 0;
+    bool resource_readback = false;
+};
+
+struct KnifeWorldOnlyRenderVerificationResult
+{
+    bool verified = false;
+    KnifeWorldOnlyRenderVerificationReason reason =
+        KnifeWorldOnlyRenderVerificationReason::MissingWorldRenderState;
+};
+
+const wchar_t* KnifeWorldOnlyRenderVerificationReasonText(
+    const KnifeWorldOnlyRenderVerificationReason reason) noexcept
+{
+    switch (reason)
+    {
+    case KnifeWorldOnlyRenderVerificationReason::Verified:
+        return L"verified";
+    case KnifeWorldOnlyRenderVerificationReason::MissingWorldRenderModel:
+        return L"missing_world_render_model";
+    case KnifeWorldOnlyRenderVerificationReason::WorldRenderModelMismatch:
+        return L"world_render_model_mismatch";
+    case KnifeWorldOnlyRenderVerificationReason::WorldRenderHandleMismatch:
+        return L"world_render_handle_mismatch";
+    case KnifeWorldOnlyRenderVerificationReason::WorldRenderMeshMismatch:
+        return L"world_render_mesh_mismatch";
+    case KnifeWorldOnlyRenderVerificationReason::MissingResourceHits:
+        return L"missing_resource_hits";
+    case KnifeWorldOnlyRenderVerificationReason::MissingResourceReadback:
+        return L"missing_resource_readback";
+    default:
+        return L"missing_world_render_state";
+    }
+}
+
+KnifeWorldOnlyRenderVerificationResult EvaluateKnifeWorldOnlyRenderVerification(
+    const KnifeWorldOnlyRenderVerificationInputs& inputs) noexcept
+{
+    if (!inputs.world_render_state_resolved)
+    {
+        return {};
+    }
+
+    if (!inputs.world_render_expected_model_resolved)
+    {
+        return {false, KnifeWorldOnlyRenderVerificationReason::MissingWorldRenderModel};
+    }
+
+    if (!inputs.world_render_model_matches_target)
+    {
+        return {false, KnifeWorldOnlyRenderVerificationReason::WorldRenderModelMismatch};
+    }
+
+    if (!inputs.world_render_handle_matches_target_or_donor)
+    {
+        return {false, KnifeWorldOnlyRenderVerificationReason::WorldRenderHandleMismatch};
+    }
+
+    if (!inputs.world_render_mesh_matches_target)
+    {
+        return {false, KnifeWorldOnlyRenderVerificationReason::WorldRenderMeshMismatch};
+    }
+
+    if (inputs.resource_hits <= 0)
+    {
+        return {false, KnifeWorldOnlyRenderVerificationReason::MissingResourceHits};
+    }
+
+    if (!inputs.resource_readback)
+    {
+        return {false, KnifeWorldOnlyRenderVerificationReason::MissingResourceReadback};
+    }
+
+    return {true, KnifeWorldOnlyRenderVerificationReason::Verified};
+}
+
+struct KnifeWorldOnlyResourceEvidence
+{
+    int resource_hits = 0;
+    std::uint64_t donor_world_handle = 0;
+    std::uint64_t target_world_handle = 0;
+};
+
+KnifeWorldOnlyResourceEvidence CollectKnifeWorldOnlyResourceEvidence(
+    const std::uint64_t xuid) noexcept
+{
+    KnifeWorldOnlyResourceEvidence evidence {};
+
+    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+    const auto& swap_state = g_hook_state.knife_model_path_swap_state;
+    if (swap_state.enabled && swap_state.xuid == xuid)
+    {
+        evidence.donor_world_handle = swap_state.bridge_world_donor_handle;
+        if (swap_state.resolved_target_world_handle_valid &&
+            swap_state.resolved_target_world_handle != 0)
+        {
+            evidence.target_world_handle = swap_state.resolved_target_world_handle;
+        }
+    }
+
+    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+    if (published_bridge.valid && published_bridge.xuid == xuid)
+    {
+        if (evidence.donor_world_handle == 0)
+        {
+            evidence.donor_world_handle = published_bridge.preferred_source_handle;
+        }
+        if (evidence.target_world_handle == 0)
+        {
+            evidence.target_world_handle = published_bridge.preferred_target_handle;
+        }
+    }
+
+    const auto hook_index = ResourceHandleQueryHookIndex(ResourceHandleQueryInterfaceKind::ResourceSystem);
+    if (hook_index != kInvalidResourceHandleQuerySlot &&
+        hook_index < g_hook_state.knife_model_path_swap_query_hooks.size())
+    {
+        const auto& hook_target = g_hook_state.knife_model_path_swap_query_hooks[hook_index];
+        if (hook_target.valid &&
+            hook_target.patch.installed &&
+            hook_target.original != nullptr)
+        {
+            evidence.resource_hits = hook_target.valid_resource_hit_count;
+        }
+    }
+
+    return evidence;
+}
+
 bool TryProcessKnifePostRefreshVerification(
     const ClientSchemaOffsets& offsets,
     const PendingKnifePostRefreshVerification& verification,
@@ -30050,6 +34019,212 @@ bool TryProcessKnifePostRefreshVerification(
         }
     }
 
+    try_refresh_optional_binding(
+        L"world_owner_verification",
+        live_verification.world_entity_index,
+        live_verification.world_entity,
+        live_verification.world_item_view);
+    try_refresh_optional_binding(
+        L"hud_verification",
+        live_verification.hud_entity_index,
+        live_verification.hud_entity,
+        live_verification.hud_item_view);
+
+    if (live_verification.target_mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer)
+    {
+        bool world_render_dirty = false;
+        if (live_verification.world_render_entity != nullptr &&
+            IsResolvedRuntimeEntityIndex(live_verification.world_render_entity_index))
+        {
+            world_render_dirty =
+                TryApplyWeaponMeshGroupMask(
+                    live_verification.world_render_entity_index,
+                    live_verification.world_render_entity,
+                    offsets,
+                    live_verification.world_render_desired_mesh_group_mask,
+                    live_verification.desired_signature ^ 0x7861ull);
+        }
+
+        std::string world_render_model_name;
+        const auto world_render_state_resolved =
+            live_verification.world_render_entity != nullptr &&
+            IsResolvedRuntimeEntityIndex(live_verification.world_render_entity_index);
+        const auto world_render_model_resolved =
+            world_render_state_resolved &&
+            TryReadEntityModelNameString(
+                live_verification.world_render_entity,
+                offsets,
+                world_render_model_name);
+        std::uint64_t world_render_live_mesh_mask = 0;
+        const auto world_render_mesh_resolved =
+            world_render_state_resolved &&
+            TryReadKnifeRenderableMeshGroupMask(
+                live_verification.world_render_entity_index,
+                live_verification.world_render_entity,
+                offsets,
+                world_render_live_mesh_mask);
+        const auto world_render_identity =
+            ResolveKnifeRenderModelIdentitySnapshot(
+                live_verification.world_render_entity_index,
+                live_verification.world_render_entity,
+                offsets);
+        const auto world_only_resource_evidence =
+            CollectKnifeWorldOnlyResourceEvidence(live_verification.xuid);
+        const auto world_render_handle_matches_target_or_donor =
+            world_render_identity.model_handle_resolved &&
+            ((live_verification.expected_world_render_model_handle_valid &&
+              world_render_identity.model_handle ==
+                  live_verification.expected_world_render_model_handle) ||
+             (world_only_resource_evidence.target_world_handle != 0 &&
+              world_render_identity.model_handle ==
+                  world_only_resource_evidence.target_world_handle) ||
+             (world_only_resource_evidence.donor_world_handle != 0 &&
+              world_render_identity.model_handle ==
+                  world_only_resource_evidence.donor_world_handle));
+
+        KnifeWorldOnlyRenderVerificationInputs verification_inputs;
+        verification_inputs.world_render_state_resolved = world_render_state_resolved;
+        verification_inputs.world_render_expected_model_resolved =
+            live_verification.expected_world_render_model_name != nullptr;
+        verification_inputs.world_render_model_matches_target =
+            live_verification.expected_world_render_model_name != nullptr &&
+            world_render_model_resolved &&
+            ModelIdentityPathMatches(
+                world_render_model_name,
+                live_verification.expected_world_render_model_name);
+        verification_inputs.world_render_handle_matches_target_or_donor =
+            world_render_handle_matches_target_or_donor;
+        verification_inputs.world_render_mesh_matches_target =
+            world_render_mesh_resolved &&
+            world_render_live_mesh_mask == live_verification.world_render_desired_mesh_group_mask;
+        verification_inputs.resource_hits = world_only_resource_evidence.resource_hits;
+        verification_inputs.resource_readback =
+            verification_inputs.world_render_model_matches_target;
+
+        const auto world_only_verification =
+            EvaluateKnifeWorldOnlyRenderVerification(verification_inputs);
+        const auto expected_world_model_text =
+            live_verification.expected_world_render_model_name != nullptr
+                ? NarrowToWide(live_verification.expected_world_render_model_name)
+                : std::wstring {L"?"};
+
+        std::wstringstream stream;
+        stream << L"Knife post-refresh world-only verification for XUID "
+            << live_verification.xuid
+            << L": target_mode=world_only_consumer"
+            << L", world_render_dirty=" << (world_render_dirty ? 1 : 0)
+            << L", world_render_target_mesh_mask="
+            << live_verification.world_render_desired_mesh_group_mask
+            << L", resource_hits=" << world_only_resource_evidence.resource_hits
+            << L", resource_readback=" << (verification_inputs.resource_readback ? 1 : 0)
+            << L", verified=" << (world_only_verification.verified ? 1 : 0)
+            << L", reason="
+            << KnifeWorldOnlyRenderVerificationReasonText(world_only_verification.reason)
+            << L", expected_world_model=" << expected_world_model_text
+            << L", expected_world_handle_valid="
+            << (live_verification.expected_world_render_model_handle_valid ? 1 : 0)
+            << L", donor_world_handle=0x" << std::hex << std::uppercase
+            << world_only_resource_evidence.donor_world_handle
+            << L", target_world_handle=0x"
+            << world_only_resource_evidence.target_world_handle
+            << std::dec << std::nouppercase
+            << L" | "
+            << BuildWeaponRenderConsumerEntityDiagnostic(
+                   L"world_carrier",
+                   live_verification.world_entity_index,
+                   live_verification.world_entity,
+                   live_verification.world_item_view,
+                   offsets)
+            << L" | "
+            << BuildWeaponRenderConsumerEntityDiagnostic(
+                   L"world_render",
+                   live_verification.world_render_entity_index,
+                   live_verification.world_render_entity,
+                   live_verification.world_render_item_view,
+                   offsets);
+        if (live_verification.hud_entity != nullptr &&
+            IsResolvedRuntimeEntityIndex(live_verification.hud_entity_index))
+        {
+            stream << L" | "
+                << BuildWeaponRenderConsumerEntityDiagnostic(
+                       L"hud",
+                       live_verification.hud_entity_index,
+                       live_verification.hud_entity,
+                       live_verification.hud_item_view,
+                       offsets);
+        }
+        if (live_verification.world_render_is_explicit_owner_child &&
+            live_verification.world_render_model_name_token_before_valid)
+        {
+            std::uint64_t world_render_model_name_token_after = 0;
+            if (TryReadEntityModelNameToken(
+                    live_verification.world_render_entity,
+                    offsets,
+                    world_render_model_name_token_after) &&
+                world_render_model_name_token_after ==
+                    live_verification.world_render_model_name_token_before)
+            {
+                stream << L" | note=binding correct, render rebind still missing";
+            }
+        }
+
+        nskinzcs2::model::CosmeticProfile diagnostic_profile;
+        diagnostic_profile.xuid = live_verification.xuid;
+        diagnostic_profile.base_item = 42;
+        diagnostic_profile.override_item = live_verification.target_definition_index;
+
+        if (world_only_verification.verified)
+        {
+            nskinzcs2::Logger::Info(stream.str());
+            if (trace_watched)
+            {
+                TraceWatchedKnifeDiagnostic(diagnostic_profile, stream.str());
+            }
+
+            if (g_hook_state.knife_model_path_state.active &&
+                g_hook_state.knife_model_path_state.xuid == live_verification.xuid &&
+                g_hook_state.knife_model_path_state.world_entity_index ==
+                    live_verification.world_entity_index &&
+                g_hook_state.knife_model_path_state.world_render_entity_index ==
+                    live_verification.world_render_entity_index)
+            {
+                g_hook_state.knife_model_path_state.real_viewmodel_verified = false;
+                g_hook_state.knife_model_path_state.strict_verified = false;
+                g_hook_state.knife_model_path_state.animation_owner_verified = false;
+                g_hook_state.knife_model_path_state.verified_target_definition_index = 0;
+                g_hook_state.knife_model_path_state.verified_viewmodel_carrier_entity_index = -1;
+                g_hook_state.knife_model_path_state.verified_viewmodel_render_entity_index = -1;
+                g_hook_state.knife_model_path_state.direct_render_rebind_attempted = false;
+                g_hook_state.knife_model_path_state.direct_render_rebind_succeeded = false;
+                g_hook_state.knife_model_path_state.resource_only_render_active = true;
+                UpdateKnifeRuntimeStatusText(
+                    BuildKnifeModelAndFinishRuntimePathText(),
+                    L"single world consumer active; no separate first-person consumer observed");
+            }
+
+            return true;
+        }
+
+        const auto verification_issue =
+            std::wstring(L"knife post-refresh verification failed: ") +
+            KnifeWorldOnlyRenderVerificationReasonText(world_only_verification.reason);
+        if (issue != nullptr)
+        {
+            *issue = verification_issue;
+        }
+
+        nskinzcs2::Logger::Warn(stream.str());
+        TryRestoreAndClearKnifeModelPathState(
+            offsets,
+            L"post_refresh_world_only_verification_failed");
+        ResetKnifeAnimationStateSnapshot();
+        UpdateKnifeRuntimeStatusText(
+            BuildKnifeFinishOnlyRuntimePathText(),
+            BuildKnifeRuntimeReasonText(
+                nskinzcs2::runtime::KnifeApplyGateReason::RestoreUnverified));
+        return false;
+    }
+
     if (live_verification.first_person_render_entity == nullptr ||
         !IsResolvedRuntimeEntityIndex(live_verification.first_person_render_entity_index))
     {
@@ -30109,17 +34284,6 @@ bool TryProcessKnifePostRefreshVerification(
             live_verification.first_person_owner_item_view = live_first_person_owner_item_view;
         }
     }
-
-    try_refresh_optional_binding(
-        L"world_owner_verification",
-        live_verification.world_entity_index,
-        live_verification.world_entity,
-        live_verification.world_item_view);
-    try_refresh_optional_binding(
-        L"hud_verification",
-        live_verification.hud_entity_index,
-        live_verification.hud_entity,
-        live_verification.hud_item_view);
 
     if (!live_verification.first_person_owner_safe_for_animation ||
         live_verification.first_person_owner_kind != nskinzcs2::runtime::KnifeFirstPersonOwnerKind::ViewModel)
@@ -35027,6 +39191,31 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
             {
                 resolution.validation_result = L"real_viewmodel_owner_required";
                 resolution.owner_kind = owner_kind;
+                const auto signature =
+                    xuid ^
+                    (static_cast<std::uint64_t>(
+                         static_cast<std::uint32_t>(
+                             world_weapon_entity_index >= 0 ? world_weapon_entity_index : 0))
+                     << 32) ^
+                    (static_cast<std::uint64_t>(
+                         static_cast<std::uint32_t>(
+                             candidate_entity_index >= 0 ? candidate_entity_index : 0))
+                     << 8) ^
+                    0x4F574E4552524A31ull;
+                std::wstringstream stream;
+                stream << L"Knife first-person owner rejection: candidate_entity="
+                    << candidate_entity_index
+                    << L", candidate_definition=" << candidate_definition_index
+                    << L", owner_kind="
+                    << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(owner_kind)
+                    << L", preferred_owner_kind="
+                    << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(owner_kind_hint)
+                    << L", providee_entity=" << providee_entity_index
+                    << L", viewmodel_entity=" << viewmodel_entity_index
+                    << L", clue_source="
+                    << (resolution.clue_source != nullptr ? resolution.clue_source : L"none")
+                    << L", validation_result=real_viewmodel_owner_required";
+                LogProfileDiagnosticOnce(signature, stream.str());
                 return false;
             }
 
@@ -35146,6 +39335,755 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
                 direct_validation_result);
         };
 
+    auto log_providee_owner_certification_once =
+        [&]()
+        {
+            if (!clue_found ||
+                resolution.clue_source == nullptr ||
+                std::wcscmp(resolution.clue_source, L"providee_render_child") != 0 ||
+                !IsResolvedRuntimeEntityIndex(providee_entity_index) ||
+                IsSyntheticRuntimeEntityIndex(providee_entity_index) ||
+                providee_entity_index == world_weapon_entity_index)
+            {
+                return;
+            }
+
+            const auto signature =
+                xuid ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         world_weapon_entity_index >= 0 ? world_weapon_entity_index : 0))
+                 << 32) ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         providee_entity_index >= 0 ? providee_entity_index : 0))
+                 << 8) ^
+                0x5052564F574E5231ull;
+
+            void* providee_entity = nullptr;
+            if (static_cast<std::size_t>(providee_entity_index) < entity_cache.size())
+            {
+                providee_entity = entity_cache[static_cast<std::size_t>(providee_entity_index)];
+            }
+            if (providee_entity == nullptr &&
+                (!TryGetEntityFromIndex(entity_list, providee_entity_index, providee_entity) ||
+                 providee_entity == nullptr))
+            {
+                std::wstringstream stream;
+                stream << L"Knife providee owner certification: candidate_entity="
+                    << providee_entity_index
+                    << L", clue_source=" << resolution.clue_source
+                    << L", result=entity_unresolved";
+                LogProfileDiagnosticOnce(signature, stream.str());
+                return;
+            }
+
+            auto* providee_item_view = ResolveWeaponItemView(providee_entity, offsets);
+            if (providee_item_view == nullptr)
+            {
+                std::wstringstream stream;
+                stream << L"Knife providee owner certification: candidate_entity="
+                    << providee_entity_index
+                    << L", clue_source=" << resolution.clue_source
+                    << L", result=item_view_missing";
+                LogProfileDiagnosticOnce(signature, stream.str());
+                return;
+            }
+
+            if (ClassifyKnifeFirstPersonRenderableModel(providee_entity, offsets) !=
+                KnifeFirstPersonRenderableModelKind::WeaponLike)
+            {
+                std::wstringstream stream;
+                stream << L"Knife providee owner certification: candidate_entity="
+                    << providee_entity_index
+                    << L", clue_source=" << resolution.clue_source
+                    << L", result=not_weapon_like";
+                LogProfileDiagnosticOnce(signature, stream.str());
+                return;
+            }
+
+            if (offsets.base_owner_entity != 0)
+            {
+                std::uint32_t candidate_owner_handle = kInvalidEntityHandle;
+                if (SafeReadField(providee_entity, offsets.base_owner_entity, candidate_owner_handle) &&
+                    HandleToEntityIndex(candidate_owner_handle) == world_weapon_entity_index)
+                {
+                    std::wstringstream stream;
+                    stream << L"Knife providee owner certification: candidate_entity="
+                        << providee_entity_index
+                        << L", clue_source=" << resolution.clue_source
+                        << L", result=world_owned_proxy";
+                    LogProfileDiagnosticOnce(signature, stream.str());
+                    return;
+                }
+            }
+
+            int safe_definition_index = 0;
+            if (!IsSafeLinkedWeaponItemView(
+                    providee_item_view,
+                    offsets,
+                    xuid,
+                    parent_definition_index,
+                    known_definition_indices,
+                    knife_definition_indices,
+                    glove_definition_indices,
+                    safe_definition_index))
+            {
+                std::wstringstream stream;
+                stream << L"Knife providee owner certification: candidate_entity="
+                    << providee_entity_index
+                    << L", clue_source=" << resolution.clue_source
+                    << L", result=item_view_unsafe";
+                LogProfileDiagnosticOnce(signature, stream.str());
+                return;
+            }
+
+            const auto owner_kind =
+                ResolvePersistentKnifeOwnerKind(
+                    providee_entity_index,
+                    providee_entity_index,
+                    viewmodel_entity_index,
+                    nskinzcs2::runtime::KnifeFirstPersonOwnerKind::Providee);
+            if (owner_kind != nskinzcs2::runtime::KnifeFirstPersonOwnerKind::ViewModel)
+            {
+                std::wstringstream stream;
+                stream << L"Knife first-person owner rejection: candidate_entity="
+                    << providee_entity_index
+                    << L", candidate_definition="
+                    << (safe_definition_index != 0 ? safe_definition_index : parent_definition_index)
+                    << L", owner_kind="
+                    << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(owner_kind)
+                    << L", preferred_owner_kind="
+                    << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(
+                           nskinzcs2::runtime::KnifeFirstPersonOwnerKind::Providee)
+                    << L", providee_entity=" << providee_entity_index
+                    << L", viewmodel_entity=" << viewmodel_entity_index
+                    << L", clue_source=" << resolution.clue_source
+                    << L", validation_result=real_viewmodel_owner_required";
+                LogProfileDiagnosticOnce(signature, stream.str());
+                return;
+            }
+
+            std::wstringstream stream;
+            stream << L"Knife providee owner certification: candidate_entity="
+                << providee_entity_index
+                << L", clue_source=" << resolution.clue_source
+                << L", result=viewmodel_owner";
+            LogProfileDiagnosticOnce(signature, stream.str());
+        };
+
+    auto log_providee_missing_handle_diagnostic_once =
+        [&](const KnifeViewmodelAbsenceAudit& audit)
+        {
+            if (resolution.clue_source == nullptr ||
+                std::wcscmp(resolution.clue_source, L"providee_render_child") != 0 ||
+                audit.result != nskinzcs2::runtime::KnifeViewmodelAbsenceAuditResult::MissingHandle)
+            {
+                return;
+            }
+
+            const auto signature =
+                xuid ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         world_weapon_entity_index >= 0 ? world_weapon_entity_index : 0))
+                 << 32) ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         providee_entity_index >= 0 ? providee_entity_index : 0))
+                 << 8) ^
+                0x4D49535348444C31ull;
+            std::wstringstream stream;
+            stream << L"Knife viewmodel handle missing on providee path: world_entity="
+                << world_weapon_entity_index
+                << L", providee_entity=" << providee_entity_index
+                << L", clue_entity=" << resolution.clue_entity_index
+                << L", clue_source=" << resolution.clue_source
+                << L", field_present=" << (audit.field_present ? 1 : 0)
+                << L", raw_handle=0x" << std::hex << std::uppercase << audit.raw_handle
+                << std::dec << std::nouppercase
+                << L", handle_entity=" << audit.handle_entity_index
+                << L", raw_entity_visible=" << (audit.raw_entity_visible ? 1 : 0)
+                << L", reverse_viewmodel_refs=" << audit.reverse_viewmodel_ref_count
+                << L", closest_owner_chain_entity=" << audit.closest_owner_chain_entity_index
+                << L", result=" << KnifeViewmodelAbsenceAuditResultText(audit.result);
+            LogProfileDiagnosticOnce(signature, stream.str());
+        };
+    const auto should_force_providee_owner_search_diagnostics =
+        clue_found &&
+        resolution.clue_source != nullptr &&
+        std::wcscmp(resolution.clue_source, L"providee_render_child") == 0;
+
+    auto log_providee_owner_search_stage_once =
+        [&](const wchar_t* stage, const std::wstring& detail)
+        {
+            if (!should_force_providee_owner_search_diagnostics)
+            {
+                return;
+            }
+
+            std::uint64_t stage_hash = 0x5345415243483031ull;
+            if (stage != nullptr)
+            {
+                for (const wchar_t* cursor = stage; *cursor != L'\0'; ++cursor)
+                {
+                    stage_hash = (stage_hash * 131ull) ^ static_cast<std::uint64_t>(*cursor);
+                }
+            }
+
+            const auto signature =
+                xuid ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         world_weapon_entity_index >= 0 ? world_weapon_entity_index : 0))
+                 << 32) ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(
+                         providee_entity_index >= 0 ? providee_entity_index : 0))
+                 << 8) ^
+                stage_hash;
+            std::wstringstream stream;
+            stream << L"Knife providee owner search[" << (stage != nullptr ? stage : L"unknown")
+                << L"]: clue_entity=" << resolution.clue_entity_index
+                << L", providee_entity=" << providee_entity_index
+                << L", detail=" << detail;
+            LogProfileDiagnosticOnce(signature, stream.str());
+        };
+
+    auto build_targeted_probe_entity_descriptor =
+        [&](const int entity_index)
+        {
+            if (entity_index < 0 || IsSyntheticRuntimeEntityIndex(entity_index))
+            {
+                return std::wstring(L"entity=<invalid>");
+            }
+
+            void* entity = nullptr;
+            if (static_cast<std::size_t>(entity_index) < entity_cache.size())
+            {
+                entity = entity_cache[static_cast<std::size_t>(entity_index)];
+            }
+            if (entity == nullptr &&
+                (!TryGetEntityFromIndex(entity_list, entity_index, entity) || entity == nullptr))
+            {
+                std::wstringstream stream;
+                stream << L"entity=" << entity_index << L", unresolved=1";
+                return stream.str();
+            }
+
+            auto* item_view = ResolveWeaponItemView(entity, offsets);
+            std::wstring descriptor =
+                BuildWeaponRenderConsumerEntityDiagnostic(L"entity", entity_index, entity, item_view, offsets);
+            if (!descriptor.empty() && descriptor.back() == L'}')
+            {
+                descriptor.pop_back();
+            }
+
+            std::uint32_t owner_handle = kInvalidEntityHandle;
+            const auto owner_readable =
+                offsets.base_owner_entity != 0 &&
+                SafeReadField(entity, offsets.base_owner_entity, owner_handle);
+            const auto owner_index = owner_readable ? HandleToEntityIndex(owner_handle) : -1;
+
+            std::uint32_t old_move_parent_handle = kInvalidEntityHandle;
+            const auto old_move_parent_readable =
+                offsets.base_old_move_parent != 0 &&
+                SafeReadField(entity, offsets.base_old_move_parent, old_move_parent_handle);
+            const auto old_move_parent_index =
+                old_move_parent_readable ? HandleToEntityIndex(old_move_parent_handle) : -1;
+
+            std::uint32_t viewmodel_handle = kInvalidEntityHandle;
+            const auto viewmodel_readable =
+                offsets.econ_entity_viewmodel_attachment != 0 &&
+                SafeReadField(entity, offsets.econ_entity_viewmodel_attachment, viewmodel_handle);
+            const auto viewmodel_index =
+                viewmodel_readable ? HandleToEntityIndex(viewmodel_handle) : -1;
+
+            std::uint32_t providee_handle = kInvalidEntityHandle;
+            const auto providee_readable =
+                offsets.econ_entity_old_providee != 0 &&
+                SafeReadField(entity, offsets.econ_entity_old_providee, providee_handle);
+            const auto attached_providee_index =
+                providee_readable ? HandleToEntityIndex(providee_handle) : -1;
+
+            std::uintptr_t model_state_address = 0;
+            const auto model_state_resolved =
+                TryResolveEntityModelStateAddress(entity, offsets, model_state_address) &&
+                model_state_address != 0;
+
+            void* scene_node = nullptr;
+            const auto scene_node_resolved =
+                offsets.base_entity_game_scene_node != 0 &&
+                SafeReadField(entity, offsets.base_entity_game_scene_node, scene_node) &&
+                scene_node != nullptr;
+            void* scene_owner_entity = nullptr;
+            int scene_owner_index = -1;
+            if (scene_node_resolved && offsets.game_scene_node_owner != 0)
+            {
+                if (SafeReadField(scene_node, offsets.game_scene_node_owner, scene_owner_entity) &&
+                    scene_owner_entity != nullptr)
+                {
+                    scene_owner_index = ResolveEntityIndexFromPointer(entity_cache, scene_owner_entity);
+                    if (scene_owner_index < 0)
+                    {
+                        scene_owner_index = BuildSyntheticEntityIndex(scene_owner_entity, 0x50525453u);
+                    }
+                }
+            }
+
+            const auto render_identity =
+                ResolveKnifeRenderObjectIdentity(entity, item_view, offsets);
+            const auto render_match =
+                resolution.clue_render_object.IsUsable() &&
+                KnifeRenderObjectIdentityMatches(render_identity, resolution.clue_render_object);
+
+            int owner_chain_depth_to_pawn = -1;
+            const auto owner_chain_to_pawn =
+                player_binding.pawn_entity_index >= 0 &&
+                KnifeOwnerChainContainsEntity(
+                    entity_list,
+                    entity_cache,
+                    entity_index,
+                    entity,
+                    offsets,
+                    player_binding.pawn_entity_index,
+                    owner_chain_depth_to_pawn);
+
+            int owner_chain_depth_to_providee = -1;
+            const auto owner_chain_to_providee =
+                providee_entity_index >= 0 &&
+                KnifeOwnerChainContainsEntity(
+                    entity_list,
+                    entity_cache,
+                    entity_index,
+                    entity,
+                    offsets,
+                    providee_entity_index,
+                    owner_chain_depth_to_providee);
+
+            int owner_chain_depth_to_viewmodel = -1;
+            const auto owner_chain_to_viewmodel =
+                viewmodel_entity_index >= 0 &&
+                KnifeOwnerChainContainsEntity(
+                    entity_list,
+                    entity_cache,
+                    entity_index,
+                    entity,
+                    offsets,
+                    viewmodel_entity_index,
+                    owner_chain_depth_to_viewmodel);
+
+            auto format_optional_handle =
+                [](const bool readable, const std::uint32_t raw_handle)
+                {
+                    if (!readable)
+                    {
+                        return std::wstring(L"?");
+                    }
+
+                    std::wstringstream stream;
+                    stream << L"0x" << std::hex << std::uppercase << raw_handle
+                           << std::dec << std::nouppercase;
+                    return stream.str();
+                };
+
+            descriptor +=
+                std::wstring(L", owner_handle=") + format_optional_handle(owner_readable, owner_handle) +
+                L", owner_index=" + std::to_wstring(owner_index) +
+                L", old_move_parent_handle=" +
+                format_optional_handle(old_move_parent_readable, old_move_parent_handle) +
+                L", old_move_parent_index=" + std::to_wstring(old_move_parent_index) +
+                L", viewmodel_handle=" + format_optional_handle(viewmodel_readable, viewmodel_handle) +
+                L", attached_viewmodel_index=" + std::to_wstring(viewmodel_index) +
+                L", providee_handle=" + format_optional_handle(providee_readable, providee_handle) +
+                L", attached_providee_index=" + std::to_wstring(attached_providee_index) +
+                L", model_state=" +
+                std::wstring(
+                    model_state_resolved
+                        ? FormatPointer(reinterpret_cast<void*>(model_state_address))
+                        : L"0x0") +
+                L", scene_owner=" + std::to_wstring(scene_owner_index) +
+                L", scene_owner_ptr=" + FormatPointer(scene_owner_entity) +
+                L", pawn_match=" + std::to_wstring(entity_index == player_binding.pawn_entity_index ? 1 : 0) +
+                L", providee_match=" + std::to_wstring(entity_index == providee_entity_index ? 1 : 0) +
+                L", viewmodel_match=" + std::to_wstring(entity_index == viewmodel_entity_index ? 1 : 0) +
+                L", render_object_match=" + std::to_wstring(render_match ? 1 : 0) +
+                L", owner_chain_to_pawn=" + std::to_wstring(owner_chain_to_pawn ? 1 : 0) +
+                L", owner_chain_depth_to_pawn=" + std::to_wstring(owner_chain_depth_to_pawn) +
+                L", owner_chain_to_providee=" + std::to_wstring(owner_chain_to_providee ? 1 : 0) +
+                L", owner_chain_depth_to_providee=" +
+                std::to_wstring(owner_chain_depth_to_providee) +
+                L", owner_chain_to_viewmodel=" + std::to_wstring(owner_chain_to_viewmodel ? 1 : 0) +
+                L", owner_chain_depth_to_viewmodel=" +
+                std::to_wstring(owner_chain_depth_to_viewmodel) +
+                L", " + BuildRuntimeEntityRttiDescriptor(entity) +
+                L", owner_chain=" +
+                BuildKnifeOwnerChainDescriptor(entity_cache, entity_index, entity, offsets) +
+                L'}';
+            return descriptor;
+        };
+
+    auto log_targeted_owner_pair_probe_once =
+        [&](const wchar_t* stage, const int candidate_entity_index, const int owner_entity_index)
+        {
+            if (!should_force_providee_owner_search_diagnostics)
+            {
+                return;
+            }
+
+            std::wstringstream stream;
+            stream << L"candidate=" << candidate_entity_index
+                << L", owner=" << owner_entity_index
+                << L", candidate_descriptor="
+                << build_targeted_probe_entity_descriptor(candidate_entity_index)
+                << L", owner_descriptor="
+                << build_targeted_probe_entity_descriptor(owner_entity_index);
+            log_providee_owner_search_stage_once(
+                stage != nullptr ? stage : L"targeted_probe",
+                stream.str());
+        };
+
+    auto resolve_probe_entity =
+        [&](const int entity_index) -> void*
+        {
+            if (entity_index < 0 || IsSyntheticRuntimeEntityIndex(entity_index))
+            {
+                return nullptr;
+            }
+
+            if (static_cast<std::size_t>(entity_index) < entity_cache.size())
+            {
+                if (entity_cache[static_cast<std::size_t>(entity_index)] != nullptr)
+                {
+                    return entity_cache[static_cast<std::size_t>(entity_index)];
+                }
+            }
+
+            void* entity = nullptr;
+            if (TryGetEntityFromIndex(entity_list, entity_index, entity) && entity != nullptr)
+            {
+                return entity;
+            }
+
+            return nullptr;
+        };
+
+    auto build_probe_trace_node =
+        [&](const int entity_index)
+        {
+            void* entity = resolve_probe_entity(entity_index);
+            if (entity == nullptr)
+            {
+                std::wstringstream stream;
+                stream << L"{entity=" << entity_index << L", unresolved=1}";
+                return stream.str();
+            }
+
+            std::uintptr_t model_state_address = 0;
+            const auto model_state_resolved =
+                TryResolveEntityModelStateAddress(entity, offsets, model_state_address) &&
+                model_state_address != 0;
+            void* scene_node = nullptr;
+            const auto scene_node_resolved =
+                offsets.base_entity_game_scene_node != 0 &&
+                SafeReadField(entity, offsets.base_entity_game_scene_node, scene_node) &&
+                scene_node != nullptr;
+            void* scene_owner_entity = nullptr;
+            int scene_owner_index = -1;
+            if (scene_node_resolved && offsets.game_scene_node_owner != 0)
+            {
+                if (SafeReadField(scene_node, offsets.game_scene_node_owner, scene_owner_entity) &&
+                    scene_owner_entity != nullptr)
+                {
+                    scene_owner_index = ResolveEntityIndexFromPointer(entity_cache, scene_owner_entity);
+                    if (scene_owner_index < 0)
+                    {
+                        scene_owner_index = BuildSyntheticEntityIndex(scene_owner_entity, 0x54524353u);
+                    }
+                }
+            }
+
+            std::uint32_t owner_handle = kInvalidEntityHandle;
+            const auto owner_readable =
+                offsets.base_owner_entity != 0 &&
+                SafeReadField(entity, offsets.base_owner_entity, owner_handle);
+            const auto owner_index = owner_readable ? HandleToEntityIndex(owner_handle) : -1;
+
+            std::uint32_t old_move_parent_handle = kInvalidEntityHandle;
+            const auto old_move_parent_readable =
+                offsets.base_old_move_parent != 0 &&
+                SafeReadField(entity, offsets.base_old_move_parent, old_move_parent_handle);
+            const auto old_move_parent_index =
+                old_move_parent_readable ? HandleToEntityIndex(old_move_parent_handle) : -1;
+
+            std::string model_name;
+            TryReadEntityModelNameString(entity, offsets, model_name);
+            const auto render_identity =
+                ResolveKnifeRenderObjectIdentity(entity, ResolveWeaponItemView(entity, offsets), offsets);
+            const auto render_match =
+                resolution.clue_render_object.IsUsable() &&
+                KnifeRenderObjectIdentityMatches(render_identity, resolution.clue_render_object);
+
+            std::wstringstream stream;
+            stream << L"{entity=" << entity_index
+                << L", ptr=" << FormatPointer(entity)
+                << L", scene_owner=" << scene_owner_index
+                << L", owner=" << owner_index
+                << L", old_move_parent=" << old_move_parent_index
+                << L", model_state="
+                << (model_state_resolved
+                        ? FormatPointer(reinterpret_cast<void*>(model_state_address))
+                        : L"0x0")
+                << L", render_match=" << (render_match ? 1 : 0)
+                << L", rtti=" << BuildRuntimeEntityRttiDescriptor(entity);
+            if (!model_name.empty())
+            {
+                stream << L", model=" << NarrowToWide(model_name);
+            }
+            stream << L"}";
+            return stream.str();
+        };
+
+    auto log_providee_scene_owner_trace_once =
+        [&]()
+        {
+            if (!should_force_providee_owner_search_diagnostics ||
+                !IsResolvedRuntimeEntityIndex(providee_entity_index) ||
+                IsSyntheticRuntimeEntityIndex(providee_entity_index))
+            {
+                return;
+            }
+
+            auto build_branch =
+                [&](const int start_entity_index, const bool follow_scene_owner)
+                {
+                    std::wstringstream stream;
+                    std::unordered_set<int> visited;
+                    int current_entity_index = start_entity_index;
+                    for (int depth = 0; depth < 4; ++depth)
+                    {
+                        if (current_entity_index < 0 || visited.contains(current_entity_index))
+                        {
+                            break;
+                        }
+
+                        visited.insert(current_entity_index);
+                        if (depth != 0)
+                        {
+                            stream << L" -> ";
+                        }
+                        stream << build_probe_trace_node(current_entity_index);
+
+                        void* current_entity = resolve_probe_entity(current_entity_index);
+                        if (current_entity == nullptr)
+                        {
+                            break;
+                        }
+
+                        if (follow_scene_owner)
+                        {
+                            void* scene_node = nullptr;
+                            if (!(offsets.base_entity_game_scene_node != 0 &&
+                                  SafeReadField(
+                                      current_entity,
+                                      offsets.base_entity_game_scene_node,
+                                      scene_node) &&
+                                  scene_node != nullptr))
+                            {
+                                break;
+                            }
+
+                            void* scene_owner_entity = nullptr;
+                            if (!(offsets.game_scene_node_owner != 0 &&
+                                  SafeReadField(
+                                      scene_node,
+                                      offsets.game_scene_node_owner,
+                                      scene_owner_entity) &&
+                                  scene_owner_entity != nullptr))
+                            {
+                                break;
+                            }
+
+                            current_entity_index =
+                                ResolveEntityIndexFromPointer(entity_cache, scene_owner_entity);
+                            continue;
+                        }
+
+                        std::uint32_t owner_handle = kInvalidEntityHandle;
+                        if (offsets.base_owner_entity != 0 &&
+                            SafeReadField(current_entity, offsets.base_owner_entity, owner_handle) &&
+                            owner_handle != kInvalidEntityHandle)
+                        {
+                            current_entity_index = HandleToEntityIndex(owner_handle);
+                            continue;
+                        }
+
+                        std::uint32_t old_move_parent_handle = kInvalidEntityHandle;
+                        if (offsets.base_old_move_parent != 0 &&
+                            SafeReadField(
+                                current_entity,
+                                offsets.base_old_move_parent,
+                                old_move_parent_handle) &&
+                            old_move_parent_handle != kInvalidEntityHandle)
+                        {
+                            current_entity_index = HandleToEntityIndex(old_move_parent_handle);
+                            continue;
+                        }
+
+                        break;
+                    }
+
+                    return stream.str();
+                };
+
+            std::wstringstream stream;
+            stream << L"providee=" << build_probe_trace_node(providee_entity_index)
+                << L", scene_branch=" << build_branch(providee_entity_index, true)
+                << L", owner_branch=" << build_branch(providee_entity_index, false);
+            log_providee_owner_search_stage_once(L"providee_scene_owner_trace", stream.str());
+        };
+
+    auto log_world_render_alias_neighbors_once =
+        [&]()
+        {
+            if (!should_force_providee_owner_search_diagnostics || world_weapon_entity == nullptr)
+            {
+                return;
+            }
+
+            std::uintptr_t world_model_state = 0;
+            const auto world_model_state_resolved =
+                TryResolveEntityModelStateAddress(world_weapon_entity, offsets, world_model_state) &&
+                world_model_state != 0;
+            const auto world_render_identity =
+                ResolveKnifeRenderObjectIdentity(world_weapon_entity, world_item_view, offsets);
+
+            std::uint32_t world_viewmodel_handle = kInvalidEntityHandle;
+            if (offsets.econ_entity_viewmodel_attachment != 0)
+            {
+                SafeReadField(world_weapon_entity, offsets.econ_entity_viewmodel_attachment, world_viewmodel_handle);
+            }
+            const auto world_viewmodel_entity =
+                world_viewmodel_handle != kInvalidEntityHandle
+                    ? HandleToEntityIndex(world_viewmodel_handle)
+                    : -1;
+
+            int scanned = 0;
+            int shared_render_object_count = 0;
+            int shared_world_model_state_count = 0;
+            int without_viewmodel_attachment_count = 0;
+            std::vector<std::wstring> samples;
+            samples.reserve(4);
+
+            const auto highest_live_entity_index =
+                std::max(g_hook_state.highest_live_entity_index.load(), static_cast<int>(entity_cache.size()) - 1);
+            for (int entity_index = 0; entity_index <= highest_live_entity_index; ++entity_index)
+            {
+                void* entity = resolve_probe_entity(entity_index);
+                if (entity == nullptr || entity == world_weapon_entity)
+                {
+                    continue;
+                }
+
+                ++scanned;
+
+                auto* item_view = ResolveWeaponItemView(entity, offsets);
+                const auto render_identity = ResolveKnifeRenderObjectIdentity(entity, item_view, offsets);
+                const auto shared_clue_render_object =
+                    resolution.clue_render_object.IsUsable() &&
+                    KnifeRenderObjectIdentityMatches(render_identity, resolution.clue_render_object);
+                const auto shared_world_render_object =
+                    world_render_identity.IsUsable() &&
+                    KnifeRenderObjectIdentityMatches(render_identity, world_render_identity);
+
+                std::uintptr_t candidate_model_state = 0;
+                const auto candidate_model_state_resolved =
+                    TryResolveEntityModelStateAddress(entity, offsets, candidate_model_state) &&
+                    candidate_model_state != 0;
+                const auto shared_world_model_state =
+                    world_model_state_resolved &&
+                    candidate_model_state_resolved &&
+                    candidate_model_state == world_model_state;
+
+                if (!shared_clue_render_object &&
+                    !shared_world_render_object &&
+                    !shared_world_model_state)
+                {
+                    continue;
+                }
+
+                if (shared_clue_render_object || shared_world_render_object)
+                {
+                    ++shared_render_object_count;
+                }
+                if (shared_world_model_state)
+                {
+                    ++shared_world_model_state_count;
+                }
+
+                std::uint32_t candidate_viewmodel_handle = kInvalidEntityHandle;
+                const auto candidate_viewmodel_readable =
+                    offsets.econ_entity_viewmodel_attachment != 0 &&
+                    SafeReadField(entity, offsets.econ_entity_viewmodel_attachment, candidate_viewmodel_handle);
+                const auto candidate_viewmodel_entity =
+                    candidate_viewmodel_readable ? HandleToEntityIndex(candidate_viewmodel_handle) : -1;
+                const auto uses_viewmodel_attachment =
+                    candidate_viewmodel_entity == world_weapon_entity_index ||
+                    entity_index == world_viewmodel_entity;
+                if (uses_viewmodel_attachment)
+                {
+                    continue;
+                }
+
+                ++without_viewmodel_attachment_count;
+                if (samples.size() < 4)
+                {
+                    std::wstringstream sample;
+                    sample << L"entity=" << entity_index
+                        << L", shared_clue_render_object=" << (shared_clue_render_object ? 1 : 0)
+                        << L", shared_world_render_object=" << (shared_world_render_object ? 1 : 0)
+                        << L", shared_world_model_state=" << (shared_world_model_state ? 1 : 0)
+                        << L", candidate_viewmodel_entity=" << candidate_viewmodel_entity
+                        << L", descriptor=" << build_targeted_probe_entity_descriptor(entity_index);
+                    samples.push_back(sample.str());
+                }
+            }
+
+            std::wstringstream stream;
+            stream << L"world_entity=" << world_weapon_entity_index
+                << L", world_viewmodel_entity=" << world_viewmodel_entity
+                << L", world_model_state="
+                << (world_model_state_resolved
+                        ? FormatPointer(reinterpret_cast<void*>(world_model_state))
+                        : L"0x0")
+                << L", scanned=" << scanned
+                << L", shared_render_object=" << shared_render_object_count
+                << L", shared_world_model_state=" << shared_world_model_state_count
+                << L", without_viewmodel_attachment=" << without_viewmodel_attachment_count
+                << L", samples=";
+            if (samples.empty())
+            {
+                stream << L"<none>";
+            }
+            else
+            {
+                for (std::size_t index = 0; index < samples.size(); ++index)
+                {
+                    if (index != 0)
+                    {
+                        stream << L" | ";
+                    }
+                    stream << samples[index];
+                }
+            }
+            log_providee_owner_search_stage_once(L"world_render_alias_neighbors", stream.str());
+        };
+
+    log_targeted_owner_pair_probe_once(L"target_pair0", 280, 271);
+    log_targeted_owner_pair_probe_once(L"target_pair1", 503, 171);
+    log_providee_scene_owner_trace_once();
+    log_world_render_alias_neighbors_once();
+
     const auto matches_negative_resolution_cache =
         [&]() noexcept
         {
@@ -35162,6 +40100,29 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
 
     if (matches_negative_resolution_cache())
     {
+        log_providee_owner_certification_once();
+        if (clue_found &&
+            resolution.clue_source != nullptr &&
+            std::wcscmp(resolution.clue_source, L"providee_render_child") == 0)
+        {
+            const auto audit =
+                BuildKnifeViewmodelAbsenceAudit(
+                    entity_list,
+                    entity_cache,
+                    player_binding,
+                    world_weapon_entity_index,
+                    world_weapon_entity,
+                    offsets,
+                    xuid,
+                    parent_definition_index,
+                    known_definition_indices,
+                    knife_definition_indices,
+                    glove_definition_indices,
+                    providee_entity_index,
+                    viewmodel_entity_index,
+                    resolution.clue_render_object);
+            log_providee_missing_handle_diagnostic_once(audit);
+        }
         ClearPendingKnifeFirstPersonReacquire();
         resolution.validation_result = L"cached_negative_resolution";
         resolution.carrier_result = g_hook_state.knife_persistent_owner_negative_cache.carrier_result;
@@ -35226,10 +40187,16 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
                        offsets);
             nskinzcs2::Logger::Info(stream.str());
         }
+        std::wstringstream stream;
+        stream << L"linked_owner_entity=" << linked_owner_entity_index
+            << L", linked_owner_ptr=" << FormatPointer(linked_owner_entity)
+            << L", linked_owner_item_view=" << FormatPointer(linked_owner_item_view);
+        log_providee_owner_search_stage_once(L"linked_owner", stream.str());
     }
     else
     {
         resolution.validation_result = L"linked_owner_missing";
+        log_providee_owner_search_stage_once(L"linked_owner", L"missing");
     }
     (void)linked_owner_item_view;
 
@@ -35266,6 +40233,16 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
                        offsets);
             nskinzcs2::Logger::Info(stream.str());
         }
+        std::wstringstream stream;
+        stream << L"owner_entity=" << owner_chain_candidate.entity_index
+            << L", owner_depth=" << owner_chain_candidate.depth
+            << L", owner_model_kind="
+            << KnifeFirstPersonRenderableModelKindText(owner_chain_candidate.model_kind);
+        log_providee_owner_search_stage_once(L"owner_chain", stream.str());
+    }
+    else if (should_force_providee_owner_search_diagnostics)
+    {
+        log_providee_owner_search_stage_once(L"owner_chain", L"missing");
     }
 
     if (clue_found)
@@ -35446,6 +40423,23 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
                 stream << L", selected=<none>";
             }
             nskinzcs2::Logger::Info(stream.str());
+        }
+        {
+            std::wstringstream stream;
+            stream << L"scanned=" << scanned_candidates
+                << L", safe_weapon_like=" << safe_weapon_like_candidates
+                << L", matched=" << matched_candidates;
+            if (best_candidate_entity != nullptr)
+            {
+                stream << L", selected_entity=" << best_candidate_entity_index
+                    << L", selected_definition=" << best_candidate_definition_index
+                    << L", match_reason=" << best_match_reason;
+            }
+            else
+            {
+                stream << L", selected=<none>";
+            }
+            log_providee_owner_search_stage_once(L"reverse_scan", stream.str());
         }
 
         if (best_candidate_entity != nullptr)
@@ -35737,6 +40731,8 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
                 resolution.clue_render_object);
         LogKnifeViewmodelAbsenceAudit(
             xuid,
+            resolution.discovery_snapshot.viewmodel_absence_audit);
+        log_providee_missing_handle_diagnostic_once(
             resolution.discovery_snapshot.viewmodel_absence_audit);
 
         auto join_trace_samples =
@@ -36978,6 +41974,87 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
             {
                 if (!ShouldLogWatchedKnifeAnimationTrace(xuid))
                 {
+                    if (should_force_providee_owner_search_diagnostics)
+                    {
+                        auto build_forced_candidate_brief =
+                            [&](const CompleteCarrierCandidate& candidate)
+                            {
+                                std::wstringstream brief;
+                                brief << L"entity=" << candidate.entity_index
+                                    << L", definition=" << candidate.definition_index
+                                    << L", definition_readback=";
+                                if (candidate.definition_readable)
+                                {
+                                    brief << candidate.definition_readback;
+                                }
+                                else
+                                {
+                                    brief << L"?";
+                                }
+                                brief << L", owner=" << candidate.owner_index
+                                    << L", old_move_parent=" << candidate.old_move_parent_index
+                                    << L", reason=" << candidate.reason
+                                    << L", owner_kind="
+                                    << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(candidate.owner_kind)
+                                    << L", complete_fields=" << (candidate.complete_fields_ok ? 1 : 0)
+                                    << L", safe_linked=" << (candidate.safe_linked_item_view ? 1 : 0)
+                                    << L", owner_matches_player=" << (candidate.owner_matches_player ? 1 : 0)
+                                    << L", old_move_parent_matches_player="
+                                    << (candidate.old_move_parent_matches_player ? 1 : 0)
+                                    << L", owner_chain_depths=pawn:" << candidate.owner_chain_depth_to_pawn
+                                    << L"/providee:" << candidate.owner_chain_depth_to_providee
+                                    << L"/viewmodel:" << candidate.owner_chain_depth_to_viewmodel
+                                    << L", relation_to_render_object="
+                                    << (candidate.relation_to_render_object ? 1 : 0)
+                                    << L", direct_viewmodel_attachment="
+                                    << (candidate.direct_viewmodel_attachment ? 1 : 0)
+                                    << L", reverse_viewmodel_attachment="
+                                    << (candidate.reverse_viewmodel_attachment ? 1 : 0)
+                                    << L", direct_old_providee_attachment="
+                                    << (candidate.direct_old_providee_attachment ? 1 : 0)
+                                    << L", reverse_old_providee_reference="
+                                    << (candidate.reverse_old_providee_reference ? 1 : 0)
+                                    << L", scene_owner_match=" << (candidate.scene_owner_match ? 1 : 0)
+                                    << L", explicit_owner_child_match="
+                                    << (candidate.explicit_owner_child_match ? 1 : 0)
+                                    << L", world_neighborhood_match="
+                                    << (candidate.world_neighborhood_match ? 1 : 0);
+                                return brief.str();
+                            };
+
+                        std::wstringstream brief;
+                        brief << L"label=" << (label != nullptr ? label : L"scan")
+                            << L", scanned=" << scan_summary.scanned
+                            << L", safe_weapon_like=" << scan_summary.safe_weapon_like
+                            << L", complete_fields=" << scan_summary.complete_fields
+                            << L", related_complete=" << scan_summary.related_complete
+                            << L", relevant_incomplete=" << scan_summary.relevant_incomplete
+                            << L", writable_related=" << scan_summary.writable_related;
+                        if (scan_summary.best.entity != nullptr)
+                        {
+                            brief << L", selected_entity=" << scan_summary.best.entity_index
+                                << L", selected_definition=" << scan_summary.best.definition_index
+                                << L", selected_reason=" << scan_summary.best.reason;
+                        }
+                        else
+                        {
+                            brief << L", selected=<none>";
+                        }
+                        const auto* stage_name =
+                            label != nullptr && std::wcsstr(label, L"raw carrier scan") != nullptr
+                                ? L"raw_scan"
+                                : L"live_scan";
+                        log_providee_owner_search_stage_once(stage_name, brief.str());
+                        const auto top_limit = std::min<std::size_t>(scan_summary.top.size(), 2);
+                        for (std::size_t sample_index = 0; sample_index < top_limit; ++sample_index)
+                        {
+                            std::wstringstream candidate_stage;
+                            candidate_stage << stage_name << L"_candidate" << sample_index;
+                            log_providee_owner_search_stage_once(
+                                candidate_stage.str().c_str(),
+                                build_forced_candidate_brief(scan_summary.top[sample_index]));
+                        }
+                    }
                     return;
                 }
 
@@ -37022,122 +42099,104 @@ bool TryResolvePersistentKnifeOwnerFromDirectRender(
                 }
                 nskinzcs2::Logger::Info(stream.str());
 
-                constexpr std::size_t kMaxDeepTraceCandidates = 3;
-                const auto deep_trace_limit =
-                    std::min<std::size_t>(scan_summary.top.size(), kMaxDeepTraceCandidates);
-                for (std::size_t sample_index = 0; sample_index < deep_trace_limit; ++sample_index)
-                {
-                    const auto& sample = scan_summary.top[sample_index];
-                    if (!sample.safe_linked_item_view ||
-                        sample.shell_entity_index >= 0 ||
-                        sample.promotable_relation)
-                    {
-                        continue;
-                    }
-
-                    if (sample.owner_index >= 0)
-                    {
-                        log_candidate_relation_deep_trace(sample, sample.owner_index, L"owner");
-                    }
-                    if (sample.old_move_parent_index >= 0 &&
-                        sample.old_move_parent_index != sample.owner_index)
-                    {
-                        log_candidate_relation_deep_trace(
-                            sample,
-                            sample.old_move_parent_index,
-                            L"old_move_parent");
-                    }
-                }
             };
 
         CompleteCarrierScanSummary live_complete_scan {};
         live_complete_scan.top.reserve(5);
-        for (std::size_t index = 0; index < entity_cache.size(); ++index)
-        {
-            auto* candidate_entity = entity_cache[index];
-            if (candidate_entity == nullptr)
-            {
-                continue;
-            }
-
-            evaluate_complete_candidate(
-                live_complete_scan,
-                static_cast<int>(index),
-                candidate_entity,
-                L"live_cache",
-                false);
-        }
-
-        log_complete_scan_summary(
-            L"Knife first-person complete carrier scan for XUID ",
-            live_complete_scan);
-
-        if (live_complete_scan.best.entity != nullptr)
-        {
-            return accept_candidate(
-                live_complete_scan.best.entity_index,
-                live_complete_scan.best.entity,
-                live_complete_scan.best.item_view,
-                live_complete_scan.best.definition_index,
-                live_complete_scan.best.owner_kind,
-                L"complete_carrier_scan_validated");
-        }
-
         CompleteCarrierScanSummary raw_complete_scan {};
         raw_complete_scan.top.reserve(5);
-        std::unordered_set<void*> raw_seen_entities;
-        for (int entity_index = 0; entity_index <= kMaxEntityIndex; ++entity_index)
+        if (should_force_providee_owner_search_diagnostics)
         {
-            void* candidate_entity = nullptr;
-            if (!TryGetEntityFromIndex(entity_list, entity_index, candidate_entity))
-            {
-                ++raw_complete_scan.resolution_failures;
-                continue;
-            }
-
-            if (candidate_entity == nullptr)
-            {
-                continue;
-            }
-
-            if (!raw_seen_entities.insert(candidate_entity).second)
-            {
-                continue;
-            }
-
-            const auto hidden_from_live_cache =
-                static_cast<std::size_t>(entity_index) >= entity_cache.size() ||
-                entity_cache[static_cast<std::size_t>(entity_index)] != candidate_entity;
-            evaluate_complete_candidate(
-                raw_complete_scan,
-                entity_index,
-                candidate_entity,
-                L"raw_entity_system",
-                hidden_from_live_cache);
+            log_providee_owner_search_stage_once(L"live_scan", L"disabled_for_targeted_probe");
+            log_providee_owner_search_stage_once(L"raw_scan", L"disabled_for_targeted_probe");
         }
-
-        log_complete_scan_summary(
-            L"Knife first-person raw carrier scan for XUID ",
-            raw_complete_scan);
-
-        if (raw_complete_scan.best.entity != nullptr)
+        else
         {
-            return accept_candidate(
-                raw_complete_scan.best.entity_index,
-                raw_complete_scan.best.entity,
-                raw_complete_scan.best.item_view,
-                raw_complete_scan.best.definition_index,
-                raw_complete_scan.best.owner_kind,
-                L"raw_entity_system_complete_carrier_scan_validated");
-        }
+            for (std::size_t index = 0; index < entity_cache.size(); ++index)
+            {
+                auto* candidate_entity = entity_cache[index];
+                if (candidate_entity == nullptr)
+                {
+                    continue;
+                }
 
-        if (raw_complete_scan.resolution_failures != 0)
-        {
-            ClearPendingKnifeFirstPersonReacquire();
-            resolution.validation_result = L"raw_entity_system_scan_incomplete";
-            resolution.result = KnifePersistentOwnerResolutionResult::Unresolved;
-            log_resolution(false);
-            return false;
+                evaluate_complete_candidate(
+                    live_complete_scan,
+                    static_cast<int>(index),
+                    candidate_entity,
+                    L"live_cache",
+                    false);
+            }
+
+            log_complete_scan_summary(
+                L"Knife first-person complete carrier scan for XUID ",
+                live_complete_scan);
+
+            if (live_complete_scan.best.entity != nullptr)
+            {
+                return accept_candidate(
+                    live_complete_scan.best.entity_index,
+                    live_complete_scan.best.entity,
+                    live_complete_scan.best.item_view,
+                    live_complete_scan.best.definition_index,
+                    live_complete_scan.best.owner_kind,
+                    L"complete_carrier_scan_validated");
+            }
+
+            std::unordered_set<void*> raw_seen_entities;
+            for (int entity_index = 0; entity_index <= kMaxEntityIndex; ++entity_index)
+            {
+                void* candidate_entity = nullptr;
+                if (!TryGetEntityFromIndex(entity_list, entity_index, candidate_entity))
+                {
+                    ++raw_complete_scan.resolution_failures;
+                    continue;
+                }
+
+                if (candidate_entity == nullptr)
+                {
+                    continue;
+                }
+
+                if (!raw_seen_entities.insert(candidate_entity).second)
+                {
+                    continue;
+                }
+
+                const auto hidden_from_live_cache =
+                    static_cast<std::size_t>(entity_index) >= entity_cache.size() ||
+                    entity_cache[static_cast<std::size_t>(entity_index)] != candidate_entity;
+                evaluate_complete_candidate(
+                    raw_complete_scan,
+                    entity_index,
+                    candidate_entity,
+                    L"raw_entity_system",
+                    hidden_from_live_cache);
+            }
+
+            log_complete_scan_summary(
+                L"Knife first-person raw carrier scan for XUID ",
+                raw_complete_scan);
+
+            if (raw_complete_scan.best.entity != nullptr)
+            {
+                return accept_candidate(
+                    raw_complete_scan.best.entity_index,
+                    raw_complete_scan.best.entity,
+                    raw_complete_scan.best.item_view,
+                    raw_complete_scan.best.definition_index,
+                    raw_complete_scan.best.owner_kind,
+                    L"raw_entity_system_complete_carrier_scan_validated");
+            }
+
+            if (raw_complete_scan.resolution_failures != 0)
+            {
+                ClearPendingKnifeFirstPersonReacquire();
+                resolution.validation_result = L"raw_entity_system_scan_incomplete";
+                resolution.result = KnifePersistentOwnerResolutionResult::Unresolved;
+                log_resolution(false);
+                return false;
+            }
         }
 
         ClientClassDiscoverySummary class_discovery {};
@@ -38166,7 +43225,9 @@ bool DoesAppliedPawnGloveFinishMatchRequest(
     const std::uint64_t xuid,
     const int current_definition_index)
 {
-    if (!ShouldAllowDirectAttributeListWrites(offsets))
+    const auto direct_attribute_writes_allowed = ShouldAllowDirectAttributeListWrites(offsets);
+    const auto has_runtime_owned_binding = HasRuntimeOwnedAttributeListBinding(glove_item_view);
+    if (!direct_attribute_writes_allowed && !has_runtime_owned_binding)
     {
         return DoesAppliedPawnGloveBaseFieldsMatchRequest(
             glove_item_view,
@@ -38228,28 +43289,24 @@ bool ApplyGloveFinishToPawnEconGloves(
     }
 
     const auto field_write_succeeded = success;
-    if (!ShouldAllowDirectAttributeListWrites(offsets))
+    const auto direct_attribute_writes_allowed = ShouldAllowDirectAttributeListWrites(offsets);
+
+    bool attribute_update_succeeded = direct_attribute_writes_allowed;
+    if (direct_attribute_writes_allowed)
     {
-        return field_write_succeeded &&
-            DoesAppliedPawnGloveBaseFieldsMatchRequest(
-                glove_item_view,
-                offsets,
-                request,
-                xuid,
-                current_definition_index);
+        for (const auto& [definition_index, value] : desired_attributes)
+        {
+            attribute_update_succeeded =
+                TryUpdateExistingAttributeValueInPlaceOnly(glove_item_view, offsets, definition_index, value) &&
+                attribute_update_succeeded;
+        }
     }
 
-    bool attribute_update_succeeded = true;
-    for (const auto& [definition_index, value] : desired_attributes)
-    {
-        attribute_update_succeeded =
-            TryUpdateExistingAttributeValueInPlaceOnly(glove_item_view, offsets, definition_index, value) &&
-            attribute_update_succeeded;
-    }
+    const auto attribute_values_verified =
+        VerifyAttributeValues(glove_item_view, offsets, desired_attributes);
+    success = field_write_succeeded && (attribute_update_succeeded || attribute_values_verified);
 
-    success = attribute_update_succeeded && field_write_succeeded;
-
-    if (!attribute_update_succeeded || !VerifyAttributeValues(glove_item_view, offsets, desired_attributes))
+    if (!attribute_values_verified)
     {
         const auto install_into_dynamic =
             offsets.item_view_dynamic_attribute_list != 0 &&
@@ -38759,7 +43816,11 @@ bool DoesAppliedGloveCarrierMatchProfile(
 
     if (read_finish_from_item_view)
     {
-        if (!VerifyAttributeValues(item_view, offsets, BuildGloveFinishAttributes(request)))
+        const auto should_verify_item_view_attributes =
+            ShouldAllowDirectAttributeListWrites(offsets) ||
+            HasRuntimeOwnedAttributeListBinding(item_view);
+        if (should_verify_item_view_attributes &&
+            !VerifyAttributeValues(item_view, offsets, BuildGloveFinishAttributes(request)))
         {
             return false;
         }
@@ -38917,9 +43978,10 @@ bool ApplyGloveProfileToWearable(
 }
 
 std::vector<std::pair<std::uint16_t, float>> BuildWeaponRefreshAttributesImpl(
-    const nskinzcs2::model::CosmeticProfile& profile)
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
-    return nskinzcs2::runtime::BuildWeaponAppearancePayload(profile, 0).temporary_attributes;
+    return nskinzcs2::runtime::BuildWeaponAppearancePayload(profile, 0, keychain_profile).temporary_attributes;
 }
 
 std::wstring DescribeWeaponRefreshAttributes(
@@ -38960,7 +44022,8 @@ std::wstring DescribeWeaponRefreshAttributes(
 
 std::vector<std::uint16_t> BuildMissingWeaponAttributeDefinitionIndicesImpl(
     const nskinzcs2::model::CosmeticProfile& profile,
-    const std::vector<std::uint16_t>& existing_definition_indices)
+    const std::vector<std::uint16_t>& existing_definition_indices,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     std::vector<std::uint16_t> required_definition_indices;
     required_definition_indices.reserve(32);
@@ -38985,7 +44048,7 @@ std::vector<std::uint16_t> BuildMissingWeaponAttributeDefinitionIndicesImpl(
             required_definition_indices.push_back(definition_index);
         };
 
-    const auto desired_attributes = BuildWeaponRefreshAttributesImpl(profile);
+    const auto desired_attributes = BuildWeaponRefreshAttributesImpl(profile, keychain_profile);
     for (const auto& [definition_index, value] : desired_attributes)
     {
         static_cast<void>(value);
@@ -38999,7 +44062,8 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
     void* item_view,
     const ClientSchemaOffsets& offsets,
     const nskinzcs2::model::CosmeticProfile& profile,
-    TemporaryAttributeListAttachment& attachment)
+    TemporaryAttributeListAttachment& attachment,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr)
 {
     attachment = {};
     if (item_view == nullptr || offsets.item_view_attribute_list == 0 || offsets.attribute_list_attributes == 0)
@@ -39007,8 +44071,62 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
         return false;
     }
 
-    const auto attributes = BuildWeaponRefreshAttributesImpl(profile);
+    const auto attributes = BuildWeaponRefreshAttributesImpl(profile, keychain_profile);
     if (attributes.empty())
+    {
+        return false;
+    }
+
+    const auto attribute_stride = ResolveEconItemAttributeStride(offsets);
+    if (attribute_stride == 0)
+    {
+        return false;
+    }
+
+    std::vector<AttributeStorageRecord> records;
+    records.reserve(64);
+    if (!CollectAttributeStorageRecordsFromList(
+            item_view,
+            offsets.item_view_attribute_list,
+            offsets,
+            attribute_stride,
+            records) ||
+        !CollectAttributeStorageRecordsFromList(
+            item_view,
+            offsets.item_view_dynamic_attribute_list,
+            offsets,
+            attribute_stride,
+            records))
+    {
+        return false;
+    }
+
+    for (const auto& [definition_index, value] : attributes)
+    {
+        auto* record = FindAttributeStorageRecord(records, definition_index);
+        if (record == nullptr)
+        {
+            AttributeStorageRecord new_record {};
+            new_record.definition_index = definition_index;
+            new_record.bytes.resize(attribute_stride, 0);
+            records.push_back(std::move(new_record));
+            record = &records.back();
+        }
+
+        if (!SafeWriteField(record->bytes.data(), offsets.econ_item_attribute_definition_index, definition_index) ||
+            !SafeWriteField(record->bytes.data(), offsets.econ_item_attribute_value, value))
+        {
+            return false;
+        }
+
+        if (offsets.econ_item_attribute_initial_value != 0 &&
+            !SafeWriteField(record->bytes.data(), offsets.econ_item_attribute_initial_value, value))
+        {
+            return false;
+        }
+    }
+
+    if (records.empty())
     {
         return false;
     }
@@ -39050,17 +44168,7 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
     attachment.original = original;
     attachment.replaced_existing_vector = original.size != 0 || original.ptr != 0;
 
-    std::vector<RefreshEconItemAttribute> refresh_attributes(attributes.size());
-    for (std::size_t index = 0; index < attributes.size(); ++index)
-    {
-        auto& attribute = refresh_attributes[index];
-        const auto& [definition_index, value] = attributes[index];
-        attribute.definition_index = definition_index;
-        attribute.value = value;
-        attribute.initial_value = value;
-    }
-
-    attachment.allocated_size = refresh_attributes.size() * sizeof(RefreshEconItemAttribute);
+    attachment.allocated_size = records.size() * attribute_stride;
     attachment.allocated_block = VirtualAlloc(nullptr, attachment.allocated_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (attachment.allocated_block == nullptr)
     {
@@ -39068,15 +44176,17 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
         return false;
     }
 
-    if (!SafeWriteBytes(attachment.allocated_block, refresh_attributes.data(), attachment.allocated_size))
+    auto* destination = reinterpret_cast<std::uint8_t*>(attachment.allocated_block);
+    for (std::size_t index = 0; index < records.size(); ++index)
     {
-        VirtualFree(attachment.allocated_block, 0, MEM_RELEASE);
-        attachment = {};
-        return false;
+        std::memcpy(
+            destination + index * attribute_stride,
+            records[index].bytes.data(),
+            records[index].bytes.size());
     }
 
     const RefreshAttributeVector refreshed_view {
-        static_cast<std::uint64_t>(refresh_attributes.size()),
+        static_cast<std::uint64_t>(records.size()),
         reinterpret_cast<std::uintptr_t>(attachment.allocated_block),
     };
     if (!SafeWriteValue(attachment.vector_address, refreshed_view))
@@ -39142,11 +44252,17 @@ bool TryProcessPendingWeaponRefreshRequests(
     for (const auto& request : requests)
     {
         const auto is_material_target = IsMaterialRefreshTarget(request.target);
-        const auto needs_skin_refresh = NeedsWeaponSkinRefresh(request.profile);
+        const auto* keychain_profile =
+            request.keychain_profile.has_value() ? &*request.keychain_profile : nullptr;
+        const auto keychain_only_request =
+            IsKeychainOnlyApplyRequest(request.profile, keychain_profile);
+        const auto needs_skin_refresh = NeedsWeaponSkinRefresh(request.profile, keychain_profile);
         const auto trace_watched_knife = ShouldTraceWatchedKnifeDiagnostic(request.profile);
         const auto knife_request = IsKnifeProfile(request.profile);
         const auto promote_refresh_attachment =
-            ShouldPromoteWeaponRefreshAttachmentToRuntimeOwned(request.profile);
+            ShouldPromoteWeaponRefreshAttachmentToRuntimeOwned(request.profile, keychain_profile);
+        const auto restore_promoted_refresh_attachment_on_abandon =
+            ShouldRestorePromotedWeaponRefreshAttachmentOnAbandon(request.profile, keychain_profile);
         void* effective_refresh_item_view =
             request.refresh_item_view != nullptr ? request.refresh_item_view : request.item_view;
         if (trace_watched_knife)
@@ -39161,6 +44277,16 @@ bool TryProcessPendingWeaponRefreshRequests(
                 << L", refresh_item_view_present=" << (effective_refresh_item_view != nullptr ? 1 : 0)
                 << L", needs_refresh=" << (needs_skin_refresh ? 1 : 0);
             TraceWatchedKnifeDiagnostic(request.profile, stream.str());
+        }
+
+        if (keychain_only_request)
+        {
+            const auto diagnostic_signature = request.desired_signature ^ 0x7324ull;
+            std::wstringstream stream;
+            stream << L"Skipped refresh helper dispatch for keychain-only weapon request on entity "
+                << request.entity_index << L".";
+            LogProfileDiagnosticOnce(diagnostic_signature, stream.str());
+            continue;
         }
 
         const auto missing_refresh_prerequisites =
@@ -39234,7 +44360,7 @@ bool TryProcessPendingWeaponRefreshRequests(
 
         if (UsesTemporaryWorldWeaponRefreshModel(request.profile))
         {
-            const auto payload = BuildWeaponRefreshAttributesImpl(request.profile);
+            const auto payload = BuildWeaponRefreshAttributesImpl(request.profile, keychain_profile);
             if (!payload.empty())
             {
                 const auto diagnostic_signature = request.desired_signature ^ 0x7330ull;
@@ -39252,7 +44378,8 @@ bool TryProcessPendingWeaponRefreshRequests(
                 effective_refresh_item_view,
                 offsets,
                 request.profile,
-                attachment);
+                attachment,
+                keychain_profile);
         if (!attached_refresh_attributes && needs_skin_refresh)
         {
             if (trace_watched_knife)
@@ -39287,6 +44414,8 @@ bool TryProcessPendingWeaponRefreshRequests(
         }
         if (attached_refresh_attributes)
         {
+            attachment.restore_on_abandon_when_promoted =
+                restore_promoted_refresh_attachment_on_abandon;
             attachments.push_back(std::move(attachment));
         }
         candidate_requests.push_back(request);
@@ -39424,7 +44553,9 @@ bool TryProcessPendingWeaponRefreshRequests(
     {
         if (promoted_item_views.find(attachment.item_view) != promoted_item_views.end())
         {
-            if (!PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(attachment))
+            if (!PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(
+                    attachment,
+                    attachment.restore_on_abandon_when_promoted))
             {
                 nskinzcs2::Logger::Warn(
                     L"Knife refresh crash guard failed to promote a temporary attribute attachment; "
@@ -39464,8 +44595,22 @@ bool TryProcessPendingWeaponRefreshRequests(
         std::wstringstream cleanup_stream;
         if (promoted_runtime_owned)
         {
-            cleanup_stream << L"Knife refresh crash guard deferred temporary attribute restore";
-            cleanup_stream << L" until runtime reset for world weapon entity " << request.entity_index << L".";
+            if (request.keychain_profile.has_value() && UsesTemporaryWorldWeaponRefreshModel(request.profile))
+            {
+                ScheduleRuntimeOwnedKeychainAttributeBindingRelease(effective_refresh_item_view);
+            }
+
+            if (request.keychain_profile.has_value() && UsesTemporaryWorldWeaponRefreshModel(request.profile))
+            {
+                cleanup_stream << L"Keychain refresh promoted the temporary attribute payload to runtime-owned";
+                cleanup_stream << L" storage on world weapon entity " << request.entity_index
+                    << L" with a short lease.";
+            }
+            else
+            {
+                cleanup_stream << L"Knife refresh crash guard deferred temporary attribute restore";
+                cleanup_stream << L" until runtime reset for world weapon entity " << request.entity_index << L".";
+            }
         }
         else
         {
@@ -39516,14 +44661,15 @@ bool TryProcessPendingWeaponRefreshRequests(
 bool ApplyExistingItemAttributes(
     void* item_view,
     const ClientSchemaOffsets& offsets,
-    const nskinzcs2::model::CosmeticProfile& profile)
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr)
 {
-    if (item_view == nullptr || !ProfileNeedsDynamicAttributeWrites(profile))
+    if (item_view == nullptr || !ProfileNeedsDynamicAttributeWrites(profile, keychain_profile))
     {
         return true;
     }
 
-    const auto desired_attributes = BuildWeaponRefreshAttributesImpl(profile);
+    const auto desired_attributes = BuildWeaponRefreshAttributesImpl(profile, keychain_profile);
     if (desired_attributes.empty())
     {
         return true;
@@ -39604,6 +44750,1057 @@ bool ApplyExistingItemAttributes(
         (install_into_dynamic && VerifyAttributeValues(item_view, offsets, desired_attributes));
 }
 
+bool ApplyWeaponKeychainModuleFields(
+    void* keychain_module_entity,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
+{
+    if (keychain_module_entity == nullptr || keychain_profile == nullptr)
+    {
+        return true;
+    }
+
+    bool success = true;
+    if (offsets.weapon_keychain_def_id != 0)
+    {
+        const auto keychain_def_id = static_cast<std::uint32_t>(std::max(0, keychain_profile->keychain_kit));
+        success = SafeWriteField(keychain_module_entity, offsets.weapon_keychain_def_id, keychain_def_id) && success;
+    }
+
+    if (offsets.weapon_keychain_seed != 0)
+    {
+        success =
+            SafeWriteField(keychain_module_entity, offsets.weapon_keychain_seed, static_cast<std::uint32_t>(0)) &&
+            success;
+    }
+
+    return success;
+}
+
+bool TryRefreshKeychainModuleVisualState(
+    const std::vector<void*>& entity_cache,
+    const int keychain_module_entity_index,
+    void* keychain_module_entity,
+    const ClientSchemaOffsets& offsets,
+    const std::uint64_t desired_signature,
+    const wchar_t* reason)
+{
+    if (keychain_module_entity == nullptr)
+    {
+        return false;
+    }
+
+    std::uintptr_t model_state_address = 0;
+    if (!TryResolveEntityModelStateAddress(keychain_module_entity, offsets, model_state_address) ||
+        model_state_address == 0)
+    {
+        std::wstringstream stream;
+        stream << L"Keychain module visual refresh skipped before touching the model: entity="
+            << keychain_module_entity_index
+            << L", reason=" << (reason != nullptr ? reason : L"unknown")
+            << L", issue=model_state_unresolved";
+        WarnOnceForRuntimeSignature(desired_signature ^ 0x4B435646ull, stream.str());
+        return false;
+    }
+
+    std::uint64_t before_model_handle = 0;
+    const auto before_model_handle_valid =
+        TryReadEntityModelHandle(keychain_module_entity, offsets, before_model_handle) &&
+        before_model_handle != 0;
+    std::uint64_t before_model_name_token = 0;
+    const auto before_model_name_token_valid =
+        TryReadEntityModelNameToken(keychain_module_entity, offsets, before_model_name_token) &&
+        before_model_name_token != 0;
+    std::string before_model_name;
+    const auto before_model_name_valid =
+        TryReadEntityModelNameString(keychain_module_entity, offsets, before_model_name);
+
+    int desired_keychain_kit = 0;
+    if (offsets.weapon_keychain_def_id == 0 ||
+        !SafeReadField(keychain_module_entity, offsets.weapon_keychain_def_id, desired_keychain_kit) ||
+        desired_keychain_kit <= 0)
+    {
+        std::wstringstream stream;
+        stream << L"Keychain module visual refresh skipped before touching the model: entity="
+            << keychain_module_entity_index
+            << L", reason=" << (reason != nullptr ? reason : L"unknown")
+            << L", issue=keychain_def_id_unreadable"
+            << L", live_model="
+            << (before_model_name_valid ? NarrowToWide(before_model_name) : L"<unreadable>");
+        WarnOnceForRuntimeSignature(desired_signature ^ 0x4B435646ull, stream.str());
+        return false;
+    }
+
+    nskinzcs2::model::Catalog catalog;
+    if (g_hook_state.app_state != nullptr)
+    {
+        catalog = g_hook_state.app_state->SnapshotCatalog();
+    }
+
+    const auto desired_model_name = TryResolveKeychainModuleModelName(catalog, desired_keychain_kit);
+    if (!desired_model_name.has_value())
+    {
+        std::wstringstream stream;
+        stream << L"Keychain module visual refresh skipped: entity="
+            << keychain_module_entity_index
+            << L", reason=" << (reason != nullptr ? reason : L"unknown")
+            << L", issue=explicit_target_model_path_unavailable"
+            << L", keychain_kit=" << desired_keychain_kit
+            << L", live_model="
+            << (before_model_name_valid ? NarrowToWide(before_model_name) : L"<unreadable>")
+            << L", model_handle_readable=" << (before_model_handle_valid ? 1 : 0)
+            << L", model_name_token_readable=" << (before_model_name_token_valid ? 1 : 0);
+        WarnOnceForRuntimeSignature(
+            desired_signature ^
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(desired_keychain_kit)) << 24) ^
+                0x4B435648ull,
+            stream.str());
+        return false;
+    }
+
+    if (before_model_name_valid &&
+        ModelIdentityPathMatches(before_model_name, *desired_model_name))
+    {
+        return true;
+    }
+
+    const auto wrote_visual_state =
+        TryWriteKnifeDirectRenderModelState(
+            entity_cache,
+            keychain_module_entity_index,
+            keychain_module_entity,
+            offsets,
+            *desired_model_name,
+            desired_signature ^
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(desired_keychain_kit)) << 24) ^
+                0x4B43564Cull,
+            L"keychain_module",
+            0);
+
+    std::uint64_t after_model_handle = 0;
+    std::string after_model_name;
+    const auto after_model_handle_valid =
+        TryReadEntityModelHandle(keychain_module_entity, offsets, after_model_handle);
+    const auto after_model_name_valid =
+        TryReadEntityModelNameString(keychain_module_entity, offsets, after_model_name);
+
+    if (wrote_visual_state &&
+        after_model_name_valid &&
+        ModelIdentityPathMatches(after_model_name, *desired_model_name))
+    {
+        std::wstringstream stream;
+        stream << L"Keychain module visual refresh applied: entity="
+            << keychain_module_entity_index
+            << L", reason=" << (reason != nullptr ? reason : L"unknown")
+            << L", keychain_kit=" << desired_keychain_kit
+            << L", desired_model=" << NarrowToWide(*desired_model_name)
+            << L", live_model=" << NarrowToWide(after_model_name)
+            << L", model_handle_readable=" << (after_model_handle_valid ? 1 : 0);
+        LogProfileDiagnosticOnce(
+            desired_signature ^
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(desired_keychain_kit)) << 24) ^
+                0x4B435649ull,
+            stream.str());
+        return true;
+    }
+
+    std::wstringstream stream;
+    stream << L"Keychain module visual refresh failed: entity="
+        << keychain_module_entity_index
+        << L", reason=" << (reason != nullptr ? reason : L"unknown")
+        << L", issue=model_state_write_unverified"
+        << L", keychain_kit=" << desired_keychain_kit
+        << L", desired_model=" << NarrowToWide(*desired_model_name)
+        << L", live_model="
+        << (after_model_name_valid
+                ? NarrowToWide(after_model_name)
+                : (before_model_name_valid ? NarrowToWide(before_model_name) : L"<unreadable>"))
+        << L", model_handle_readable=" << (after_model_handle_valid ? 1 : 0)
+        << L", model_name_token_readable=" << (before_model_name_token_valid ? 1 : 0)
+        << L", write_result=" << (wrote_visual_state ? 1 : 0);
+    WarnOnceForRuntimeSignature(
+        desired_signature ^
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(desired_keychain_kit)) << 24) ^
+            0x4B43564Aull,
+        stream.str());
+
+    return false;
+}
+
+std::vector<std::pair<std::uint16_t, float>> BuildDesiredKeychainAttributes(
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
+{
+    if (keychain_profile == nullptr)
+    {
+        return {};
+    }
+
+    nskinzcs2::model::CosmeticProfile empty_profile;
+    return BuildWeaponRefreshAttributesImpl(empty_profile, keychain_profile);
+}
+
+bool ApplyPersistentKeychainAttributeToItemView(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
+{
+    if (item_view == nullptr || keychain_profile == nullptr)
+    {
+        return true;
+    }
+
+    const auto desired_keychain_kit = std::max(0, keychain_profile->keychain_kit);
+    const auto desired_attributes = BuildDesiredKeychainAttributes(keychain_profile);
+    if (desired_attributes.empty())
+    {
+        return true;
+    }
+
+    const auto diagnostic_signature =
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(item_view)) ^
+        (static_cast<std::uint64_t>(desired_keychain_kit) << 16) ^
+        0x4B434859ull;
+
+    if (VerifyAttributeValues(item_view, offsets, desired_attributes))
+    {
+        return true;
+    }
+
+    if (!ShouldAllowDirectAttributeListWrites(offsets))
+    {
+        bool installed = false;
+        if (offsets.item_view_dynamic_attribute_list != 0)
+        {
+            installed =
+                TryInstallRuntimeOwnedAttributeList(
+                    item_view,
+                    offsets.item_view_dynamic_attribute_list,
+                    offsets,
+                    desired_attributes) ||
+                installed;
+        }
+
+        if (!installed && offsets.item_view_attribute_list != 0)
+        {
+            installed =
+                TryInstallRuntimeOwnedAttributeList(
+                    item_view,
+                    offsets.item_view_attribute_list,
+                    offsets,
+                    desired_attributes) ||
+                installed;
+        }
+
+        if (VerifyAttributeValues(item_view, offsets, desired_attributes))
+        {
+            LogProfileDiagnosticOnce(
+                diagnostic_signature,
+                L"Persistent keychain attribute fell back to a runtime-owned attribute list install.");
+            return true;
+        }
+
+        std::wstringstream stream;
+        stream << L"Persistent keychain attribute could not be verified before refresh helper dispatch: item_view="
+            << FormatPointer(item_view)
+            << L", keychain_kit=" << desired_keychain_kit
+            << L", runtime_owned_install_attempted=" << (installed ? 1 : 0)
+            << L". Continuing so refresh-helper promotion can keep the keychain attribute block live.";
+        LogProfileDiagnosticOnce(diagnostic_signature, stream.str());
+        return true;
+    }
+
+    std::vector<std::uint16_t> failed_definition_indices;
+    failed_definition_indices.reserve(desired_attributes.size());
+    for (const auto& [definition_index, value] : desired_attributes)
+    {
+        if (!TryUpdateExistingAttributeValue(item_view, offsets, definition_index, value))
+        {
+            failed_definition_indices.push_back(definition_index);
+        }
+    }
+
+    if (!failed_definition_indices.empty())
+    {
+        std::wstringstream stream;
+        stream << L"Persistent keychain attribute update failed: item_view=" << FormatPointer(item_view)
+            << L", keychain_kit=" << desired_keychain_kit
+            << L", failed_definition_indices=";
+        for (std::size_t index = 0; index < failed_definition_indices.size(); ++index)
+        {
+            if (index != 0)
+            {
+                stream << L",";
+            }
+            stream << failed_definition_indices[index];
+        }
+        LogProfileDiagnosticOnce(diagnostic_signature, stream.str());
+        return false;
+    }
+
+    const auto verified = VerifyAttributeValues(item_view, offsets, desired_attributes);
+    if (!verified)
+    {
+        std::wstringstream stream;
+        stream << L"Persistent keychain attribute verification failed after direct write: item_view="
+            << FormatPointer(item_view)
+            << L", keychain_kit=" << desired_keychain_kit;
+        LogProfileDiagnosticOnce(diagnostic_signature ^ 0x11ull, stream.str());
+    }
+    return verified;
+}
+
+bool TryReadLiveKeychainItemViewState(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    std::uint32_t& keychain_def_id,
+    std::uint32_t& keychain_seed)
+{
+    keychain_def_id = 0;
+    keychain_seed = 0;
+
+    if (item_view == nullptr)
+    {
+        return false;
+    }
+
+    bool success = false;
+
+    float raw_keychain_def_id = 0.0f;
+    if (TryReadAttributeValue(item_view, offsets, kAttributeKeychainId, raw_keychain_def_id))
+    {
+        if (std::isfinite(raw_keychain_def_id))
+        {
+            keychain_def_id = static_cast<std::uint32_t>(
+                std::max(0, static_cast<int>(std::lround(raw_keychain_def_id))));
+        }
+        success = true;
+    }
+
+    float raw_keychain_seed = 0.0f;
+    if (TryReadAttributeValue(item_view, offsets, kAttributeKeychainSeed, raw_keychain_seed))
+    {
+        if (std::isfinite(raw_keychain_seed))
+        {
+            keychain_seed = static_cast<std::uint32_t>(
+                std::max(0, static_cast<int>(std::lround(raw_keychain_seed))));
+        }
+        success = true;
+    }
+
+    return success;
+}
+
+bool ApplyKeychainStateToWeaponItemView(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::model::KeychainProfile* keychain_profile,
+    const bool restore_runtime_owned_binding_on_clear,
+    std::uint32_t& live_keychain_def_id,
+    std::uint32_t& live_keychain_seed)
+{
+    live_keychain_def_id = 0;
+    live_keychain_seed = 0;
+
+    if (item_view == nullptr)
+    {
+        return false;
+    }
+
+    const auto desired_keychain_kit =
+        keychain_profile != nullptr ? std::max(0, keychain_profile->keychain_kit) : 0;
+
+    bool success = true;
+    if (desired_keychain_kit <= 0)
+    {
+        if (restore_runtime_owned_binding_on_clear && HasRuntimeOwnedAttributeListBinding(item_view))
+        {
+            ReleaseRuntimeOwnedAttributeListBindingForItemView(
+                item_view,
+                AttributeBindingReleaseMode::RestoreOriginal);
+        }
+        else if (keychain_profile != nullptr)
+        {
+            success = ApplyPersistentKeychainAttributeToItemView(item_view, offsets, keychain_profile);
+        }
+    }
+    else if (keychain_profile != nullptr)
+    {
+        success = ApplyPersistentKeychainAttributeToItemView(item_view, offsets, keychain_profile);
+    }
+
+    const auto has_live_item_view_keychain =
+        TryReadLiveKeychainItemViewState(item_view, offsets, live_keychain_def_id, live_keychain_seed);
+    if (desired_keychain_kit <= 0)
+    {
+        return success && (!has_live_item_view_keychain || live_keychain_def_id == 0u);
+    }
+
+    return success &&
+        has_live_item_view_keychain &&
+        live_keychain_def_id == static_cast<std::uint32_t>(desired_keychain_kit) &&
+        live_keychain_seed == 0u;
+}
+
+bool DoesWeaponKeychainModuleMatch(
+    void* keychain_module_entity,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
+{
+    if (keychain_module_entity == nullptr || keychain_profile == nullptr)
+    {
+        return true;
+    }
+
+    if (offsets.weapon_keychain_def_id != 0)
+    {
+        std::uint32_t actual_keychain_def_id = 0;
+        if (!SafeReadField(keychain_module_entity, offsets.weapon_keychain_def_id, actual_keychain_def_id) ||
+            actual_keychain_def_id != static_cast<std::uint32_t>(std::max(0, keychain_profile->keychain_kit)))
+        {
+            return false;
+        }
+    }
+
+    if (offsets.weapon_keychain_seed != 0)
+    {
+        std::uint32_t actual_keychain_seed = 0;
+        if (!SafeReadField(keychain_module_entity, offsets.weapon_keychain_seed, actual_keychain_seed) ||
+            actual_keychain_seed != 0u)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool RuntimeEntityRttiContainsToken(const void* entity, const wchar_t* token)
+{
+    if (entity == nullptr || token == nullptr || *token == L'\0')
+    {
+        return false;
+    }
+
+    return BuildRuntimeEntityRttiDescriptor(entity).find(token) != std::wstring::npos;
+}
+
+bool IsLikelyKeychainModuleEntityCandidate(
+    void* candidate,
+    const ClientSchemaOffsets& offsets,
+    std::uint32_t* current_keychain_def_id = nullptr,
+    std::uint32_t* current_keychain_seed = nullptr)
+{
+    if (candidate == nullptr)
+    {
+        return false;
+    }
+
+    std::uint32_t live_keychain_def_id = 0;
+    std::uint32_t live_keychain_seed = 0;
+    const auto live_keychain_state_readable =
+        TryReadLiveKeychainModuleState(
+            candidate,
+            offsets,
+            live_keychain_def_id,
+            live_keychain_seed);
+    if (!live_keychain_state_readable)
+    {
+        return false;
+    }
+
+    if (current_keychain_def_id != nullptr)
+    {
+        *current_keychain_def_id = live_keychain_def_id;
+    }
+    if (current_keychain_seed != nullptr)
+    {
+        *current_keychain_seed = live_keychain_seed;
+    }
+
+    if (RuntimeEntityRttiContainsToken(candidate, L"KeychainModule") ||
+        RuntimeEntityRttiContainsToken(candidate, L"Keychain"))
+    {
+        return true;
+    }
+
+    auto* candidate_item_view = ResolveWeaponItemView(candidate, offsets);
+    int candidate_definition_index = 0;
+    const auto candidate_looks_like_weapon_or_wearable =
+        candidate_item_view != nullptr &&
+        TryReadItemDefinitionIndex(candidate_item_view, offsets, candidate_definition_index) &&
+        candidate_definition_index > 0;
+    return !candidate_looks_like_weapon_or_wearable;
+}
+
+bool TryResolveWeaponKeychainModuleEntity(
+    const std::vector<void*>& entity_cache,
+    const RenderedWorldWeaponTrace& trace,
+    const ClientSchemaOffsets& offsets,
+    void*& keychain_module_entity,
+    int& keychain_module_entity_index)
+{
+    keychain_module_entity = nullptr;
+    keychain_module_entity_index = -1;
+
+    if (trace.owned_weapon_entity == nullptr && entity_cache.empty())
+    {
+        return false;
+    }
+
+    std::array<int, 4> related_entity_indices {
+        trace.owned_weapon_entity_index,
+        trace.explicit_owner_child_entity_index,
+        trace.scene_owner_entity_index,
+        trace.hud_weapon_entity_index,
+    };
+    std::array<void*, 4> related_entities {
+        trace.owned_weapon_entity,
+        trace.explicit_owner_child_entity,
+        trace.scene_owner_entity,
+        trace.hud_weapon_entity,
+    };
+    std::array<std::uint32_t, 4> related_handles {
+        trace.owned_weapon_handle,
+        trace.active_weapon_handle,
+        trace.pawn_handle,
+        trace.owned_weapon_owner_handle,
+    };
+
+    auto handle_matches_related_entity =
+        [&related_entity_indices](const std::uint32_t handle)
+        {
+            if (handle == kInvalidEntityHandle)
+            {
+                return false;
+            }
+
+            const auto entity_index = HandleToEntityIndex(handle);
+            return std::find(related_entity_indices.begin(), related_entity_indices.end(), entity_index) !=
+                related_entity_indices.end();
+        };
+    auto handle_matches_related_handle =
+        [&related_handles](const std::uint32_t handle)
+        {
+            if (handle == kInvalidEntityHandle)
+            {
+                return false;
+            }
+
+            return std::find(related_handles.begin(), related_handles.end(), handle) !=
+                related_handles.end();
+        };
+    auto pointer_matches_related_entity =
+        [&related_entities](void* candidate)
+        {
+            return candidate != nullptr &&
+                std::find(related_entities.begin(), related_entities.end(), candidate) !=
+                related_entities.end();
+        };
+    auto index_matches_related_entity =
+        [&related_entity_indices](const int entity_index)
+        {
+            return entity_index >= 0 &&
+                std::find(related_entity_indices.begin(), related_entity_indices.end(), entity_index) !=
+                related_entity_indices.end();
+        };
+
+    struct KeychainModuleAttachmentMatch
+    {
+        bool owner_entity = false;
+        bool old_move_parent = false;
+        bool viewmodel_attachment = false;
+        bool old_providee = false;
+        bool scene_owner = false;
+
+        [[nodiscard]] bool Any() const noexcept
+        {
+            return owner_entity || old_move_parent || viewmodel_attachment || old_providee || scene_owner;
+        }
+    };
+    struct KeychainModuleCandidateHint
+    {
+        bool trace_scene_owner = false;
+        bool trace_explicit_child = false;
+        bool trace_hud = false;
+        bool scene_child_owner = false;
+        int scene_depth = 0;
+    };
+    struct KeychainModuleCandidateEvaluation
+    {
+        int entity_index = -1;
+        void* entity = nullptr;
+        std::uint32_t keychain_def_id = 0;
+        std::uint32_t keychain_seed = 0;
+        KeychainModuleAttachmentMatch attachment_match {};
+        KeychainModuleCandidateHint hint {};
+        bool has_keychain_rtti = false;
+        bool model_name_has_keychain_token = false;
+        bool accepted = false;
+        int score = std::numeric_limits<int>::min();
+        std::string model_name;
+        std::wstring rtti;
+    };
+
+    const auto resolve_attachment_match =
+        [&](void* candidate)
+        {
+            KeychainModuleAttachmentMatch match {};
+            if (candidate == nullptr)
+            {
+                return match;
+            }
+
+            if (offsets.base_owner_entity != 0)
+            {
+                std::uint32_t owner_handle = kInvalidEntityHandle;
+                if (SafeReadField(candidate, offsets.base_owner_entity, owner_handle) &&
+                    (owner_handle == trace.owned_weapon_handle ||
+                     handle_matches_related_handle(owner_handle) ||
+                     handle_matches_related_entity(owner_handle)))
+                {
+                    match.owner_entity = true;
+                }
+            }
+
+            if (offsets.base_old_move_parent != 0)
+            {
+                std::uint32_t old_move_parent_handle = kInvalidEntityHandle;
+                if (SafeReadField(candidate, offsets.base_old_move_parent, old_move_parent_handle) &&
+                    (old_move_parent_handle == trace.owned_weapon_handle ||
+                     handle_matches_related_handle(old_move_parent_handle) ||
+                     handle_matches_related_entity(old_move_parent_handle)))
+                {
+                    match.old_move_parent = true;
+                }
+            }
+
+            if (offsets.econ_entity_viewmodel_attachment != 0)
+            {
+                std::uint32_t viewmodel_attachment_handle = kInvalidEntityHandle;
+                if (SafeReadField(candidate, offsets.econ_entity_viewmodel_attachment, viewmodel_attachment_handle) &&
+                    (viewmodel_attachment_handle == trace.owned_weapon_handle ||
+                     handle_matches_related_handle(viewmodel_attachment_handle) ||
+                     handle_matches_related_entity(viewmodel_attachment_handle)))
+                {
+                    match.viewmodel_attachment = true;
+                }
+            }
+
+            if (offsets.econ_entity_old_providee != 0)
+            {
+                std::uint32_t providee_handle = kInvalidEntityHandle;
+                if (SafeReadField(candidate, offsets.econ_entity_old_providee, providee_handle) &&
+                    (providee_handle == trace.owned_weapon_handle ||
+                     handle_matches_related_handle(providee_handle) ||
+                     handle_matches_related_entity(providee_handle)))
+                {
+                    match.old_providee = true;
+                }
+            }
+
+            if (offsets.base_entity_game_scene_node != 0 &&
+                offsets.game_scene_node_owner != 0)
+            {
+                void* scene_node = nullptr;
+                void* scene_owner_entity = nullptr;
+                if (SafeReadField(candidate, offsets.base_entity_game_scene_node, scene_node) &&
+                    scene_node != nullptr &&
+                    SafeReadField(scene_node, offsets.game_scene_node_owner, scene_owner_entity) &&
+                    scene_owner_entity != nullptr)
+                {
+                    const auto scene_owner_index =
+                        ResolveEntityIndexFromPointer(entity_cache, scene_owner_entity);
+                    if (pointer_matches_related_entity(scene_owner_entity) ||
+                        index_matches_related_entity(scene_owner_index))
+                    {
+                        match.scene_owner = true;
+                    }
+                }
+            }
+
+            return match;
+        };
+    auto describe_candidate =
+        [&](const KeychainModuleCandidateEvaluation& evaluation)
+        {
+            std::wstringstream stream;
+            stream << L"candidate{entity=" << evaluation.entity_index
+                << L", ptr=" << FormatPointer(evaluation.entity)
+                << L", score=" << evaluation.score
+                << L", accepted=" << (evaluation.accepted ? 1 : 0)
+                << L", def_id=" << evaluation.keychain_def_id
+                << L", seed=" << evaluation.keychain_seed
+                << L", owner=" << (evaluation.attachment_match.owner_entity ? 1 : 0)
+                << L", old_parent=" << (evaluation.attachment_match.old_move_parent ? 1 : 0)
+                << L", viewmodel=" << (evaluation.attachment_match.viewmodel_attachment ? 1 : 0)
+                << L", providee=" << (evaluation.attachment_match.old_providee ? 1 : 0)
+                << L", scene_owner=" << (evaluation.attachment_match.scene_owner ? 1 : 0)
+                << L", trace_scene=" << (evaluation.hint.trace_scene_owner ? 1 : 0)
+                << L", trace_explicit=" << (evaluation.hint.trace_explicit_child ? 1 : 0)
+                << L", trace_hud=" << (evaluation.hint.trace_hud ? 1 : 0)
+                << L", scene_child_owner=" << (evaluation.hint.scene_child_owner ? 1 : 0)
+                << L", scene_depth=" << evaluation.hint.scene_depth
+                << L", has_keychain_rtti=" << (evaluation.has_keychain_rtti ? 1 : 0)
+                << L", model_name_keychain=" << (evaluation.model_name_has_keychain_token ? 1 : 0);
+            if (!evaluation.model_name.empty())
+            {
+                stream << L", model_name=" << NarrowToWide(evaluation.model_name);
+            }
+            if (!evaluation.rtti.empty())
+            {
+                stream << L", rtti=" << evaluation.rtti;
+            }
+            stream << L"}";
+            return stream.str();
+        };
+
+    KeychainModuleCandidateEvaluation best_candidate {};
+    std::vector<KeychainModuleCandidateEvaluation> near_miss_candidates;
+    near_miss_candidates.reserve(3);
+
+    const auto remember_near_miss =
+        [&](const KeychainModuleCandidateEvaluation& evaluation)
+        {
+            if (evaluation.entity == nullptr || evaluation.score <= 0)
+            {
+                return;
+            }
+
+            for (auto& existing : near_miss_candidates)
+            {
+                if (existing.entity == evaluation.entity)
+                {
+                    if (evaluation.score > existing.score)
+                    {
+                        existing = evaluation;
+                    }
+                    std::sort(
+                        near_miss_candidates.begin(),
+                        near_miss_candidates.end(),
+                        [](const auto& left, const auto& right)
+                        {
+                            return left.score > right.score;
+                        });
+                    return;
+                }
+            }
+
+            near_miss_candidates.push_back(evaluation);
+            std::sort(
+                near_miss_candidates.begin(),
+                near_miss_candidates.end(),
+                [](const auto& left, const auto& right)
+                {
+                    return left.score > right.score;
+                });
+            if (near_miss_candidates.size() > 3)
+            {
+                near_miss_candidates.resize(3);
+            }
+        };
+
+    const auto consider_candidate =
+        [&](const int candidate_index, void* candidate, const KeychainModuleCandidateHint hint)
+        {
+            if (candidate == nullptr)
+            {
+                return;
+            }
+
+            KeychainModuleCandidateEvaluation evaluation {};
+            evaluation.entity_index =
+                candidate_index >= 0
+                    ? candidate_index
+                    : ResolveEntityIndexFromPointer(entity_cache, candidate);
+            if (evaluation.entity_index < 0)
+            {
+                evaluation.entity_index = BuildSyntheticEntityIndex(candidate, 0x4B434D44u);
+            }
+            evaluation.entity = candidate;
+            evaluation.hint = hint;
+
+            if (!IsLikelyKeychainModuleEntityCandidate(
+                    candidate,
+                    offsets,
+                    &evaluation.keychain_def_id,
+                    &evaluation.keychain_seed))
+            {
+                return;
+            }
+
+            evaluation.has_keychain_rtti =
+                RuntimeEntityRttiContainsToken(candidate, L"KeychainModule") ||
+                RuntimeEntityRttiContainsToken(candidate, L"Keychain") ||
+                RuntimeEntityRttiContainsToken(candidate, L"Charm");
+            evaluation.rtti = BuildRuntimeEntityRttiDescriptor(candidate);
+            TryReadEntityModelNameString(candidate, offsets, evaluation.model_name);
+            evaluation.model_name_has_keychain_token =
+                ContainsAsciiInsensitive(evaluation.model_name, "keychain") ||
+                ContainsAsciiInsensitive(evaluation.model_name, "charm");
+            evaluation.attachment_match = resolve_attachment_match(candidate);
+
+            const auto strong_relation =
+                evaluation.attachment_match.owner_entity ||
+                evaluation.attachment_match.old_move_parent ||
+                evaluation.attachment_match.scene_owner ||
+                evaluation.hint.trace_scene_owner ||
+                evaluation.hint.trace_explicit_child ||
+                evaluation.hint.scene_child_owner;
+            const auto soft_relation =
+                evaluation.attachment_match.viewmodel_attachment ||
+                evaluation.attachment_match.old_providee ||
+                evaluation.hint.trace_hud;
+
+            evaluation.score = 0;
+            if (evaluation.has_keychain_rtti)
+            {
+                evaluation.score += 80;
+            }
+            if (evaluation.model_name_has_keychain_token)
+            {
+                evaluation.score += 30;
+            }
+            if (evaluation.keychain_def_id != 0)
+            {
+                evaluation.score += 20;
+            }
+            if (evaluation.attachment_match.owner_entity)
+            {
+                evaluation.score += 45;
+            }
+            if (evaluation.attachment_match.old_move_parent)
+            {
+                evaluation.score += 40;
+            }
+            if (evaluation.attachment_match.scene_owner)
+            {
+                evaluation.score += 35;
+            }
+            if (evaluation.attachment_match.viewmodel_attachment)
+            {
+                evaluation.score += 18;
+            }
+            if (evaluation.attachment_match.old_providee)
+            {
+                evaluation.score += 18;
+            }
+            if (evaluation.hint.trace_explicit_child)
+            {
+                evaluation.score += 18;
+            }
+            if (evaluation.hint.trace_scene_owner)
+            {
+                evaluation.score += 14;
+            }
+            if (evaluation.hint.trace_hud)
+            {
+                evaluation.score += 8;
+            }
+            if (evaluation.hint.scene_child_owner)
+            {
+                evaluation.score += std::max(8, 28 - std::min(evaluation.hint.scene_depth, 6) * 2);
+            }
+            if (evaluation.attachment_match.owner_entity && evaluation.attachment_match.old_move_parent)
+            {
+                evaluation.score += 15;
+            }
+            if (evaluation.has_keychain_rtti)
+            {
+                evaluation.accepted =
+                    strong_relation ||
+                    soft_relation ||
+                    evaluation.keychain_def_id != 0;
+            }
+            else if (evaluation.model_name_has_keychain_token)
+            {
+                evaluation.accepted =
+                    strong_relation ||
+                    (soft_relation && evaluation.keychain_def_id != 0);
+            }
+            else
+            {
+                evaluation.accepted =
+                    evaluation.keychain_def_id != 0 &&
+                    strong_relation &&
+                    (evaluation.attachment_match.owner_entity ||
+                     evaluation.attachment_match.old_move_parent ||
+                     evaluation.attachment_match.scene_owner ||
+                     evaluation.hint.scene_child_owner);
+            }
+
+            if (evaluation.accepted &&
+                (best_candidate.entity == nullptr || evaluation.score > best_candidate.score))
+            {
+                best_candidate = evaluation;
+            }
+            else
+            {
+                remember_near_miss(evaluation);
+            }
+        };
+
+    consider_candidate(
+        trace.explicit_owner_child_entity_index,
+        trace.explicit_owner_child_entity,
+        KeychainModuleCandidateHint {.trace_explicit_child = true, .scene_depth = 1});
+    consider_candidate(
+        trace.scene_owner_entity_index,
+        trace.scene_owner_entity,
+        KeychainModuleCandidateHint {.trace_scene_owner = true});
+    consider_candidate(
+        trace.hud_weapon_entity_index,
+        trace.hud_weapon_entity,
+        KeychainModuleCandidateHint {.trace_hud = true});
+
+    int scanned_scene_child_owner_candidates = 0;
+    if (trace.owned_weapon_entity != nullptr &&
+        offsets.base_entity_game_scene_node != 0 &&
+        offsets.game_scene_node_child != 0 &&
+        offsets.game_scene_node_next_sibling != 0 &&
+        offsets.game_scene_node_owner != 0)
+    {
+        void* weapon_scene_node = nullptr;
+        if (SafeReadField(trace.owned_weapon_entity, offsets.base_entity_game_scene_node, weapon_scene_node) &&
+            weapon_scene_node != nullptr)
+        {
+            void* first_child_scene_node = nullptr;
+            if (SafeReadField(weapon_scene_node, offsets.game_scene_node_child, first_child_scene_node) &&
+                first_child_scene_node != nullptr)
+            {
+                struct PendingSceneNode
+                {
+                    void* scene_node = nullptr;
+                    int depth = 0;
+                };
+
+                std::vector<PendingSceneNode> pending_scene_nodes;
+                pending_scene_nodes.reserve(16);
+                pending_scene_nodes.push_back({first_child_scene_node, 1});
+                std::unordered_set<void*> visited_scene_nodes;
+                visited_scene_nodes.reserve(32);
+                visited_scene_nodes.insert(weapon_scene_node);
+
+                while (!pending_scene_nodes.empty() && scanned_scene_child_owner_candidates < 64)
+                {
+                    const auto pending = pending_scene_nodes.back();
+                    pending_scene_nodes.pop_back();
+                    if (pending.scene_node == nullptr ||
+                        !visited_scene_nodes.insert(pending.scene_node).second)
+                    {
+                        continue;
+                    }
+
+                    ++scanned_scene_child_owner_candidates;
+
+                    if (pending.depth < 8)
+                    {
+                        void* nested_child_scene_node = nullptr;
+                        if (SafeReadField(pending.scene_node, offsets.game_scene_node_child, nested_child_scene_node) &&
+                            nested_child_scene_node != nullptr)
+                        {
+                            pending_scene_nodes.push_back({nested_child_scene_node, pending.depth + 1});
+                        }
+                    }
+
+                    void* next_sibling_scene_node = nullptr;
+                    if (SafeReadField(
+                            pending.scene_node,
+                            offsets.game_scene_node_next_sibling,
+                            next_sibling_scene_node) &&
+                        next_sibling_scene_node != nullptr)
+                    {
+                        pending_scene_nodes.push_back({next_sibling_scene_node, pending.depth});
+                    }
+
+                    void* owner_entity = nullptr;
+                    if (!SafeReadField(pending.scene_node, offsets.game_scene_node_owner, owner_entity) ||
+                        owner_entity == nullptr)
+                    {
+                        continue;
+                    }
+
+                    auto owner_entity_index = ResolveEntityIndexFromPointer(entity_cache, owner_entity);
+                    if (owner_entity_index < 0)
+                    {
+                        owner_entity_index = BuildSyntheticEntityIndex(owner_entity, 0x4B435343u);
+                    }
+
+                    consider_candidate(
+                        owner_entity_index,
+                        owner_entity,
+                        KeychainModuleCandidateHint {
+                            .scene_child_owner = true,
+                            .scene_depth = pending.depth});
+                }
+            }
+        }
+    }
+
+    for (std::size_t index = 0; index < entity_cache.size(); ++index)
+    {
+        auto* candidate = entity_cache[index];
+        if (candidate == nullptr || candidate == trace.owned_weapon_entity)
+        {
+            continue;
+        }
+
+        consider_candidate(static_cast<int>(index), candidate, {});
+    }
+
+    if (best_candidate.entity != nullptr)
+    {
+        keychain_module_entity = best_candidate.entity;
+        keychain_module_entity_index = best_candidate.entity_index;
+
+        if (best_candidate.hint.scene_child_owner ||
+            best_candidate.attachment_match.scene_owner ||
+            (!best_candidate.attachment_match.owner_entity &&
+             !best_candidate.attachment_match.old_move_parent))
+        {
+            const auto resolution_signature =
+                trace.xuid ^
+                (static_cast<std::uint64_t>(
+                     static_cast<std::uint32_t>(std::max(0, trace.owned_weapon_entity_index)))
+                 << 32) ^
+                0x4B43524C56454E54ull;
+            std::wstringstream stream;
+            stream << L"Resolved keychain module candidate for weapon trace {"
+                << DescribeRenderedWorldWeaponTrace(trace)
+                << L"} using "
+                << describe_candidate(best_candidate)
+                << L", scanned_scene_child_candidates=" << scanned_scene_child_owner_candidates;
+            LogProfileDiagnosticOnce(resolution_signature, stream.str());
+        }
+        return true;
+    }
+
+    if (!near_miss_candidates.empty())
+    {
+        const auto failure_signature =
+            trace.xuid ^
+            (static_cast<std::uint64_t>(
+                 static_cast<std::uint32_t>(std::max(0, trace.owned_weapon_entity_index)))
+             << 32) ^
+            0x4B434E4F4D415443ull;
+        std::wstringstream stream;
+        stream << L"Keychain module resolution failed for weapon trace {"
+            << DescribeRenderedWorldWeaponTrace(trace)
+            << L"}; scanned_scene_child_candidates=" << scanned_scene_child_owner_candidates
+            << L", near_misses=";
+        for (std::size_t index = 0; index < near_miss_candidates.size(); ++index)
+        {
+            if (index != 0)
+            {
+                stream << L" | ";
+            }
+            stream << describe_candidate(near_miss_candidates[index]);
+        }
+        LogProfileDiagnosticOnce(failure_signature, stream.str());
+    }
+
+    return false;
+}
+
 bool DoesAppliedEconItemMatchProfile(
     void* econ_entity,
     void* item_view,
@@ -39613,7 +45810,9 @@ bool DoesAppliedEconItemMatchProfile(
     const int current_definition_index,
     const bool allow_definition_override = true,
     const bool allow_knife_definition_override = false,
-    const bool require_legacy_activation_writes = true)
+    const bool require_legacy_activation_writes = true,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr,
+    void* keychain_module_entity = nullptr)
 {
     if (item_view == nullptr)
     {
@@ -39621,7 +45820,9 @@ bool DoesAppliedEconItemMatchProfile(
     }
 
     constexpr float kDefaultWear = 0.0000001f;
+    const auto keychain_only_apply = IsKeychainOnlyApplyRequest(profile, keychain_profile);
     const auto should_validate_extended_item_view = ShouldApplyExtendedItemViewWrites(profile);
+    const auto uses_temporary_world_refresh_model = UsesTemporaryWorldWeaponRefreshModel(profile);
     const auto should_expect_definition_override =
         ShouldApplyDefinitionOverrideWrites(profile) &&
         allow_definition_override &&
@@ -39635,6 +45836,11 @@ bool DoesAppliedEconItemMatchProfile(
         actual_definition_index != expected_definition_index)
     {
         return false;
+    }
+
+    if (keychain_only_apply)
+    {
+        return VerifyAttributeValues(item_view, offsets, BuildWeaponRefreshAttributesImpl(profile, keychain_profile));
     }
 
     if (should_validate_extended_item_view)
@@ -39767,6 +45973,33 @@ bool DoesAppliedEconItemMatchProfile(
         }
     }
 
+    static_cast<void>(DoesWeaponKeychainModuleMatch(keychain_module_entity, offsets, keychain_profile));
+
+    if (uses_temporary_world_refresh_model)
+    {
+        if (keychain_profile != nullptr)
+        {
+            if (!VerifyAttributeValues(
+                    item_view,
+                    offsets,
+                    BuildDesiredKeychainAttributes(keychain_profile)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    if (keychain_profile != nullptr &&
+        !VerifyAttributeValues(
+            item_view,
+            offsets,
+            BuildWeaponRefreshAttributesImpl(profile, keychain_profile)))
+    {
+        return false;
+    }
+
     return true;
 }
 
@@ -39779,11 +46012,41 @@ bool ApplyProfileToEconItem(
     const int current_definition_index,
     const bool allow_definition_override = true,
     const bool allow_knife_definition_override = false,
-    const bool write_legacy_activation_writes = true)
+    const bool write_legacy_activation_writes = true,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr,
+    void* keychain_module_entity = nullptr)
 {
     if (item_view == nullptr)
     {
         return false;
+    }
+
+    const auto keychain_only_apply = IsKeychainOnlyApplyRequest(profile, keychain_profile);
+    const auto demo_keychain_module_only_apply =
+        keychain_only_apply &&
+        g_hook_state.demo_playing.load(std::memory_order_acquire);
+    if (keychain_only_apply)
+    {
+        const auto module_fields_applied =
+            ApplyWeaponKeychainModuleFields(keychain_module_entity, offsets, keychain_profile);
+        static_cast<void>(module_fields_applied);
+        bool success = true;
+        success = ApplyExistingItemAttributes(item_view, offsets, profile, keychain_profile) && success;
+        if (keychain_profile != nullptr && !demo_keychain_module_only_apply)
+        {
+            std::uint32_t live_item_view_keychain_def_id = 0;
+            std::uint32_t live_item_view_keychain_seed = 0;
+            success =
+                ApplyKeychainStateToWeaponItemView(
+                    item_view,
+                    offsets,
+                    keychain_profile,
+                    false,
+                    live_item_view_keychain_def_id,
+                    live_item_view_keychain_seed) &&
+                success;
+        }
+        return success;
     }
 
     const auto should_apply_extended_item_view = ShouldApplyExtendedItemViewWrites(profile);
@@ -39825,13 +46088,21 @@ bool ApplyProfileToEconItem(
         {
             success = success && SafeWriteField(econ_entity, offsets.econ_entity_initialized, true);
         }
+
+        const auto module_fields_applied =
+            ApplyWeaponKeychainModuleFields(keychain_module_entity, offsets, keychain_profile);
+        static_cast<void>(module_fields_applied);
     }
 
     if (should_apply_extended_item_view)
     {
         if (!uses_temporary_world_refresh_model)
         {
-            success = ApplyExistingItemAttributes(item_view, offsets, profile) && success;
+            success = ApplyExistingItemAttributes(item_view, offsets, profile, keychain_profile) && success;
+        }
+        else if (keychain_profile != nullptr)
+        {
+            success = ApplyPersistentKeychainAttributeToItemView(item_view, offsets, keychain_profile) && success;
         }
         if (should_sync_definition_index)
         {
@@ -39894,7 +46165,8 @@ bool TryApplyWeaponEntityProfile(
     void* refresh_item_view,
     std::unordered_set<int>& applied_entity_indices,
     int& applied_weapon_writes,
-    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests)
+    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     if (applied_entity_indices.find(entity_index) != applied_entity_indices.end())
     {
@@ -39905,7 +46177,7 @@ bool TryApplyWeaponEntityProfile(
         pending_refresh_requests != nullptr &&
         IsMaterialRefreshTarget(refresh_target) &&
         (refresh_item_view != nullptr ? refresh_item_view : item_view) != nullptr &&
-        NeedsWeaponSkinRefresh(profile);
+        NeedsWeaponSkinRefresh(profile, keychain_profile);
     const auto has_applied_signature =
         HasAppliedSignature(g_hook_state.applied_weapon_signatures, entity_index, desired_signature);
     void* effective_refresh_item_view = refresh_item_view != nullptr ? refresh_item_view : item_view;
@@ -39919,7 +46191,10 @@ bool TryApplyWeaponEntityProfile(
                  effective_refresh_item_view,
                  profile,
                  desired_signature,
-                 refresh_target});
+                 refresh_target,
+                 false,
+                 keychain_profile != nullptr ? std::optional<nskinzcs2::model::KeychainProfile> {*keychain_profile}
+                                             : std::nullopt});
 
             if (ShouldTraceWatchedKnifeDiagnostic(profile))
             {
@@ -39949,7 +46224,8 @@ bool TryApplyWeaponEntityProfile(
             current_definition_index,
             true,
             allow_knife_definition_override,
-            write_legacy_activation_writes))
+            write_legacy_activation_writes,
+            keychain_profile))
     {
         if (needs_refresh)
         {
@@ -39967,7 +46243,8 @@ bool TryApplyWeaponEntityProfile(
             current_definition_index,
             true,
             allow_knife_definition_override,
-            write_legacy_activation_writes))
+            write_legacy_activation_writes,
+            keychain_profile))
     {
         return false;
     }
@@ -40013,7 +46290,8 @@ bool TryApplyWeaponLinkedHandle(
     const bool allow_knife_definition_override,
     std::unordered_set<int>& applied_entity_indices,
     int& applied_weapon_writes,
-    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests)
+    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     if (entity_list == nullptr || parent_weapon_entity == nullptr || handle_offset == 0)
     {
@@ -40091,7 +46369,12 @@ bool TryApplyWeaponLinkedHandle(
             linked_entity,
             direct_linked_item_view);
         const auto warning_signature =
-            BuildProfileApplySignature(profile, xuid, fallback_definition_index, target_tag ^ 0x4000ull);
+            BuildProfileApplySignature(
+                profile,
+                xuid,
+                fallback_definition_index,
+                target_tag ^ 0x4000ull,
+                keychain_profile);
         std::wstringstream warning_stream;
         warning_stream << L"Skipped unsafe linked weapon entity " << linked_entity_index
             << L" while applying XUID " << xuid
@@ -40106,7 +46389,13 @@ bool TryApplyWeaponLinkedHandle(
     void* apply_econ_entity = linked_resolution.used_heuristic ? nullptr : linked_entity;
     void* linked_item_view = linked_resolution.item_view;
     const auto linked_definition_index = linked_resolution.definition_index;
-    const auto linked_signature = BuildProfileApplySignature(linked_profile, xuid, linked_definition_index, target_tag);
+    const auto linked_signature =
+        BuildProfileApplySignature(
+            linked_profile,
+            xuid,
+            linked_definition_index,
+            target_tag,
+            keychain_profile);
     const auto preferred_refresh_target =
         target_tag == kTargetTagWeaponViewModel
         ? (linked_resolution.used_heuristic
@@ -40190,7 +46479,8 @@ bool TryApplyWeaponLinkedHandle(
         refresh_item_view,
         applied_entity_indices,
         applied_weapon_writes,
-        pending_refresh_requests);
+        pending_refresh_requests,
+        keychain_profile);
 }
 
 bool TryResolveValidatedWeaponLinkedCandidate(
@@ -40252,6 +46542,47 @@ bool TryResolveValidatedWeaponLinkedCandidate(
     candidate.entity = linked_resolution.entity;
     candidate.item_view = linked_resolution.item_view;
     candidate.definition_index = linked_resolution.definition_index;
+    if (kind == nskinzcs2::runtime::CanonicalWeaponCarrierKind::Providee &&
+        ShouldLogWatchedKnifeAnimationTrace(xuid))
+    {
+        const auto signature =
+            xuid ^
+            (static_cast<std::uint64_t>(
+                 static_cast<std::uint32_t>(parent_entity_index >= 0 ? parent_entity_index : 0))
+             << 32) ^
+            static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(
+                    linked_resolution.entity_index >= 0 ? linked_resolution.entity_index : 0)) ^
+            0x5052564F4C445331ull;
+        std::string model_name;
+        TryReadEntityModelNameString(linked_entity, offsets, model_name);
+        const auto model_kind = ClassifyKnifeFirstPersonRenderableModel(linked_entity, offsets);
+        const auto* model_kind_text =
+            model_kind == KnifeFirstPersonRenderableModelKind::WeaponLike
+                ? L"weapon"
+                : model_kind == KnifeFirstPersonRenderableModelKind::CharacterLike
+                    ? L"character"
+                    : L"unknown";
+        auto* entity_item_view = ResolveWeaponItemView(linked_entity, offsets);
+        std::wstringstream stream;
+        stream << L"Knife canonical providee source: parent_entity=" << parent_entity_index
+            << L", old_providee_handle=0x" << std::hex << std::uppercase << linked_handle
+            << std::dec << std::nouppercase
+            << L", linked_entity=" << linked_entity_index
+            << L", resolved_entity=" << linked_resolution.entity_index
+            << L", used_heuristic=" << (linked_resolution.used_heuristic ? 1 : 0)
+            << L", resolved_item_view=" << FormatPointer(linked_resolution.item_view)
+            << L", entity_item_view=" << FormatPointer(entity_item_view)
+            << L", shared_item_view="
+            << ((entity_item_view != nullptr && entity_item_view == linked_resolution.item_view) ? 1 : 0)
+            << L", definition=" << linked_resolution.definition_index
+            << L", model_kind=" << model_kind_text;
+        if (!model_name.empty())
+        {
+            stream << L", model_name=" << NarrowToWide(model_name);
+        }
+        LogProfileDiagnosticOnce(signature, stream.str());
+    }
     return true;
 }
 
@@ -40476,7 +46807,8 @@ bool TryApplyWeaponEntityProfile(
     void* refresh_item_view,
     std::unordered_set<int>& applied_entity_indices,
     int& applied_weapon_writes,
-    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests)
+    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     return TryApplyWeaponEntityProfile(
         entity_index,
@@ -40493,7 +46825,8 @@ bool TryApplyWeaponEntityProfile(
         refresh_item_view,
         applied_entity_indices,
         applied_weapon_writes,
-        pending_refresh_requests);
+        pending_refresh_requests,
+        keychain_profile);
 }
 
 bool TryApplyWeaponLinkedHandle(
@@ -40511,7 +46844,8 @@ bool TryApplyWeaponLinkedHandle(
     const std::uint64_t target_tag,
     std::unordered_set<int>& applied_entity_indices,
     int& applied_weapon_writes,
-    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests)
+    std::vector<PendingWeaponRefreshRequest>* pending_refresh_requests,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     return TryApplyWeaponLinkedHandle(
         entity_list,
@@ -40529,7 +46863,8 @@ bool TryApplyWeaponLinkedHandle(
         false,
         applied_entity_indices,
         applied_weapon_writes,
-        pending_refresh_requests);
+        pending_refresh_requests,
+        keychain_profile);
 }
 
 struct RuntimeWeaponAppearanceBinding
@@ -40539,6 +46874,8 @@ struct RuntimeWeaponAppearanceBinding
     void* carrier_item_view = nullptr;
     void* render_entity = nullptr;
     void* hud_entity = nullptr;
+    void* keychain_module_entity = nullptr;
+    int keychain_module_entity_index = -1;
 };
 
 bool TryResolveStandardWeaponAppearanceBinding(
@@ -40601,6 +46938,7 @@ bool TryCaptureWeaponAppearanceSnapshot(
     void* carrier_item_view,
     void* render_entity,
     void* hud_entity,
+    void* keychain_module_entity,
     const ClientSchemaOffsets& offsets,
     const nskinzcs2::model::CosmeticProfile& profile,
     nskinzcs2::runtime::WeaponAppearanceSnapshot& snapshot)
@@ -40659,6 +46997,20 @@ bool TryCaptureWeaponAppearanceSnapshot(
         snapshot.has_econ_entity_initialized =
             SafeReadField(carrier_entity, offsets.econ_entity_initialized, snapshot.econ_entity_initialized);
         success = success && snapshot.has_econ_entity_initialized;
+    }
+
+    if (keychain_module_entity != nullptr && offsets.weapon_keychain_def_id != 0)
+    {
+        snapshot.has_keychain_def_id =
+            SafeReadField(keychain_module_entity, offsets.weapon_keychain_def_id, snapshot.keychain_def_id);
+        success = success && snapshot.has_keychain_def_id;
+    }
+
+    if (keychain_module_entity != nullptr && offsets.weapon_keychain_seed != 0)
+    {
+        snapshot.has_keychain_seed =
+            SafeReadField(keychain_module_entity, offsets.weapon_keychain_seed, snapshot.keychain_seed);
+        success = success && snapshot.has_keychain_seed;
     }
 
     if (offsets.item_view_initialized != 0)
@@ -40763,6 +47115,22 @@ bool RestoreWeaponAppearanceSnapshot(
             SafeWriteField(binding.carrier_entity, offsets.econ_entity_initialized, snapshot.econ_entity_initialized);
     }
 
+    if (snapshot.has_keychain_def_id &&
+        binding.keychain_module_entity != nullptr &&
+        offsets.weapon_keychain_def_id != 0)
+    {
+        restored = restored &&
+            SafeWriteField(binding.keychain_module_entity, offsets.weapon_keychain_def_id, snapshot.keychain_def_id);
+    }
+
+    if (snapshot.has_keychain_seed &&
+        binding.keychain_module_entity != nullptr &&
+        offsets.weapon_keychain_seed != 0)
+    {
+        restored = restored &&
+            SafeWriteField(binding.keychain_module_entity, offsets.weapon_keychain_seed, snapshot.keychain_seed);
+    }
+
     if (snapshot.has_item_view_initialized)
     {
         restored = restored &&
@@ -40838,6 +47206,7 @@ bool TryMirrorWeaponAppearanceScalarsToRenderProxy(
             source_entity,
             source_item_view,
             source_entity,
+            nullptr,
             nullptr,
             offsets,
             unused_profile,
@@ -41032,12 +47401,26 @@ std::wstring BuildWeaponAppearanceVerifyLine(
     int fallback_stattrak = 0;
     std::uint64_t render_mesh_mask = 0;
     std::uint64_t hud_mesh_mask = 0;
+    float keychain_attribute = 0.0f;
+    std::uint32_t keychain_def_id = 0;
+    std::uint32_t keychain_seed = 0;
 
     SafeReadField(binding.carrier_entity, offsets.econ_entity_fallback_paint_kit, fallback_paint);
     SafeReadField(binding.carrier_entity, offsets.econ_entity_fallback_seed, fallback_seed);
     SafeReadField(binding.carrier_entity, offsets.econ_entity_fallback_wear, fallback_wear);
     SafeReadField(binding.carrier_entity, offsets.econ_entity_fallback_stat_trak, fallback_stattrak);
     TryReadWeaponMeshGroupMask(binding.render_entity, offsets, render_mesh_mask);
+    const auto has_keychain_attribute =
+        binding.carrier_item_view != nullptr &&
+        TryReadAttributeValue(binding.carrier_item_view, offsets, kAttributeKeychainId, keychain_attribute);
+    const auto has_keychain_def_id =
+        binding.keychain_module_entity != nullptr &&
+        offsets.weapon_keychain_def_id != 0 &&
+        SafeReadField(binding.keychain_module_entity, offsets.weapon_keychain_def_id, keychain_def_id);
+    const auto has_keychain_seed =
+        binding.keychain_module_entity != nullptr &&
+        offsets.weapon_keychain_seed != 0 &&
+        SafeReadField(binding.keychain_module_entity, offsets.weapon_keychain_seed, keychain_seed);
     if (binding.hud_entity != nullptr)
     {
         TryReadWeaponMeshGroupMask(binding.hud_entity, offsets, hud_mesh_mask);
@@ -41052,7 +47435,35 @@ std::wstring BuildWeaponAppearanceVerifyLine(
         << L", fallback_seed=" << fallback_seed
         << L", fallback_wear=" << fallback_wear
         << L", fallback_stattrak=" << fallback_stattrak
-        << L", render_mesh_mask=" << render_mesh_mask;
+        << L", render_mesh_mask=" << render_mesh_mask
+        << L", keychain_module_entity=" << binding.keychain_module_entity_index
+        << L", keychain_attr=";
+    if (has_keychain_attribute)
+    {
+        stream << static_cast<int>(keychain_attribute);
+    }
+    else
+    {
+        stream << L"?";
+    }
+    stream << L", keychain_module_def=";
+    if (has_keychain_def_id)
+    {
+        stream << keychain_def_id;
+    }
+    else
+    {
+        stream << L"?";
+    }
+    stream << L", keychain_module_seed=";
+    if (has_keychain_seed)
+    {
+        stream << keychain_seed;
+    }
+    else
+    {
+        stream << L"?";
+    }
     if (binding.hud_entity != nullptr)
     {
         stream << L", hud_mesh_mask=" << hud_mesh_mask;
@@ -41064,6 +47475,7 @@ bool VerifyWeaponAppearanceState(
     const RuntimeWeaponAppearanceBinding& binding,
     const ClientSchemaOffsets& offsets,
     const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile,
     const std::uint64_t xuid,
     const int current_definition_index,
     const std::uint64_t desired_signature,
@@ -41086,7 +47498,9 @@ bool VerifyWeaponAppearanceState(
             current_definition_index,
             true,
             allow_knife_definition_override,
-            true))
+            true,
+            keychain_profile,
+            binding.keychain_module_entity))
     {
         issue = L"carrier entity readback did not match the requested weapon appearance.";
         return false;
@@ -41115,14 +47529,19 @@ bool VerifyWeaponAppearanceState(
 }
 
 bool TryApplyStandardWeaponAppearancePipeline(
+    void* entity_list,
+    const int highest_live_entity_index,
+    const std::vector<void*>& entity_cache,
     const RenderedWorldWeaponTrace& trace,
     const ClientSchemaOffsets& offsets,
     const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile,
     const std::uint64_t xuid,
     const int current_definition_index,
     const std::uint64_t desired_signature,
     const std::uint64_t mesh_group_mask,
     const bool allow_knife_definition_override,
+    const nskinzcs2::runtime::KnifeRuntimeContext* knife_context,
     std::unordered_set<int>& applied_entity_indices,
     int& applied_weapon_writes)
 {
@@ -41144,10 +47563,185 @@ bool TryApplyStandardWeaponAppearancePipeline(
             {},
             L"Weapon appearance stage failed: Validate",
             {});
+        std::wstringstream stream;
+        stream << L"Weapon appearance binding unresolved for XUID " << xuid
+            << L": " << DescribeRenderedWorldWeaponTrace(trace);
+        LogProfileDiagnosticOnce(desired_signature ^ 0x7405ull, stream.str());
         return false;
     }
 
-    const auto payload = nskinzcs2::runtime::BuildWeaponAppearancePayload(profile, AccountIdFromXuid(xuid));
+    if (keychain_profile != nullptr)
+    {
+        TryResolveWeaponKeychainModuleEntity(
+            entity_cache,
+            trace,
+            offsets,
+            binding.keychain_module_entity,
+            binding.keychain_module_entity_index);
+
+        if (binding.keychain_module_entity == nullptr && keychain_profile->keychain_kit > 0)
+        {
+            const auto now = GetTickCount64();
+            const auto keychain_create_cooldown_until =
+                g_hook_state.keychain_module_create_cooldown_until_millis.load();
+            const auto demo_playing = g_hook_state.demo_playing.load();
+            const auto create_during_seek_cooldown =
+                keychain_create_cooldown_until != 0 &&
+                now < keychain_create_cooldown_until;
+            const auto seek_safety_window_active =
+                IsKnifeModelPathSwapDemoSeekSafetyWindowActive();
+            const auto demo_paused = g_hook_state.demo_paused.load();
+            const auto client_entity_factory_ready =
+                g_hook_state.client_entity_factory_ready.load(std::memory_order_acquire);
+            if (create_during_seek_cooldown ||
+                seek_safety_window_active ||
+                demo_paused ||
+                demo_playing ||
+                !client_entity_factory_ready)
+            {
+                std::wstringstream stream;
+                stream << L"Skipped runtime keychain module creation for weapon entity "
+                    << trace.owned_weapon_entity_index
+                    << L": demo_playing=" << (demo_playing ? 1 : 0)
+                    << L", demo_paused=" << (demo_paused ? 1 : 0)
+                    << L", seek_safety_window=" << (seek_safety_window_active ? 1 : 0)
+                    << L", client_entity_factory_ready=" << (client_entity_factory_ready ? 1 : 0);
+                if (create_during_seek_cooldown)
+                {
+                    stream << L", cooldown_remaining_ms="
+                        << (keychain_create_cooldown_until - now);
+                }
+                WarnOnceForRuntimeSignature(desired_signature ^ 0x7420ull, stream.str());
+            }
+            else
+            {
+                if (keychain_create_cooldown_until != 0 && now >= keychain_create_cooldown_until)
+                {
+                    g_hook_state.keychain_module_create_cooldown_until_millis.store(0);
+                }
+
+                WearableClientClassFactoryBinding keychain_factory {};
+                std::wstring keychain_factory_issue;
+                const auto keychain_factory_availability =
+                    SnapshotOrResolveCachedKeychainFactoryResolution(
+                        keychain_factory,
+                        keychain_factory_issue);
+                if (keychain_factory_availability == RuntimeFeatureAvailability::Available)
+                {
+                    int runtime_keychain_module_entity_index = -1;
+                    void* runtime_keychain_module_entity = nullptr;
+                    std::wstring create_issue;
+                    if (TryCreateRuntimeKeychainModuleEntity(
+                            entity_list,
+                            highest_live_entity_index,
+                            keychain_factory,
+                            runtime_keychain_module_entity_index,
+                            runtime_keychain_module_entity,
+                            create_issue))
+                    {
+                        const auto weapon_handle =
+                            trace.owned_weapon_handle != kInvalidEntityHandle
+                                ? trace.owned_weapon_handle
+                                : BuildEntityHandle(trace.owned_weapon_entity_index, 0);
+                        if (TryBindKeychainModuleEntityToWeapon(
+                                runtime_keychain_module_entity,
+                                weapon_handle,
+                                offsets))
+                        {
+                            binding.keychain_module_entity = runtime_keychain_module_entity;
+                            binding.keychain_module_entity_index = runtime_keychain_module_entity_index;
+                            RememberRuntimeCreatedKeychainModuleEntityIndex(
+                                runtime_keychain_module_entity_index);
+
+                            std::wstringstream stream;
+                            stream << L"Created runtime keychain module entity "
+                                << runtime_keychain_module_entity_index
+                                << L" for weapon entity " << trace.owned_weapon_entity_index
+                                << L" via "
+                                << (!keychain_factory.resolution_method.empty()
+                                        ? keychain_factory.resolution_method
+                                        : L"client_class_factory")
+                                << L".";
+                            LogProfileDiagnosticOnce(desired_signature ^ 0x7421ull, stream.str());
+                        }
+                        else
+                        {
+                            std::wstringstream stream;
+                            stream << L"Runtime keychain module creation failed to bind to weapon entity "
+                                << trace.owned_weapon_entity_index
+                                << L": parent_handle=0x"
+                                << std::hex << std::uppercase << weapon_handle
+                                << std::dec << std::nouppercase << L".";
+                            WarnOnceForRuntimeSignature(desired_signature ^ 0x7422ull, stream.str());
+                        }
+                    }
+                    else if (!create_issue.empty())
+                    {
+                        std::wstringstream stream;
+                        stream << L"Runtime keychain module creation failed for weapon entity "
+                            << trace.owned_weapon_entity_index << L": " << create_issue;
+                        WarnOnceForRuntimeSignature(desired_signature ^ 0x7423ull, stream.str());
+                    }
+                }
+                else if (!keychain_factory_issue.empty())
+                {
+                    WarnOnceForRuntimeSignature(
+                        desired_signature ^ 0x7424ull,
+                        L"Runtime keychain module factory unresolved: " + keychain_factory_issue);
+                }
+            }
+        }
+    }
+
+    if (ShouldSuppressUnsafeKeychainOnlyApply(offsets, profile, keychain_profile))
+    {
+        const auto desired_keychain_kit =
+            keychain_profile != nullptr ? std::max(0, keychain_profile->keychain_kit) : 0;
+        bool module_fields_applied = true;
+        bool module_state_verified = desired_keychain_kit == 0;
+        if (binding.keychain_module_entity != nullptr)
+        {
+            module_fields_applied =
+                ApplyWeaponKeychainModuleFields(binding.keychain_module_entity, offsets, keychain_profile);
+            module_state_verified =
+                module_fields_applied &&
+                DoesWeaponKeychainModuleMatch(binding.keychain_module_entity, offsets, keychain_profile);
+        }
+
+        std::wstringstream stream;
+        stream << L"Suppressed keychain-only exact apply after the safe module path for weapon entity "
+            << trace.owned_weapon_entity_index
+            << L" because direct attribute-list writes are disabled by the crash guard"
+            << L": keychain_kit=" << desired_keychain_kit
+            << L", keychain_module_entity=" << binding.keychain_module_entity_index
+            << L", module_fields_applied=" << (module_fields_applied ? 1 : 0)
+            << L", module_state_verified=" << (module_state_verified ? 1 : 0)
+            << L", carrier_entity=" << binding.resolved.carrier_entity_index
+            << L", render_entity=" << binding.resolved.render_entity_index
+            << L".";
+        LogProfileDiagnosticOnce(
+            desired_signature ^ 0x7426ull ^ (module_state_verified ? 0x1ull : 0x2ull),
+            stream.str());
+
+        if (module_state_verified)
+        {
+            applied_entity_indices.insert(trace.owned_weapon_entity_index);
+            applied_entity_indices.insert(binding.resolved.carrier_entity_index);
+            applied_entity_indices.insert(binding.resolved.render_entity_index);
+            if (binding.resolved.hud_entity_index >= 0)
+            {
+                applied_entity_indices.insert(binding.resolved.hud_entity_index);
+            }
+            ++applied_weapon_writes;
+        }
+        return true;
+    }
+
+    const auto payload =
+        nskinzcs2::runtime::BuildWeaponAppearancePayload(
+            profile,
+            AccountIdFromXuid(xuid),
+            keychain_profile);
     const auto hud_requires_independent_apply =
         IsKnifeProfile(profile) &&
         nskinzcs2::runtime::WeaponAppearanceNeedsIndependentHudApply(
@@ -41159,14 +47753,11 @@ bool TryApplyStandardWeaponAppearancePipeline(
     const std::wstring binding_line =
         L"Resolved weapon appearance binding: " +
         nskinzcs2::runtime::DescribeWeaponAppearanceBinding(binding.resolved) +
-        L", carrier_item_view=" + FormatPointer(binding.carrier_item_view);
+        L", carrier_item_view=" + FormatPointer(binding.carrier_item_view) +
+        L", keychain_module_entity=" + std::to_wstring(binding.keychain_module_entity_index);
     const std::wstring payload_line =
         L"Prepared weapon appearance payload: " +
         nskinzcs2::runtime::DescribeWeaponAppearancePayload(payload);
-    if (binding.resolved.owner_xuid != 0)
-    {
-        g_hook_state.probed_xuid.store(binding.resolved.owner_xuid);
-    }
     UpdateWeaponAppearanceTelemetry(binding_line, payload_line, {}, {});
     if (ShouldTraceWatchedKnifeDiagnostic(profile))
     {
@@ -41175,6 +47766,341 @@ bool TryApplyStandardWeaponAppearancePipeline(
             L"Render consumer snapshot before exact apply: " +
                 BuildRenderedWorldWeaponConsumerDiagnostic(trace, offsets));
     }
+
+    auto try_apply_resource_backed_render_rebind =
+        [&]() noexcept
+        {
+            const auto watched_xuid = g_hook_state.watched_xuid.load();
+            const auto force_log_rebind_gate = xuid != 0 && watched_xuid == xuid;
+
+            if (!IsKnifeProfile(profile) ||
+                binding.render_entity == nullptr)
+            {
+                if (force_log_rebind_gate)
+                {
+                    std::wstringstream stream;
+                    stream << L"Resource-backed render rebind gate for XUID " << xuid
+                        << L": reason="
+                        << (!IsKnifeProfile(profile) ? L"not_knife_profile" : L"render_entity_missing")
+                        << L", render_entity=" << binding.resolved.render_entity_index
+                        << L", carrier_entity=" << binding.resolved.carrier_entity_index
+                        << L", owned_weapon_entity=" << trace.owned_weapon_entity_index
+                        << L", will_write=0";
+                    LogProfileDiagnosticOnce(desired_signature ^ 0x7411ull, stream.str());
+                }
+                return false;
+            }
+
+            struct ResourceBackedRenderRebindSnapshot
+            {
+                bool live_enabled = false;
+                std::uint64_t live_xuid = 0;
+                int live_target_definition_index = 0;
+                int live_pairs = 0;
+                int live_view_hits = 0;
+                int live_world_hits = 0;
+                bool published_valid = false;
+                std::uint64_t published_xuid = 0;
+                int published_world_entity_index = -1;
+                int published_target_definition_index = 0;
+                int published_pairs = 0;
+                std::uint64_t published_source_handle = 0;
+                std::uint64_t published_target_handle = 0;
+                std::uint64_t published_generation = 0;
+                std::string target_world_path {};
+                std::string target_view_path {};
+            };
+
+            ResourceBackedRenderRebindSnapshot rebind_snapshot {};
+            {
+                std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+                const auto& swap_state = g_hook_state.knife_model_path_swap_state;
+                const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+                rebind_snapshot.live_enabled = swap_state.enabled;
+                rebind_snapshot.live_xuid = swap_state.xuid;
+                rebind_snapshot.live_target_definition_index = swap_state.target_definition_index;
+                rebind_snapshot.live_pairs = swap_state.handle_redirect_pair_count;
+                rebind_snapshot.live_view_hits = swap_state.hit_count_view;
+                rebind_snapshot.live_world_hits = swap_state.hit_count_world;
+                rebind_snapshot.published_valid = published_bridge.valid;
+                rebind_snapshot.published_xuid = published_bridge.xuid;
+                rebind_snapshot.published_world_entity_index = published_bridge.world_entity_index;
+                rebind_snapshot.published_target_definition_index =
+                    published_bridge.target_definition_index;
+                rebind_snapshot.published_pairs = published_bridge.handle_redirect_pair_count;
+                rebind_snapshot.published_source_handle = published_bridge.preferred_source_handle;
+                rebind_snapshot.published_target_handle = published_bridge.preferred_target_handle;
+                rebind_snapshot.published_generation = published_bridge.publish_generation;
+                if (const auto* target_world_path =
+                        ResolveKnifeModelPathSwapBucketPath(
+                            swap_state,
+                            KnifeModelPathSwapHandleBucket::World,
+                            true,
+                            false);
+                    target_world_path != nullptr && target_world_path[0] != '\0')
+                {
+                    rebind_snapshot.target_world_path = target_world_path;
+                }
+                if (const auto* target_view_path =
+                        ResolveKnifeModelPathSwapBucketPath(
+                            swap_state,
+                            KnifeModelPathSwapHandleBucket::View,
+                            true,
+                            false);
+                    target_view_path != nullptr && target_view_path[0] != '\0')
+                {
+                    rebind_snapshot.target_view_path = target_view_path;
+                }
+            }
+
+            auto desired_definition_index = profile.override_item;
+            if (desired_definition_index == 0)
+            {
+                if (rebind_snapshot.published_valid &&
+                    rebind_snapshot.published_xuid == xuid &&
+                    rebind_snapshot.published_target_definition_index != 0)
+                {
+                    desired_definition_index = rebind_snapshot.published_target_definition_index;
+                }
+                else if (rebind_snapshot.live_enabled &&
+                    rebind_snapshot.live_xuid == xuid &&
+                    rebind_snapshot.live_target_definition_index != 0)
+                {
+                    desired_definition_index = rebind_snapshot.live_target_definition_index;
+                }
+            }
+            if (desired_definition_index == 0)
+            {
+                if (force_log_rebind_gate)
+                {
+                    std::wstringstream stream;
+                    stream << L"Resource-backed render rebind gate for XUID " << xuid
+                        << L": reason=desired_definition_missing"
+                        << L", render_entity=" << binding.resolved.render_entity_index
+                        << L", carrier_entity=" << binding.resolved.carrier_entity_index
+                        << L", owned_weapon_entity=" << trace.owned_weapon_entity_index
+                        << L", override_item=" << profile.override_item
+                        << L", live_enabled=" << (rebind_snapshot.live_enabled ? 1 : 0)
+                        << L", live_xuid=" << rebind_snapshot.live_xuid
+                        << L", live_target_definition=" << rebind_snapshot.live_target_definition_index
+                        << L", published_valid=" << (rebind_snapshot.published_valid ? 1 : 0)
+                        << L", published_xuid=" << rebind_snapshot.published_xuid
+                        << L", published_target_definition="
+                        << rebind_snapshot.published_target_definition_index
+                        << L", will_write=0";
+                    LogProfileDiagnosticOnce(desired_signature ^ 0x7411ull, stream.str());
+                }
+                return false;
+            }
+
+            const auto live_bridge_ready =
+                rebind_snapshot.live_enabled &&
+                rebind_snapshot.live_xuid == xuid &&
+                rebind_snapshot.live_target_definition_index == desired_definition_index &&
+                rebind_snapshot.live_pairs > 0;
+            const auto published_bridge_ready =
+                rebind_snapshot.published_valid &&
+                rebind_snapshot.published_xuid == xuid &&
+                rebind_snapshot.published_target_definition_index == desired_definition_index &&
+                rebind_snapshot.published_pairs > 0 &&
+                rebind_snapshot.published_source_handle != 0 &&
+                rebind_snapshot.published_target_handle != 0 &&
+                rebind_snapshot.published_generation != 0;
+            const auto bridge_ready = live_bridge_ready || published_bridge_ready;
+
+            const auto published_entity_matches_binding =
+                rebind_snapshot.published_world_entity_index < 0 ||
+                rebind_snapshot.published_world_entity_index == trace.owned_weapon_entity_index ||
+                rebind_snapshot.published_world_entity_index == binding.resolved.carrier_entity_index ||
+                rebind_snapshot.published_world_entity_index == binding.resolved.render_entity_index;
+
+            const char* target_model_name = nullptr;
+            const wchar_t* target_label = L"none";
+            if (!rebind_snapshot.target_view_path.empty())
+            {
+                target_model_name = rebind_snapshot.target_view_path.c_str();
+                target_label = L"standard_binding_view_consumer";
+            }
+            else if (!rebind_snapshot.target_world_path.empty())
+            {
+                target_model_name = rebind_snapshot.target_world_path.c_str();
+                target_label = L"standard_binding_world_consumer";
+            }
+
+            const auto should_attempt =
+                bridge_ready &&
+                published_entity_matches_binding &&
+                target_model_name != nullptr;
+
+            if (force_log_rebind_gate || ShouldTraceWatchedKnifeDiagnostic(profile))
+            {
+                std::wstringstream stream;
+                stream << L"Resource-backed render rebind gate for XUID " << xuid
+                    << L": reason="
+                    << (bridge_ready
+                            ? (published_entity_matches_binding
+                                    ? (target_model_name != nullptr ? L"ready" : L"target_path_missing")
+                                    : L"published_entity_mismatch")
+                            : L"bridge_not_ready")
+                    << L": render_entity=" << binding.resolved.render_entity_index
+                    << L", carrier_entity=" << binding.resolved.carrier_entity_index
+                    << L", owned_weapon_entity=" << trace.owned_weapon_entity_index
+                    << L", override_item=" << profile.override_item
+                    << L", desired_definition=" << desired_definition_index
+                    << L", live_enabled=" << (rebind_snapshot.live_enabled ? 1 : 0)
+                    << L", live_xuid=" << rebind_snapshot.live_xuid
+                    << L", live_target_definition=" << rebind_snapshot.live_target_definition_index
+                    << L", live_pairs=" << rebind_snapshot.live_pairs
+                    << L", live_hits=W" << rebind_snapshot.live_world_hits
+                    << L"/V" << rebind_snapshot.live_view_hits
+                    << L", published_valid=" << (rebind_snapshot.published_valid ? 1 : 0)
+                    << L", published_xuid=" << rebind_snapshot.published_xuid
+                    << L", published_world_entity=" << rebind_snapshot.published_world_entity_index
+                    << L", published_target_definition="
+                    << rebind_snapshot.published_target_definition_index
+                    << L", published_pairs=" << rebind_snapshot.published_pairs
+                    << L", published_handles=0x" << std::hex << std::uppercase
+                    << rebind_snapshot.published_source_handle
+                    << L"->0x" << rebind_snapshot.published_target_handle
+                    << std::dec << std::nouppercase
+                    << L", published_generation=" << rebind_snapshot.published_generation
+                    << L", live_bridge_ready=" << (live_bridge_ready ? 1 : 0)
+                    << L", published_bridge_ready=" << (published_bridge_ready ? 1 : 0)
+                    << L", published_entity_matches_binding="
+                    << (published_entity_matches_binding ? 1 : 0)
+                    << L", selected_target=" << target_label
+                    << L", target_view_path="
+                    << (rebind_snapshot.target_view_path.empty()
+                            ? L"<empty>"
+                            : NarrowToWide(rebind_snapshot.target_view_path))
+                    << L", target_world_path="
+                    << (rebind_snapshot.target_world_path.empty()
+                            ? L"<empty>"
+                            : NarrowToWide(rebind_snapshot.target_world_path))
+                    << L", will_write=" << (should_attempt ? 1 : 0);
+                if (force_log_rebind_gate)
+                {
+                    std::uint64_t gate_signature = desired_signature ^ 0x7411ull;
+                    gate_signature ^= static_cast<std::uint64_t>(
+                        static_cast<std::uint32_t>(std::max(0, binding.resolved.render_entity_index))) << 32;
+                    gate_signature ^= static_cast<std::uint64_t>(
+                        static_cast<std::uint32_t>(std::max(0, trace.owned_weapon_entity_index)));
+                    gate_signature ^= static_cast<std::uint64_t>(desired_definition_index) << 16;
+                    gate_signature ^= should_attempt ? 0x1ull : 0x2ull;
+                    gate_signature ^= live_bridge_ready ? 0x10ull : 0x20ull;
+                    gate_signature ^= published_bridge_ready ? 0x100ull : 0x200ull;
+                    gate_signature ^= published_entity_matches_binding ? 0x1000ull : 0x2000ull;
+                    gate_signature ^= rebind_snapshot.target_view_path.empty() ? 0x10000ull : 0x20000ull;
+                    gate_signature ^= rebind_snapshot.target_world_path.empty() ? 0x100000ull : 0x200000ull;
+                    LogProfileDiagnosticOnce(gate_signature, stream.str());
+                }
+                if (ShouldTraceWatchedKnifeDiagnostic(profile))
+                {
+                    TraceWatchedKnifeDiagnostic(profile, stream.str());
+                }
+            }
+
+            if (!should_attempt)
+            {
+                return false;
+            }
+
+            const auto world_render_rebound =
+                TryWriteKnifeDirectRenderModelState(
+                    entity_cache,
+                    binding.resolved.render_entity_index,
+                    binding.render_entity,
+                    offsets,
+                    std::string(target_model_name),
+                    desired_signature ^ 0x7412ull,
+                    target_label,
+                    xuid);
+
+            if (!world_render_rebound)
+            {
+                return false;
+            }
+
+            if (knife_context == nullptr ||
+                !knife_context->direct_first_person_render_valid ||
+                knife_context->direct_first_person_render_entity == nullptr)
+            {
+                return true;
+            }
+
+            const auto direct_first_person_render_entity_index =
+                knife_context->direct_first_person_render_entity_index;
+            if (direct_first_person_render_entity_index == binding.resolved.render_entity_index &&
+                knife_context->direct_first_person_render_entity == binding.render_entity)
+            {
+                return true;
+            }
+
+            if (IsSyntheticRuntimeEntityIndex(direct_first_person_render_entity_index))
+            {
+                const auto query_backed_first_person_resource_redirect_active =
+                    knife_context != nullptr &&
+                    knife_context->resource_model_swap_ready &&
+                    knife_context->resource_query_target_handle_ready &&
+                    knife_context->resource_query_redirect_hits > 0;
+                bool restored_original_state = false;
+                if (query_backed_first_person_resource_redirect_active)
+                {
+                    const auto& model_path_state = g_hook_state.knife_model_path_state;
+                    if (model_path_state.active &&
+                        model_path_state.xuid == xuid &&
+                        model_path_state.first_person_render_entity_index ==
+                            direct_first_person_render_entity_index &&
+                        model_path_state.original_first_person_model_handle_valid &&
+                        model_path_state.original_first_person_model_name_token_valid)
+                    {
+                        restored_original_state =
+                            TryRestoreKnifeSyntheticRenderProxyModelState(
+                                direct_first_person_render_entity_index,
+                                knife_context->direct_first_person_render_entity,
+                                offsets,
+                                model_path_state.original_first_person_model_handle_valid,
+                                model_path_state.original_first_person_model_handle,
+                                model_path_state.original_first_person_model_name_token_valid,
+                                model_path_state.original_first_person_model_name_token,
+                                model_path_state.original_first_person_mesh_group_mask_valid,
+                                model_path_state.original_first_person_mesh_group_mask,
+                                desired_signature ^ 0x7413ull,
+                                xuid,
+                                L"standard_binding_query_backed_first_person_restore");
+                    }
+
+                    if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+                    {
+                        std::wstringstream stream;
+                        stream << L"Knife direct first-person synthetic write skipped for XUID " << xuid
+                            << L": entity=" << direct_first_person_render_entity_index
+                            << L", target=standard_binding_direct_first_person_synthetic"
+                            << L", resource_hits=" << knife_context->resource_query_redirect_hits
+                            << L", restored_original_state=" << (restored_original_state ? 1 : 0)
+                            << L", reason="
+                            << (query_backed_first_person_resource_redirect_active
+                                    ? L"query_backed_view_resource_redirect_active"
+                                    : L"synthetic_first_person_resource_only_path_disabled");
+                        nskinzcs2::Logger::Info(stream.str());
+                    }
+                    return true;
+                }
+                return true;
+            }
+
+            if (IsResolvedRuntimeEntityIndex(direct_first_person_render_entity_index))
+            {
+                std::wstringstream stream;
+                stream << L"Knife direct first-person resolved entity write skipped for XUID " << xuid
+                    << L": entity=" << direct_first_person_render_entity_index
+                    << L", target=standard_binding_direct_first_person"
+                    << L", reason=non_synthetic_first_person_resource_rebind_disabled";
+                LogProfileDiagnosticOnce(desired_signature ^ 0x7414ull, stream.str());
+            }
+
+            return true;
+        };
 
     const auto already_applied =
         HasAppliedSignature(g_hook_state.applied_weapon_signatures, binding.resolved.carrier_entity_index, desired_signature);
@@ -41185,6 +48111,7 @@ bool TryApplyStandardWeaponAppearancePipeline(
             binding,
             offsets,
             profile,
+            keychain_profile,
             xuid,
             current_definition_index,
             desired_signature,
@@ -41203,7 +48130,10 @@ bool TryApplyStandardWeaponAppearancePipeline(
                  binding.carrier_item_view,
                  profile,
                  desired_signature,
-                 nskinzcs2::runtime::WeaponSkinRefreshTarget::PrimaryItemView});
+                 nskinzcs2::runtime::WeaponSkinRefreshTarget::PrimaryItemView,
+                 false,
+                 keychain_profile != nullptr ? std::optional<nskinzcs2::model::KeychainProfile> {*keychain_profile}
+                                             : std::nullopt});
         }
 
         if (hud_requires_independent_apply)
@@ -41225,7 +48155,8 @@ bool TryApplyStandardWeaponAppearancePipeline(
                     trace.hud_weapon_item_view,
                     applied_entity_indices,
                     applied_weapon_writes,
-                    &requests);
+                    &requests,
+                    keychain_profile);
             const auto hud_refresh_queued = requests.size() > request_count_before;
             if (hud_refresh_queued)
             {
@@ -41247,6 +48178,7 @@ bool TryApplyStandardWeaponAppearancePipeline(
         {
             TryProcessPendingWeaponRefreshRequests(offsets, requests);
         }
+        try_apply_resource_backed_render_rebind();
         applied_entity_indices.insert(trace.owned_weapon_entity_index);
         applied_entity_indices.insert(binding.resolved.carrier_entity_index);
         applied_entity_indices.insert(binding.resolved.render_entity_index);
@@ -41276,6 +48208,7 @@ bool TryApplyStandardWeaponAppearancePipeline(
             binding.carrier_item_view,
             binding.render_entity,
             binding.hud_entity,
+            binding.keychain_module_entity,
             offsets,
             profile,
             snapshot))
@@ -41286,6 +48219,13 @@ bool TryApplyStandardWeaponAppearancePipeline(
             payload_line,
             L"Weapon appearance stage failed: Validate",
             {});
+        std::wstringstream stream;
+        stream << L"Weapon appearance snapshot capture failed: carrier_entity="
+            << binding.resolved.carrier_entity_index
+            << L", render_entity=" << binding.resolved.render_entity_index
+            << L", hud_entity=" << binding.resolved.hud_entity_index
+            << L", carrier_item_view=" << FormatPointer(binding.carrier_item_view);
+        LogProfileDiagnosticOnce(desired_signature ^ 0x7406ull, stream.str());
         return false;
     }
 
@@ -41299,7 +48239,9 @@ bool TryApplyStandardWeaponAppearancePipeline(
         current_definition_index,
         true,
         allow_knife_definition_override,
-        true);
+        true,
+        keychain_profile,
+        binding.keychain_module_entity);
     applied = TryApplyWeaponMeshGroupMask(
                   binding.resolved.render_entity_index,
                   binding.render_entity,
@@ -41328,13 +48270,25 @@ bool TryApplyStandardWeaponAppearancePipeline(
              binding.carrier_item_view,
              profile,
              desired_signature,
-             nskinzcs2::runtime::WeaponSkinRefreshTarget::PrimaryItemView});
+             nskinzcs2::runtime::WeaponSkinRefreshTarget::PrimaryItemView,
+             false,
+             keychain_profile != nullptr ? std::optional<nskinzcs2::model::KeychainProfile> {*keychain_profile}
+                                         : std::nullopt});
         applied = TryProcessPendingWeaponRefreshRequests(offsets, requests) && applied;
     }
 
     if (!applied)
     {
         result.issue = L"weapon appearance apply stage failed before verification.";
+        std::wstringstream stream;
+        stream << L"Weapon appearance apply failed before verification: carrier_entity="
+            << binding.resolved.carrier_entity_index
+            << L", render_entity=" << binding.resolved.render_entity_index
+            << L", hud_entity=" << binding.resolved.hud_entity_index
+            << L", carrier_item_view=" << FormatPointer(binding.carrier_item_view)
+            << L", render_entity_ptr=" << FormatPointer(binding.render_entity)
+            << L", hud_entity_ptr=" << FormatPointer(binding.hud_entity);
+        LogProfileDiagnosticOnce(desired_signature ^ 0x7407ull, stream.str());
     }
 
     result.stage = WeaponAppearanceStage::Verify;
@@ -41343,6 +48297,7 @@ bool TryApplyStandardWeaponAppearancePipeline(
             binding,
             offsets,
             profile,
+            keychain_profile,
             xuid,
             current_definition_index,
             desired_signature,
@@ -41381,6 +48336,7 @@ bool TryApplyStandardWeaponAppearancePipeline(
                         hud_binding.carrier_item_view,
                         hud_binding.render_entity,
                         nullptr,
+                        nullptr,
                         offsets,
                         profile,
                         hud_snapshot);
@@ -41403,7 +48359,8 @@ bool TryApplyStandardWeaponAppearancePipeline(
                     trace.hud_weapon_item_view,
                     applied_entity_indices,
                     applied_weapon_writes,
-                    &hud_requests);
+                    &hud_requests,
+                    keychain_profile);
             const auto hud_refresh_queued = !hud_requests.empty();
             if (hud_refresh_queued)
             {
@@ -41455,6 +48412,7 @@ bool TryApplyStandardWeaponAppearancePipeline(
                 L"Render consumer snapshot after exact apply: " +
                     BuildRenderedWorldWeaponConsumerDiagnostic(trace, offsets));
         }
+        try_apply_resource_backed_render_rebind();
         UpdateWeaponAppearanceTelemetry(
             binding_line,
             payload_line,
@@ -41479,6 +48437,10 @@ bool TryApplyStandardWeaponAppearancePipeline(
         << L", rolled_back=" << (rolled_back ? 1 : 0)
         << L", failed_stage=" << nskinzcs2::runtime::WeaponAppearanceStageText(WeaponAppearanceStage::Verify)
         << L", issue=" << result.issue;
+    if (!verify_line.empty())
+    {
+        rollback_stream << L", verify_line={" << verify_line << L"}";
+    }
     UpdateWeaponAppearanceTelemetry(
         binding_line,
         payload_line,
@@ -41570,19 +48532,6 @@ bool TryResolveTargetXuidForWeaponEntity(
 {
     xuid = 0;
 
-    if (TryResolveTargetXuidForLooseGloveEntity(
-            econ_entity,
-            item_view,
-            offsets,
-            target_xuids_by_account,
-            xuid) &&
-        LooksLikeSteamXuid(xuid))
-    {
-        return true;
-    }
-
-    xuid = 0;
-
     std::uint32_t owner_handle = kInvalidEntityHandle;
     if (offsets.base_owner_entity != 0 &&
         econ_entity != nullptr &&
@@ -41597,7 +48546,1001 @@ bool TryResolveTargetXuidForWeaponEntity(
         }
     }
 
+    xuid = 0;
+    if (TryResolveTargetXuidForLooseGloveEntity(
+            econ_entity,
+            item_view,
+            offsets,
+            target_xuids_by_account,
+            xuid) &&
+        LooksLikeSteamXuid(xuid))
+    {
+        return true;
+    }
+
+    xuid = 0;
     return false;
+}
+
+void RunDemoKeychainController(
+    void* entity_list,
+    const int highest_live_entity_index,
+    const std::vector<void*>& entity_cache,
+    const nskinzcs2::model::ConfigDocument& config,
+    const std::unordered_map<int, std::uint64_t>& pawn_xuids,
+    const std::unordered_map<std::uint32_t, std::uint64_t>& target_xuids_by_account,
+    const std::unordered_set<int>& knife_definition_indices,
+    const std::unordered_set<int>& glove_definition_indices,
+    const ObserverTargetResolution& observer_resolution,
+    const ObserverRealViewmodelResolution& observer_real_viewmodel_resolution,
+    const HeuristicXuidBridgeResolution& bridge_resolution,
+    const ObserverRealViewmodelResolution& bridge_real_viewmodel_resolution,
+    const std::uint64_t authoritative_owner_xuid,
+    const std::uint64_t watched_xuid,
+    const std::uint64_t now)
+{
+    const auto previous_controller_state = SnapshotDemoKeychainControllerState();
+    auto controller_state = previous_controller_state;
+    controller_state.weapon_entity_index = -1;
+    controller_state.weapon_handle = kInvalidEntityHandle;
+    controller_state.base_item = 0;
+    controller_state.owner_xuid = 0;
+    controller_state.keychain_module_entity_index = -1;
+    controller_state.live_keychain_kit = 0;
+    controller_state.live_module_runtime_created = false;
+    controller_state.matched_profile_name.clear();
+
+    const auto release_previous_runtime_module_if_stale =
+        [&](const std::uint32_t current_weapon_handle, const wchar_t* reason)
+        {
+            if (!previous_controller_state.live_module_runtime_created ||
+                previous_controller_state.keychain_module_entity_index < 0)
+            {
+                return;
+            }
+
+            if (current_weapon_handle != kInvalidEntityHandle &&
+                previous_controller_state.weapon_handle == current_weapon_handle)
+            {
+                return;
+            }
+
+            ReleaseSingleRuntimeCreatedKeychainModuleEntity(
+                entity_list,
+                previous_controller_state.keychain_module_entity_index,
+                g_hook_state.schema_offsets,
+                reason);
+        };
+
+    if (!g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        highest_live_entity_index < 0)
+    {
+        release_previous_runtime_module_if_stale(kInvalidEntityHandle, L"demo controller idle");
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::Idle;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    const auto resolve_candidate_owner_xuid =
+        [&](void* candidate_weapon_entity, void* candidate_item_view, const std::uint64_t fallback_xuid)
+        {
+            if (LooksLikeSteamXuid(authoritative_owner_xuid))
+            {
+                return authoritative_owner_xuid;
+            }
+
+            std::uint64_t resolved_xuid = 0;
+            if (TryResolveTargetXuidForLooseGloveEntity(
+                    candidate_weapon_entity,
+                    candidate_item_view,
+                    g_hook_state.schema_offsets,
+                    target_xuids_by_account,
+                    resolved_xuid) &&
+                LooksLikeSteamXuid(resolved_xuid))
+            {
+                return resolved_xuid;
+            }
+
+            if (candidate_weapon_entity != nullptr &&
+                candidate_item_view != nullptr &&
+                TryResolveTargetXuidForWeaponEntity(
+                    candidate_weapon_entity,
+                    candidate_item_view,
+                    g_hook_state.schema_offsets,
+                    pawn_xuids,
+                    target_xuids_by_account,
+                    resolved_xuid) &&
+                resolved_xuid != 0)
+            {
+                return resolved_xuid;
+            }
+
+            return fallback_xuid;
+        };
+
+    const auto is_valid_cached_entity_index =
+        [&](const int entity_index)
+        {
+            return entity_index >= 0 &&
+                entity_index <= highest_live_entity_index &&
+                entity_index < static_cast<int>(entity_cache.size()) &&
+                entity_cache[static_cast<std::size_t>(entity_index)] != nullptr;
+        };
+
+    const RuntimePlayerBinding* player_binding = nullptr;
+    int weapon_entity_index = -1;
+    void* weapon_entity = nullptr;
+    void* weapon_item_view = nullptr;
+    int current_definition_index = 0;
+    std::uint64_t owner_xuid = 0;
+
+    const auto adopt_weapon_candidate =
+        [&](const int candidate_weapon_entity_index,
+            void* candidate_weapon_entity,
+            const std::uint64_t fallback_xuid)
+        {
+            if (candidate_weapon_entity == nullptr)
+            {
+                return false;
+            }
+
+            auto* candidate_item_view =
+                ResolveWeaponItemView(candidate_weapon_entity, g_hook_state.schema_offsets);
+            int candidate_definition_index = 0;
+            if (candidate_item_view == nullptr ||
+                !TryReadItemDefinitionIndex(
+                    candidate_item_view,
+                    g_hook_state.schema_offsets,
+                    candidate_definition_index))
+            {
+                return false;
+            }
+
+            const auto candidate_owner_xuid =
+                resolve_candidate_owner_xuid(
+                    candidate_weapon_entity,
+                    candidate_item_view,
+                    fallback_xuid);
+            if (candidate_owner_xuid == 0)
+            {
+                return false;
+            }
+
+            owner_xuid = candidate_owner_xuid;
+            controller_state.owner_xuid = candidate_owner_xuid;
+            if (const auto player_it =
+                    g_hook_state.runtime_entities.players_by_xuid.find(candidate_owner_xuid);
+                player_it != g_hook_state.runtime_entities.players_by_xuid.end())
+            {
+                player_binding = &player_it->second;
+            }
+
+            if (player_binding != nullptr &&
+                is_valid_cached_entity_index(player_binding->active_weapon_entity_index))
+            {
+                weapon_entity_index = player_binding->active_weapon_entity_index;
+                weapon_entity = entity_cache[static_cast<std::size_t>(weapon_entity_index)];
+                weapon_item_view = ResolveWeaponItemView(weapon_entity, g_hook_state.schema_offsets);
+                if (weapon_item_view != nullptr &&
+                    TryReadItemDefinitionIndex(
+                        weapon_item_view,
+                        g_hook_state.schema_offsets,
+                        current_definition_index))
+                {
+                    return true;
+                }
+
+                weapon_entity = nullptr;
+                weapon_item_view = nullptr;
+                weapon_entity_index = -1;
+            }
+
+            weapon_entity_index = candidate_weapon_entity_index;
+            if (weapon_entity_index < 0)
+            {
+                weapon_entity_index = ResolveEntityIndexFromPointer(entity_cache, candidate_weapon_entity);
+            }
+            weapon_entity = candidate_weapon_entity;
+            weapon_item_view = candidate_item_view;
+            current_definition_index = candidate_definition_index;
+            return true;
+        };
+
+    bool resolved_demo_weapon = false;
+    if (!resolved_demo_weapon &&
+        observer_real_viewmodel_resolution.viewmodel_weapon_entity != nullptr)
+    {
+        resolved_demo_weapon =
+            adopt_weapon_candidate(
+                observer_real_viewmodel_resolution.viewmodel_weapon_entity_index,
+                observer_real_viewmodel_resolution.viewmodel_weapon_entity,
+                observer_resolution.target_xuid);
+    }
+    if (!resolved_demo_weapon &&
+        observer_resolution.active_weapon_entity != nullptr)
+    {
+        resolved_demo_weapon =
+            adopt_weapon_candidate(
+                observer_resolution.active_weapon_entity_index,
+                observer_resolution.active_weapon_entity,
+                observer_resolution.target_xuid);
+    }
+    if (!resolved_demo_weapon &&
+        bridge_real_viewmodel_resolution.viewmodel_weapon_entity != nullptr)
+    {
+        resolved_demo_weapon =
+            adopt_weapon_candidate(
+                bridge_real_viewmodel_resolution.viewmodel_weapon_entity_index,
+                bridge_real_viewmodel_resolution.viewmodel_weapon_entity,
+                bridge_resolution.xuid);
+    }
+    if (!resolved_demo_weapon &&
+        bridge_resolution.active_weapon_entity != nullptr)
+    {
+        resolved_demo_weapon =
+            adopt_weapon_candidate(
+                bridge_resolution.active_weapon_entity_index,
+                bridge_resolution.active_weapon_entity,
+                bridge_resolution.xuid);
+    }
+    if (!resolved_demo_weapon &&
+        watched_xuid != 0)
+    {
+        if (const auto watched_player =
+                g_hook_state.runtime_entities.players_by_xuid.find(watched_xuid);
+            watched_player != g_hook_state.runtime_entities.players_by_xuid.end() &&
+            is_valid_cached_entity_index(watched_player->second.active_weapon_entity_index))
+        {
+            resolved_demo_weapon =
+                adopt_weapon_candidate(
+                    watched_player->second.active_weapon_entity_index,
+                    entity_cache[static_cast<std::size_t>(watched_player->second.active_weapon_entity_index)],
+                    watched_xuid);
+        }
+    }
+
+    if (!resolved_demo_weapon || owner_xuid == 0 || weapon_entity == nullptr || weapon_item_view == nullptr)
+    {
+        release_previous_runtime_module_if_stale(kInvalidEntityHandle, L"demo target weapon unresolved");
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::Idle;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    auto normalized_base_item =
+        NormalizeBaseItem(
+            current_definition_index,
+            knife_definition_indices,
+            glove_definition_indices);
+    controller_state.weapon_entity_index = weapon_entity_index;
+    controller_state.base_item = normalized_base_item;
+
+    const auto retarget_to_matching_owned_weapon =
+        [&]() -> bool
+        {
+            if (player_binding == nullptr || owner_xuid == 0)
+            {
+                return false;
+            }
+
+            if (nskinzcs2::ConfigStore::FindMatchingKeychainProfile(
+                    config,
+                    owner_xuid,
+                    normalized_base_item) != nullptr)
+            {
+                return false;
+            }
+
+            const auto original_weapon_entity_index = weapon_entity_index;
+            const auto original_base_item = normalized_base_item;
+            for (const auto& configured_profile : config.keychain_profiles)
+            {
+                if (!configured_profile.enabled ||
+                    configured_profile.xuid != owner_xuid ||
+                    configured_profile.base_item <= 0 ||
+                    configured_profile.base_item == 42 ||
+                    configured_profile.base_item == 5028)
+                {
+                    continue;
+                }
+
+                for (const auto owned_entity_index : player_binding->owned_weapon_entity_indices)
+                {
+                    if (!is_valid_cached_entity_index(owned_entity_index))
+                    {
+                        continue;
+                    }
+
+                    auto* owned_entity = entity_cache[static_cast<std::size_t>(owned_entity_index)];
+                    if (owned_entity == nullptr)
+                    {
+                        continue;
+                    }
+
+                    auto* owned_item_view =
+                        ResolveWeaponItemView(owned_entity, g_hook_state.schema_offsets);
+                    int owned_definition_index = 0;
+                    if (owned_item_view == nullptr ||
+                        !TryReadItemDefinitionIndex(
+                            owned_item_view,
+                            g_hook_state.schema_offsets,
+                            owned_definition_index))
+                    {
+                        continue;
+                    }
+
+                    const auto owned_base_item =
+                        NormalizeBaseItem(
+                            owned_definition_index,
+                            knife_definition_indices,
+                            glove_definition_indices);
+                    if (owned_base_item != configured_profile.base_item)
+                    {
+                        continue;
+                    }
+
+                    weapon_entity_index = owned_entity_index;
+                    weapon_entity = owned_entity;
+                    weapon_item_view = owned_item_view;
+                    current_definition_index = owned_definition_index;
+                    normalized_base_item =
+                        NormalizeBaseItem(
+                            current_definition_index,
+                            knife_definition_indices,
+                            glove_definition_indices);
+                    controller_state.weapon_entity_index = weapon_entity_index;
+                    controller_state.base_item = normalized_base_item;
+
+                    std::wstringstream stream;
+                    stream << L"Demo keychain controller retargeted from weapon entity "
+                        << original_weapon_entity_index
+                        << L" (base_item=" << original_base_item
+                        << L") to owned weapon entity " << weapon_entity_index
+                        << L" (base_item=" << normalized_base_item
+                        << L") for configured keychain base_item "
+                        << configured_profile.base_item
+                        << L", xuid=" << owner_xuid;
+                    LogProfileDiagnosticOnce(
+                        BuildDemoKeychainProfileSignature(
+                            &configured_profile,
+                            owner_xuid,
+                            configured_profile.base_item) ^
+                            0x4B435254ull,
+                        stream.str());
+                    return true;
+                }
+            }
+
+            return false;
+        };
+
+    if ((normalized_base_item == 42 || normalized_base_item == 5028) &&
+        retarget_to_matching_owned_weapon())
+    {
+        normalized_base_item =
+            NormalizeBaseItem(
+                current_definition_index,
+                knife_definition_indices,
+                glove_definition_indices);
+        controller_state.weapon_entity_index = weapon_entity_index;
+        controller_state.base_item = normalized_base_item;
+    }
+
+    const auto current_weapon_signature =
+        BuildDemoKeychainWeaponSignature(owner_xuid, normalized_base_item, weapon_entity_index);
+    const auto current_frame_callback_count =
+        g_hook_state.frame_callback_count.load(std::memory_order_acquire);
+    const auto demo_paused = g_hook_state.demo_paused.load(std::memory_order_acquire);
+    if (controller_state.stable_weapon_signature != current_weapon_signature)
+    {
+        controller_state.stable_weapon_signature = current_weapon_signature;
+        controller_state.stable_frame_count = 0;
+        controller_state.last_frame_callback_count = current_frame_callback_count;
+    }
+    else
+    {
+        const auto frame_delta =
+            current_frame_callback_count >= controller_state.last_frame_callback_count
+                ? current_frame_callback_count - controller_state.last_frame_callback_count
+                : 0ull;
+        const auto stability_progress =
+            demo_paused
+                ? 0ull
+                : (frame_delta != 0ull ? frame_delta : 1ull);
+        controller_state.stable_frame_count += stability_progress;
+        controller_state.last_frame_callback_count = current_frame_callback_count;
+    }
+
+    if (normalized_base_item == 42 || normalized_base_item == 5028)
+    {
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::Idle;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    std::uint32_t owned_weapon_handle = kInvalidEntityHandle;
+    if (player_binding != nullptr)
+    {
+        if (player_binding->active_weapon_entity_index == weapon_entity_index)
+        {
+            owned_weapon_handle = player_binding->active_weapon_handle;
+        }
+
+        if (owned_weapon_handle == kInvalidEntityHandle)
+        {
+            if (const auto handle_it =
+                    player_binding->owned_weapon_handles_by_entity_index.find(weapon_entity_index);
+                handle_it != player_binding->owned_weapon_handles_by_entity_index.end())
+            {
+                owned_weapon_handle = handle_it->second;
+            }
+        }
+    }
+
+    if (owned_weapon_handle == kInvalidEntityHandle &&
+        g_hook_state.schema_offsets.base_owner_entity != 0)
+    {
+        SafeReadField(weapon_entity, g_hook_state.schema_offsets.base_owner_entity, owned_weapon_handle);
+    }
+
+    controller_state.weapon_handle = owned_weapon_handle;
+    release_previous_runtime_module_if_stale(
+        owned_weapon_handle,
+        L"demo weapon handle changed");
+
+    if (!IsPlausibleEntityHandle(owned_weapon_handle))
+    {
+        controller_state.last_issue =
+            L"Current demo weapon handle is invalid; waiting for a stable weapon binding.";
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::WaitingStableFrames;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    if (demo_paused)
+    {
+        controller_state.last_issue =
+            L"Demo playback is paused; waiting for playback to resume before mutating the current weapon keychain.";
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::WaitingStableFrames;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    std::wstring model_ready_issue;
+    if (!IsDemoWeaponModelReadyForKeychainMutation(
+            weapon_entity,
+            g_hook_state.schema_offsets,
+            model_ready_issue))
+    {
+        controller_state.last_issue = std::move(model_ready_issue);
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::WaitingStableFrames;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    RenderedWorldWeaponTrace trace {};
+    if (owned_weapon_handle != kInvalidEntityHandle && player_binding != nullptr)
+    {
+        TryBuildRenderedWorldWeaponTrace(
+            entity_list,
+            entity_cache,
+            *player_binding,
+            owner_xuid,
+            owned_weapon_handle,
+            weapon_entity_index,
+            weapon_entity,
+            g_hook_state.schema_offsets,
+            trace);
+    }
+
+    void* keychain_module_entity = nullptr;
+    int keychain_module_entity_index = -1;
+    if (trace.owned_weapon_entity != nullptr)
+    {
+        TryResolveWeaponKeychainModuleEntity(
+            entity_cache,
+            trace,
+            g_hook_state.schema_offsets,
+            keychain_module_entity,
+            keychain_module_entity_index);
+    }
+
+    controller_state.keychain_module_entity_index = keychain_module_entity_index;
+    controller_state.live_module_runtime_created =
+        IsRuntimeCreatedKeychainModuleEntityIndexTracked(keychain_module_entity_index);
+    if (keychain_module_entity == nullptr &&
+        previous_controller_state.live_module_runtime_created &&
+        previous_controller_state.weapon_handle == owned_weapon_handle &&
+        previous_controller_state.keychain_module_entity_index >= 0)
+    {
+        ReleaseSingleRuntimeCreatedKeychainModuleEntity(
+            entity_list,
+            previous_controller_state.keychain_module_entity_index,
+            g_hook_state.schema_offsets,
+            L"tracked demo keychain module could not be re-resolved");
+        controller_state.live_module_runtime_created = false;
+    }
+
+    std::uint32_t live_keychain_def_id = 0;
+    std::uint32_t live_keychain_seed = 0;
+    TryReadLiveKeychainModuleState(
+        keychain_module_entity,
+        g_hook_state.schema_offsets,
+        live_keychain_def_id,
+        live_keychain_seed);
+    controller_state.live_keychain_kit = live_keychain_def_id;
+
+    const auto* keychain_profile =
+        owner_xuid != 0
+            ? nskinzcs2::ConfigStore::FindMatchingKeychainProfile(
+                  config,
+                  owner_xuid,
+                  normalized_base_item)
+            : nullptr;
+    controller_state.desired_profile_signature =
+        BuildDemoKeychainProfileSignature(keychain_profile, owner_xuid, normalized_base_item);
+    if (keychain_profile != nullptr)
+    {
+        controller_state.matched_profile_name = keychain_profile->name;
+    }
+
+    const auto desired_keychain_kit =
+        keychain_profile != nullptr ? std::max(0, keychain_profile->keychain_kit) : 0;
+    const auto seek_safety_window_active =
+        g_hook_state.pending_runtime_reset_after_seek.load(std::memory_order_acquire) ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive();
+    constexpr std::uint64_t kDemoKeychainSeekCooldownMs = 5000;
+    constexpr std::uint64_t kDemoKeychainRetryBackoffMs = 1500;
+    constexpr std::uint64_t kDemoKeychainMissingModuleBackoffMs = 2000;
+    const auto global_cooldown_until =
+        g_hook_state.keychain_module_create_cooldown_until_millis.load(std::memory_order_acquire);
+    auto create_not_before =
+        std::max(global_cooldown_until, controller_state.create_retry_not_before_ms);
+
+    const auto apply_live_module =
+        [&]()
+        {
+            return ApplyWeaponKeychainModuleFields(
+                keychain_module_entity,
+                g_hook_state.schema_offsets,
+                keychain_profile);
+        };
+
+    if (seek_safety_window_active)
+    {
+        controller_state.create_retry_not_before_ms =
+            std::max(controller_state.create_retry_not_before_ms, now + kDemoKeychainSeekCooldownMs);
+        controller_state.last_issue =
+            L"Recent demo seek/update detected; waiting for a cooldown window before modifying the live keychain module.";
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::WaitingCooldown;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    if (keychain_profile == nullptr || desired_keychain_kit <= 0)
+    {
+        controller_state.last_issue.clear();
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::Idle;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    create_not_before = std::max(global_cooldown_until, controller_state.create_retry_not_before_ms);
+    if (now < create_not_before)
+    {
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::WaitingCooldown;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    if (keychain_module_entity != nullptr)
+    {
+        std::wstring keychain_module_ready_issue;
+        if (!IsDemoKeychainModuleReadyForMutation(
+                keychain_module_entity,
+                g_hook_state.schema_offsets,
+                keychain_module_ready_issue))
+        {
+            controller_state.last_issue = std::move(keychain_module_ready_issue);
+            controller_state.state = nskinzcs2::runtime::DemoKeychainState::WaitingStableFrames;
+            StoreDemoKeychainControllerState(std::move(controller_state));
+            return;
+        }
+
+        const auto live_module_matches =
+            live_keychain_def_id == static_cast<std::uint32_t>(desired_keychain_kit) &&
+            live_keychain_seed == 0u;
+        const auto module_applied = live_module_matches || apply_live_module();
+        const auto visual_refresh_attempted = !live_module_matches && module_applied;
+        const auto visual_refresh_succeeded =
+            !visual_refresh_attempted ||
+            TryRefreshKeychainModuleVisualState(
+                entity_cache,
+                controller_state.keychain_module_entity_index,
+                keychain_module_entity,
+                g_hook_state.schema_offsets,
+                controller_state.desired_profile_signature,
+                L"demo_controller_existing_module_update");
+        TryReadLiveKeychainModuleState(
+            keychain_module_entity,
+            g_hook_state.schema_offsets,
+            live_keychain_def_id,
+            live_keychain_seed);
+        controller_state.live_keychain_kit = live_keychain_def_id;
+        const auto live_module_matches_after_apply =
+            live_keychain_def_id == static_cast<std::uint32_t>(desired_keychain_kit) &&
+            live_keychain_seed == 0u;
+        controller_state.last_issue = [&]() -> std::wstring
+        {
+            if (module_applied && live_module_matches_after_apply && visual_refresh_succeeded)
+            {
+                return {};
+            }
+
+            std::wstringstream stream;
+            if (module_applied && live_module_matches_after_apply)
+            {
+                stream << L"Live demo keychain fields updated, but the visual refresh did not verify."
+                    << L" module_def_id=" << live_keychain_def_id
+                    << L", desired_def_id=" << desired_keychain_kit;
+                return stream.str();
+            }
+
+            stream << L"Live demo keychain state mismatch after apply: module_def_id="
+                << live_keychain_def_id
+                << L", desired_def_id=" << desired_keychain_kit
+                << L", module_apply=" << (module_applied ? 1 : 0);
+            return stream.str();
+        }();
+        controller_state.state =
+            module_applied && live_module_matches_after_apply && visual_refresh_succeeded
+                ? nskinzcs2::runtime::DemoKeychainState::Applied
+                : nskinzcs2::runtime::DemoKeychainState::Failed;
+        controller_state.create_retry_not_before_ms =
+            controller_state.state == nskinzcs2::runtime::DemoKeychainState::Applied
+                ? 0
+                : (now + kDemoKeychainRetryBackoffMs);
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    if (controller_state.stable_frame_count < 32)
+    {
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::WaitingStableFrames;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
+    controller_state.last_issue =
+        L"No live keychain module was found on the current demo weapon. Existing-module-only mode can modify only weapons that already have a visible keychain.";
+    {
+        std::wstringstream stream;
+        stream << L"Existing-module-only demo keychain update could not find a live keychain module: "
+            << L"xuid=" << owner_xuid
+            << L", weapon_entity=" << weapon_entity_index
+            << L", base_item=" << normalized_base_item
+            << L", desired_keychain_kit=" << desired_keychain_kit
+            << L", trace={" << DescribeRenderedWorldWeaponTrace(trace) << L"}";
+        WarnOnceForRuntimeSignature(
+            controller_state.desired_profile_signature ^ 0x4B435A41ull,
+            stream.str());
+    }
+    controller_state.create_retry_not_before_ms = now + kDemoKeychainMissingModuleBackoffMs;
+    controller_state.state = nskinzcs2::runtime::DemoKeychainState::Failed;
+    StoreDemoKeychainControllerState(std::move(controller_state));
+}
+
+void ApplyManualDemoKeychainModuleUpdates(
+    void* entity_list,
+    const std::vector<void*>& entity_cache,
+    const nskinzcs2::model::ConfigDocument& config,
+    const std::unordered_set<int>& known_definition_indices,
+    const std::unordered_set<int>& knife_definition_indices,
+    const std::unordered_set<int>& glove_definition_indices,
+    const RuntimeEntityManager& runtime_entities)
+{
+    if (!g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        config.keychain_profiles.empty())
+    {
+        return;
+    }
+
+    const auto seek_safety_window_active =
+        g_hook_state.pending_runtime_reset_after_seek.load(std::memory_order_acquire) ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive();
+    if (seek_safety_window_active)
+    {
+        return;
+    }
+
+    for (const auto& keychain_profile : config.keychain_profiles)
+    {
+        if (!keychain_profile.enabled ||
+            keychain_profile.xuid == 0 ||
+            keychain_profile.base_item <= 0 ||
+            keychain_profile.base_item == 42 ||
+            keychain_profile.base_item == 5028)
+        {
+            continue;
+        }
+
+        const auto desired_keychain_kit = std::max(0, keychain_profile.keychain_kit);
+        if (desired_keychain_kit <= 0)
+        {
+            continue;
+        }
+
+        const auto profile_signature =
+            BuildDemoKeychainProfileSignature(
+                &keychain_profile,
+                keychain_profile.xuid,
+                keychain_profile.base_item);
+
+        const auto player_it = runtime_entities.players_by_xuid.find(keychain_profile.xuid);
+        if (player_it == runtime_entities.players_by_xuid.end())
+        {
+            std::wstringstream stream;
+            stream << L"Manual demo keychain update skipped: configured XUID "
+                << keychain_profile.xuid
+                << L" is not bound to a live pawn in the current demo snapshot.";
+            WarnOnceForRuntimeSignature(profile_signature ^ 0x4B43584Dull, stream.str());
+            continue;
+        }
+
+        const auto& player_binding = player_it->second;
+        bool matched_weapon = false;
+        bool found_existing_module = false;
+        bool applied_existing_module = false;
+        bool visual_refresh_failed = false;
+
+        for (const auto weapon_entity_index : player_binding.owned_weapon_entity_indices)
+        {
+            if (weapon_entity_index < 0 ||
+                static_cast<std::size_t>(weapon_entity_index) >= entity_cache.size())
+            {
+                continue;
+            }
+
+            auto* weapon_entity = entity_cache[static_cast<std::size_t>(weapon_entity_index)];
+            if (weapon_entity == nullptr)
+            {
+                continue;
+            }
+
+            auto* weapon_item_view = ResolveWeaponItemView(weapon_entity, g_hook_state.schema_offsets);
+            int current_definition_index = 0;
+            if (weapon_item_view == nullptr ||
+                !TryReadItemDefinitionIndex(
+                    weapon_item_view,
+                    g_hook_state.schema_offsets,
+                    current_definition_index) ||
+                !IsKnownDefinitionIndex(current_definition_index, known_definition_indices))
+            {
+                continue;
+            }
+
+            const auto normalized_base_item =
+                NormalizeBaseItem(
+                    current_definition_index,
+                    knife_definition_indices,
+                    glove_definition_indices);
+            if (normalized_base_item != keychain_profile.base_item)
+            {
+                continue;
+            }
+
+            matched_weapon = true;
+
+            const auto owned_handle_it =
+                player_binding.owned_weapon_handles_by_entity_index.find(weapon_entity_index);
+            if (owned_handle_it == player_binding.owned_weapon_handles_by_entity_index.end() ||
+                owned_handle_it->second == kInvalidEntityHandle)
+            {
+                std::wstringstream stream;
+                stream << L"Manual demo keychain update skipped weapon entity "
+                    << weapon_entity_index
+                    << L" for XUID " << keychain_profile.xuid
+                    << L": owned weapon handle is unavailable.";
+                WarnOnceForRuntimeSignature(
+                    BuildDemoKeychainWeaponSignature(
+                        keychain_profile.xuid,
+                        keychain_profile.base_item,
+                        weapon_entity_index) ^ 0x4B434841ull,
+                    stream.str());
+                continue;
+            }
+
+            RenderedWorldWeaponTrace trace {};
+            if (!TryBuildRenderedWorldWeaponTrace(
+                    entity_list,
+                    entity_cache,
+                    player_binding,
+                    keychain_profile.xuid,
+                    owned_handle_it->second,
+                    weapon_entity_index,
+                    weapon_entity,
+                    g_hook_state.schema_offsets,
+                    trace) ||
+                trace.owned_weapon_entity == nullptr)
+            {
+                std::wstringstream stream;
+                stream << L"Manual demo keychain update could not build a rendered weapon trace"
+                    << L" for XUID " << keychain_profile.xuid
+                    << L", weapon_entity=" << weapon_entity_index
+                    << L", base_item=" << keychain_profile.base_item << L".";
+                WarnOnceForRuntimeSignature(
+                    BuildDemoKeychainWeaponSignature(
+                        keychain_profile.xuid,
+                        keychain_profile.base_item,
+                        weapon_entity_index) ^ 0x4B435452ull,
+                    stream.str());
+                continue;
+            }
+
+            void* keychain_module_entity = nullptr;
+            int keychain_module_entity_index = -1;
+            TryResolveWeaponKeychainModuleEntity(
+                entity_cache,
+                trace,
+                g_hook_state.schema_offsets,
+                keychain_module_entity,
+                keychain_module_entity_index);
+            if (keychain_module_entity == nullptr)
+            {
+                continue;
+            }
+
+            if (IsRuntimeCreatedKeychainModuleEntityIndexTracked(keychain_module_entity_index))
+            {
+                std::wstringstream stream;
+                stream << L"Manual demo keychain update ignored runtime-created keychain module "
+                    << keychain_module_entity_index
+                    << L" for XUID " << keychain_profile.xuid
+                    << L", weapon_entity=" << weapon_entity_index
+                    << L". Existing-module-only mode modifies only game-owned keychains.";
+                WarnOnceForRuntimeSignature(
+                    BuildDemoKeychainWeaponSignature(
+                        keychain_profile.xuid,
+                        keychain_profile.base_item,
+                        weapon_entity_index) ^ 0x4B435254ull,
+                    stream.str());
+                continue;
+            }
+
+            found_existing_module = true;
+            const auto weapon_signature =
+                BuildDemoKeychainWeaponSignature(
+                    keychain_profile.xuid,
+                    keychain_profile.base_item,
+                    weapon_entity_index);
+
+            std::uint32_t live_keychain_def_id = 0;
+            std::uint32_t live_keychain_seed = 0;
+            const auto live_state_readable =
+                TryReadLiveKeychainModuleState(
+                    keychain_module_entity,
+                    g_hook_state.schema_offsets,
+                    live_keychain_def_id,
+                    live_keychain_seed);
+            const auto live_module_matches =
+                live_state_readable &&
+                live_keychain_def_id == static_cast<std::uint32_t>(desired_keychain_kit) &&
+                live_keychain_seed == 0u;
+            const auto module_applied =
+                live_module_matches ||
+                ApplyWeaponKeychainModuleFields(
+                    keychain_module_entity,
+                    g_hook_state.schema_offsets,
+                    &keychain_profile);
+            const auto visual_refresh_attempted = !live_module_matches && module_applied;
+            const auto visual_refresh_succeeded =
+                !visual_refresh_attempted ||
+                TryRefreshKeychainModuleVisualState(
+                    entity_cache,
+                    keychain_module_entity_index,
+                    keychain_module_entity,
+                    g_hook_state.schema_offsets,
+                    weapon_signature,
+                    L"manual_existing_module_update");
+
+            std::uint32_t applied_keychain_def_id = 0;
+            std::uint32_t applied_keychain_seed = 0;
+            const auto applied_state_readable =
+                TryReadLiveKeychainModuleState(
+                    keychain_module_entity,
+                    g_hook_state.schema_offsets,
+                    applied_keychain_def_id,
+                    applied_keychain_seed);
+            const auto live_module_matches_after_apply =
+                applied_state_readable &&
+                applied_keychain_def_id == static_cast<std::uint32_t>(desired_keychain_kit) &&
+                applied_keychain_seed == 0u;
+
+            if (module_applied && live_module_matches_after_apply && visual_refresh_succeeded)
+            {
+                applied_existing_module = true;
+                std::wstringstream stream;
+                stream << L"Manual demo keychain update applied to existing module: xuid="
+                    << keychain_profile.xuid
+                    << L", weapon_entity=" << weapon_entity_index
+                    << L", module_entity=" << keychain_module_entity_index
+                    << L", base_item=" << keychain_profile.base_item
+                    << L", keychain_kit=" << desired_keychain_kit << L".";
+                LogProfileDiagnosticOnce(
+                    weapon_signature ^ 0x4B434150ull,
+                    stream.str());
+            }
+            else if (module_applied && live_module_matches_after_apply)
+            {
+                visual_refresh_failed = true;
+                std::wstringstream stream;
+                stream << L"Manual demo keychain update changed the live module fields, but the visual refresh did not verify: xuid="
+                    << keychain_profile.xuid
+                    << L", weapon_entity=" << weapon_entity_index
+                    << L", module_entity=" << keychain_module_entity_index
+                    << L", desired_keychain_kit=" << desired_keychain_kit
+                    << L", live_keychain_kit=" << applied_keychain_def_id
+                    << L", live_keychain_seed=" << applied_keychain_seed << L".";
+                WarnOnceForRuntimeSignature(weapon_signature ^ 0x4B434156ull, stream.str());
+            }
+            else
+            {
+                std::wstringstream stream;
+                stream << L"Manual demo keychain update failed readback: xuid="
+                    << keychain_profile.xuid
+                    << L", weapon_entity=" << weapon_entity_index
+                    << L", module_entity=" << keychain_module_entity_index
+                    << L", desired_keychain_kit=" << desired_keychain_kit
+                    << L", live_keychain_kit=" << applied_keychain_def_id
+                    << L", live_keychain_seed=" << applied_keychain_seed
+                    << L", module_apply=" << (module_applied ? 1 : 0) << L".";
+                WarnOnceForRuntimeSignature(
+                    BuildDemoKeychainWeaponSignature(
+                        keychain_profile.xuid,
+                        keychain_profile.base_item,
+                        weapon_entity_index) ^ 0x4B434641ull,
+                    stream.str());
+            }
+        }
+
+        if (!matched_weapon)
+        {
+            std::wstringstream stream;
+            stream << L"Manual demo keychain update could not find a weapon matching the saved profile: "
+                << L"xuid=" << keychain_profile.xuid
+                << L", base_item=" << keychain_profile.base_item
+                << L", desired_keychain_kit=" << desired_keychain_kit << L".";
+            WarnOnceForRuntimeSignature(profile_signature ^ 0x4B43574Eull, stream.str());
+        }
+        else if (!found_existing_module)
+        {
+            std::wstringstream stream;
+            stream << L"Manual demo keychain update found the saved weapon but no live game-owned keychain module: "
+                << L"xuid=" << keychain_profile.xuid
+                << L", base_item=" << keychain_profile.base_item
+                << L", desired_keychain_kit=" << desired_keychain_kit
+                << L". Existing-module-only mode cannot create a new keychain yet.";
+            WarnOnceForRuntimeSignature(profile_signature ^ 0x4B434E4Full, stream.str());
+        }
+        else if (visual_refresh_failed)
+        {
+            std::wstringstream stream;
+            stream << L"Manual demo keychain update reached the live module and changed its fields, but the visual model still did not verify: "
+                << L"xuid=" << keychain_profile.xuid
+                << L", base_item=" << keychain_profile.base_item
+                << L", desired_keychain_kit=" << desired_keychain_kit << L".";
+            WarnOnceForRuntimeSignature(profile_signature ^ 0x4B434D56ull, stream.str());
+        }
+        else if (!applied_existing_module)
+        {
+            std::wstringstream stream;
+            stream << L"Manual demo keychain update reached an existing module but the requested kit did not stick: "
+                << L"xuid=" << keychain_profile.xuid
+                << L", base_item=" << keychain_profile.base_item
+                << L", desired_keychain_kit=" << desired_keychain_kit << L".";
+            WarnOnceForRuntimeSignature(profile_signature ^ 0x4B434D53ull, stream.str());
+        }
+    }
 }
 
 bool TryResolveSchemaOffsets(HMODULE schema_module, void* schema_interface, ClientSchemaOffsets& offsets)
@@ -41932,168 +49875,143 @@ struct KnifeModelPathBinding
 
 bool TryArmKnifePhase2ModelBindInterception(
     const KnifeModelPathBinding& binding,
-    const ClientSchemaOffsets& offsets,
-    const std::optional<std::string>& target_world_model_name,
-    const std::optional<std::string>& target_first_person_model_name,
+    const KnifePhase2TargetSelection& selection,
     const std::uint64_t render_signature,
     const std::uint64_t world_signature,
-    const std::uint64_t desired_mesh_group_mask,
     const bool world_visual_isolation_active,
     const std::uint64_t xuid,
     const int target_definition_index)
 {
-    if (binding.first_person_render_entity == nullptr ||
-        !(IsResolvedRuntimeEntityIndex(binding.first_person_render_entity_index) ||
-          IsSyntheticRuntimeEntityIndex(binding.first_person_render_entity_index)) ||
-        ((!target_world_model_name.has_value() || target_world_model_name->empty()) &&
-         (!target_first_person_model_name.has_value() || target_first_person_model_name->empty())))
+    auto& state = g_hook_state.knife_phase2_model_bind_interception;
+
+    auto clear_state =
+        [&]()
+        {
+            ClearKnifeModelResourceOverrideHook();
+            state = {};
+        };
+
+    if (selection.mode == nskinzcs2::runtime::KnifePhase2TargetMode::None)
     {
+        if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+        {
+            std::wstringstream stream;
+            stream << L"Knife phase2 model-bind intercept refused arm for XUID " << xuid
+                << L": reason=" << (selection.refusal_reason != nullptr
+                        ? selection.refusal_reason
+                        : L"world_only_consumer_not_confirmed");
+            nskinzcs2::Logger::Info(stream.str());
+        }
+        clear_state();
         return false;
     }
 
-    const auto remembered_world_model_name =
-        target_world_model_name.has_value() && !target_world_model_name->empty()
-            ? RememberPersistentModelName(*target_world_model_name)
-            : nullptr;
-    const auto remembered_first_person_model_name =
-        target_first_person_model_name.has_value() && !target_first_person_model_name->empty()
-            ? RememberPersistentModelName(*target_first_person_model_name)
-            : nullptr;
-    const auto remembered_effective_model_name =
-        remembered_first_person_model_name != nullptr
-            ? remembered_first_person_model_name
-            : remembered_world_model_name;
+    const auto render_entity_resolved =
+        selection.render_entity != nullptr &&
+        (selection.mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer
+                ? IsResolvedRuntimeEntityIndex(selection.render_entity_index)
+                : (IsResolvedRuntimeEntityIndex(selection.render_entity_index) ||
+                   IsSyntheticRuntimeEntityIndex(selection.render_entity_index)));
+    if (!render_entity_resolved)
+    {
+        if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+        {
+            std::wstringstream stream;
+            stream << L"Knife phase2 model-bind intercept refused arm for XUID " << xuid
+                << L": reason=world_only_consumer_not_confirmed"
+                << L", target_mode=" << KnifePhase2TargetModeText(selection.mode)
+                << L", render_entity=" << selection.render_entity_index;
+            nskinzcs2::Logger::Info(stream.str());
+        }
+        clear_state();
+        return false;
+    }
 
-    auto& state = g_hook_state.knife_phase2_model_bind_interception;
     const auto same_arm =
         state.active &&
+        state.target_mode == selection.mode &&
         state.xuid == xuid &&
-        state.render_entity == binding.first_person_render_entity &&
-        state.render_entity_index == binding.first_person_render_entity_index &&
+        state.render_entity == selection.render_entity &&
+        state.render_entity_index == selection.render_entity_index &&
         state.world_render_entity == binding.world_render_entity &&
         state.world_render_entity_index == binding.world_render_entity_index &&
         state.target_definition_index == target_definition_index &&
-        state.desired_first_person_model_name != nullptr &&
-        remembered_effective_model_name != nullptr &&
-        ModelIdentityPathMatches(state.desired_first_person_model_name, remembered_effective_model_name);
+        state.desired_model_name != nullptr &&
+        selection.desired_model_name != nullptr &&
+        ModelIdentityPathMatches(state.desired_model_name, selection.desired_model_name);
     if (!same_arm)
     {
-        ClearKnifeModelResourceOverrideHook();
-        state = {};
+        clear_state();
     }
 
     state.active = true;
-    state.synthetic_render_proxy = IsSyntheticRuntimeEntityIndex(binding.first_person_render_entity_index);
+    state.target_mode = selection.mode;
+    state.synthetic_render_proxy = selection.synthetic_render_proxy;
     state.world_visual_isolation_active = world_visual_isolation_active;
     state.xuid = xuid;
     state.render_signature = render_signature;
     state.world_signature = world_signature;
     state.target_definition_index = target_definition_index;
-    state.render_entity_index = binding.first_person_render_entity_index;
-    state.render_entity = binding.first_person_render_entity;
-    state.render_source = binding.first_person_render_source;
-    state.desired_world_model_name = remembered_world_model_name;
+    state.render_entity_index = selection.render_entity_index;
+    state.render_entity = selection.render_entity;
+    state.render_source = selection.render_source;
+    state.desired_world_model_name = selection.desired_world_model_name;
     state.desired_world_model_name_pointer = state.desired_world_model_name;
-    state.desired_first_person_model_name = remembered_effective_model_name;
+    state.desired_first_person_model_name = selection.desired_first_person_model_name;
     state.desired_first_person_model_name_pointer = state.desired_first_person_model_name;
-    state.desired_model_name = state.desired_first_person_model_name;
-    state.desired_model_name_pointer = state.desired_first_person_model_name_pointer;
+    state.desired_model_name = selection.desired_model_name;
+    state.desired_model_name_pointer =
+        selection.desired_model_name_pointer != nullptr
+            ? selection.desired_model_name_pointer
+            : selection.desired_model_name;
+    state.desired_model_handle = selection.desired_model_handle;
+    state.desired_model_name_token = selection.desired_model_name_token;
+    state.desired_model_handle_valid = selection.desired_model_handle_valid;
+    state.desired_model_name_token_valid = selection.desired_model_name_token_valid;
+    state.desired_mesh_group_mask = selection.desired_mesh_group_mask;
+    state.desired_mesh_group_mask_valid = selection.desired_mesh_group_mask_valid;
 
-    const auto live_first_person_identity =
-        ResolveKnifeRenderModelIdentitySnapshot(
-            binding.first_person_render_entity_index,
-            binding.first_person_render_entity,
-            offsets);
-    const auto live_world_identity =
-        ResolveKnifeRenderModelIdentitySnapshot(
-            binding.world_render_entity_index,
-            binding.world_render_entity,
-            offsets);
+    state.desired_first_person_model_name_token_valid =
+        state.desired_first_person_model_name != nullptr &&
+        state.desired_model_name != nullptr &&
+        ModelIdentityPathMatches(
+            state.desired_first_person_model_name,
+            state.desired_model_name) &&
+        state.desired_model_name_token_valid;
+    state.desired_first_person_model_name_token = state.desired_model_name_token;
+    state.desired_first_person_model_handle_valid =
+        state.desired_first_person_model_name != nullptr &&
+        state.desired_model_name != nullptr &&
+        ModelIdentityPathMatches(
+            state.desired_first_person_model_name,
+            state.desired_model_name) &&
+        state.desired_model_handle_valid;
+    state.desired_first_person_model_handle = state.desired_model_handle;
 
-    state.desired_first_person_model_name_token_valid = false;
-    state.desired_first_person_model_handle_valid = false;
-    if (state.desired_first_person_model_name != nullptr &&
-        state.desired_first_person_model_name[0] != '\0')
-    {
-        const auto target_identity =
-            ResolveKnifeRenderModelIdentitySnapshotForModelPath(state.desired_first_person_model_name);
-        state.desired_first_person_model_name_token =
-            target_identity.model_name_token;
-        state.desired_first_person_model_name_token_valid =
-            target_identity.model_name_token_resolved &&
-            state.desired_first_person_model_name_token != 0;
+    state.desired_world_model_name_token_valid =
+        state.desired_world_model_name != nullptr &&
+        state.desired_model_name != nullptr &&
+        ModelIdentityPathMatches(
+            state.desired_world_model_name,
+            state.desired_model_name) &&
+        state.desired_model_name_token_valid;
+    state.desired_world_model_name_token = state.desired_model_name_token;
+    state.desired_world_model_handle_valid =
+        state.desired_world_model_name != nullptr &&
+        state.desired_model_name != nullptr &&
+        ModelIdentityPathMatches(
+            state.desired_world_model_name,
+            state.desired_model_name) &&
+        state.desired_model_handle_valid;
+    state.desired_world_model_handle = state.desired_model_handle;
 
-        std::wstring resolved_handle_source;
-        std::wstring resolved_handle_reason;
-        state.desired_first_person_model_handle_valid =
-            live_first_person_identity.model_name_resolved &&
-            live_first_person_identity.model_handle_resolved &&
-            live_first_person_identity.model_handle != 0 &&
-            TryResolveKnifeDirectRenderModelHandle(
-                state.desired_first_person_model_name,
-                live_first_person_identity.model_name,
-                live_first_person_identity.model_handle,
-                xuid,
-                state.desired_first_person_model_handle,
-                resolved_handle_source,
-                resolved_handle_reason);
-    }
-
-    state.desired_world_model_name_token_valid = false;
-    state.desired_world_model_handle_valid = false;
-    if (state.desired_world_model_name != nullptr &&
-        state.desired_world_model_name[0] != '\0')
-    {
-        const auto target_identity =
-            ResolveKnifeRenderModelIdentitySnapshotForModelPath(state.desired_world_model_name);
-        state.desired_world_model_name_token =
-            target_identity.model_name_token;
-        state.desired_world_model_name_token_valid =
-            target_identity.model_name_token_resolved &&
-            state.desired_world_model_name_token != 0;
-
-        std::wstring resolved_handle_source;
-        std::wstring resolved_handle_reason;
-        state.desired_world_model_handle_valid =
-            live_world_identity.model_name_resolved &&
-            live_world_identity.model_handle_resolved &&
-            live_world_identity.model_handle != 0 &&
-            TryResolveKnifeDirectRenderModelHandle(
-                state.desired_world_model_name,
-                live_world_identity.model_name,
-                live_world_identity.model_handle,
-                xuid,
-                state.desired_world_model_handle,
-                resolved_handle_source,
-                resolved_handle_reason);
-    }
-
-    state.desired_model_handle = state.desired_first_person_model_handle;
-    state.desired_model_name_token = state.desired_first_person_model_name_token;
-    state.desired_model_handle_valid = state.desired_first_person_model_handle_valid;
-    state.desired_model_name_token_valid = state.desired_first_person_model_name_token_valid;
-    if (state.synthetic_render_proxy)
-    {
-        state.desired_mesh_group_mask_valid = true;
-        state.desired_mesh_group_mask = desired_mesh_group_mask;
-    }
-    else
-    {
-        state.desired_mesh_group_mask_valid =
-            TryReadWeaponMeshGroupMaskRaw(
-                binding.first_person_render_entity,
-                offsets,
-                state.desired_mesh_group_mask);
-    }
-
-    if (world_visual_isolation_active &&
-        binding.world_render_entity != nullptr &&
+    if (binding.world_render_entity != nullptr &&
         IsResolvedRuntimeEntityIndex(binding.world_render_entity_index))
     {
         state.world_render_entity_index = binding.world_render_entity_index;
         state.world_render_entity = binding.world_render_entity;
-        state.world_render_mesh_group_mask_valid = true;
-        state.world_render_mesh_group_mask = 0ull;
+        state.world_render_mesh_group_mask_valid = world_visual_isolation_active;
+        state.world_render_mesh_group_mask = world_visual_isolation_active ? 0ull : 1ull;
     }
 
     const auto armable =
@@ -42105,21 +50023,17 @@ bool TryArmKnifePhase2ModelBindInterception(
         {
             std::wstringstream stream;
             stream << L"Knife phase2 model-bind intercept refused arm for XUID " << xuid
-                << L": render_entity=" << binding.first_person_render_entity_index
-                << L", render_source=" << binding.first_person_render_source
+                << L": render_entity=" << selection.render_entity_index
+                << L", render_source=" << selection.render_source
                 << L", desired_model="
                 << (state.desired_model_name != nullptr
                         ? NarrowToWide(std::string(state.desired_model_name))
-                        : (target_first_person_model_name.has_value()
-                               ? NarrowToWide(*target_first_person_model_name)
-                               : target_world_model_name.has_value()
-                                   ? NarrowToWide(*target_world_model_name)
-                                   : L"<none>"))
+                        : L"<none>")
                 << L", desired_model_handle_valid=" << (state.desired_model_handle_valid ? 1 : 0)
                 << L", desired_model_name_token_valid=" << (state.desired_model_name_token_valid ? 1 : 0);
             nskinzcs2::Logger::Info(stream.str());
         }
-        state = {};
+        clear_state();
         return false;
     }
 
@@ -42127,7 +50041,8 @@ bool TryArmKnifePhase2ModelBindInterception(
     {
         std::wstringstream stream;
         stream << L"Knife phase2 model-bind intercept armed for XUID " << xuid
-            << L": render_entity=" << state.render_entity_index
+            << L": target_mode=" << KnifePhase2TargetModeText(state.target_mode)
+            << L", render_entity=" << state.render_entity_index
             << L", render_source=" << state.render_source
             << L", synthetic=" << (state.synthetic_render_proxy ? 1 : 0)
             << L", world_isolation=" << (state.world_visual_isolation_active ? 1 : 0)
@@ -43473,6 +51388,12 @@ std::wstring BuildKnifeModelPathSwapRuntimeReasonText()
         return {};
     }
 
+    if (g_hook_state.knife_model_path_state.resource_only_render_active &&
+        g_hook_state.knife_model_path_state.no_exposed_non_synthetic_render_owner)
+    {
+        return L"single world consumer active; no separate first-person consumer observed";
+    }
+
     if (state.last_reason == kKnifeModelPathSwapReasonQuerySwapperOwned)
     {
         return BuildResourceHandleQueryRuntimeText();
@@ -43687,6 +51608,31 @@ void ClearKnifeModelPathSwapQueryHooks() noexcept
 }
 
 thread_local bool g_knife_model_path_swap_query_hook_reentry = false;
+thread_local bool g_knife_model_path_swap_force_demo_result_sampling = false;
+
+struct ScopedKnifeModelPathSwapDemoResultSampling
+{
+    explicit ScopedKnifeModelPathSwapDemoResultSampling(const bool enabled) noexcept
+        : restore_needed(enabled),
+          previous_value(g_knife_model_path_swap_force_demo_result_sampling)
+    {
+        if (restore_needed)
+        {
+            g_knife_model_path_swap_force_demo_result_sampling = true;
+        }
+    }
+
+    ~ScopedKnifeModelPathSwapDemoResultSampling()
+    {
+        if (restore_needed)
+        {
+            g_knife_model_path_swap_force_demo_result_sampling = previous_value;
+        }
+    }
+
+    bool restore_needed = false;
+    bool previous_value = false;
+};
 
 void CopyFixedCString(char* destination, const std::size_t capacity, const char* source) noexcept
 {
@@ -53195,25 +61141,16 @@ bool TryContainsSubstringNoexcept(const char* haystack, const char* needle) noex
 
 bool TryResolveKnifeModelPathSwapRedirectPath(
     const char* path,
+    const std::uint64_t arg3,
+    const std::uint64_t arg4,
     const KnifeModelPathSwapState& swap_state,
     const char*& redirect_path,
-    const char*& bucket_label) noexcept
+    const char*& bucket_label,
+    const wchar_t*& matched_input_label) noexcept
 {
     redirect_path = nullptr;
     bucket_label = nullptr;
-    if (path == nullptr || reinterpret_cast<std::uintptr_t>(path) < 0x10000)
-    {
-        return false;
-    }
-
-    char preview[kResourceHandleQueryMissTelemetryPreviewCapacity] {};
-    if (!TryCopyReadableAnsiPreviewNoexcept(path, preview, sizeof(preview)))
-    {
-        return false;
-    }
-
-    const std::string normalized_preview = NormalizeResourcePath(std::string {preview});
-    const auto compiled_variant = EndsWithInsensitive(normalized_preview, ".vmdl_c");
+    matched_input_label = L"none";
     const auto effective_world_source_path =
         ResolveKnifeModelPathSwapEffectiveSourcePath(
             swap_state,
@@ -53223,29 +61160,146 @@ bool TryResolveKnifeModelPathSwapRedirectPath(
             swap_state,
             KnifeModelPathSwapHandleBucket::View);
 
-    if (KnifeModelPathMatchesExpectedPath(normalized_preview, effective_world_source_path))
+    const auto try_match_candidate =
+        [&](const char* candidate, const wchar_t* input_label, const bool allow_indirect) noexcept
+        {
+            const auto try_match_resolved_candidate =
+                [&](const char* resolved_candidate, const wchar_t* resolved_label) noexcept
+                {
+                    if (resolved_candidate == nullptr ||
+                        reinterpret_cast<std::uintptr_t>(resolved_candidate) < 0x10000)
+                    {
+                        return false;
+                    }
+
+                    char preview[kResourceHandleQueryMissTelemetryPreviewCapacity] {};
+                    if (!TryCopyReadableAnsiPreviewNoexcept(
+                            resolved_candidate,
+                            preview,
+                            sizeof(preview)))
+                    {
+                        return false;
+                    }
+
+                    const std::string normalized_preview =
+                        NormalizeResourcePath(std::string {preview});
+                    const auto compiled_variant =
+                        EndsWithInsensitive(normalized_preview, ".vmdl_c");
+
+                    if (KnifeModelPathMatchesExpectedPath(
+                            normalized_preview,
+                            effective_world_source_path))
+                    {
+                        redirect_path = ResolveKnifeModelPathSwapBucketPath(
+                            swap_state,
+                            KnifeModelPathSwapHandleBucket::World,
+                            true,
+                            compiled_variant);
+                        bucket_label = "world";
+                        matched_input_label = resolved_label;
+                        return redirect_path != nullptr;
+                    }
+
+                    if (KnifeModelPathMatchesExpectedPath(
+                            normalized_preview,
+                            effective_view_source_path))
+                    {
+                        redirect_path = ResolveKnifeModelPathSwapBucketPath(
+                            swap_state,
+                            KnifeModelPathSwapHandleBucket::View,
+                            true,
+                            compiled_variant);
+                        bucket_label = "view";
+                        matched_input_label = resolved_label;
+                        return redirect_path != nullptr;
+                    }
+
+                    return false;
+                };
+
+            if (try_match_resolved_candidate(candidate, input_label))
+            {
+                return true;
+            }
+
+            if (!allow_indirect)
+            {
+                return false;
+            }
+
+            std::uintptr_t indirect_pointer = 0;
+            if (!TryReadPointerValueNoexcept(candidate, indirect_pointer) ||
+                indirect_pointer < 0x10000)
+            {
+                return false;
+            }
+
+            const auto* indirect_label =
+                std::wcscmp(input_label, L"arg2") == 0
+                    ? L"arg2*"
+                    : std::wcscmp(input_label, L"arg3") == 0
+                        ? L"arg3*"
+                        : std::wcscmp(input_label, L"arg4") == 0
+                            ? L"arg4*"
+                            : input_label;
+            return try_match_resolved_candidate(
+                reinterpret_cast<const char*>(indirect_pointer),
+                indirect_label);
+        };
+
+    if (try_match_candidate(path, L"arg2", true))
     {
-        redirect_path = ResolveKnifeModelPathSwapBucketPath(
-            swap_state,
-            KnifeModelPathSwapHandleBucket::World,
-            true,
-            compiled_variant);
-        bucket_label = "world";
-        return redirect_path != nullptr;
+        return true;
     }
 
-    if (KnifeModelPathMatchesExpectedPath(normalized_preview, effective_view_source_path))
+    if (try_match_candidate(
+            reinterpret_cast<const char*>(static_cast<std::uintptr_t>(arg3)),
+            L"arg3",
+            true))
     {
-        redirect_path = ResolveKnifeModelPathSwapBucketPath(
-            swap_state,
-            KnifeModelPathSwapHandleBucket::View,
-            true,
-            compiled_variant);
-        bucket_label = "view";
-        return redirect_path != nullptr;
+        return true;
+    }
+
+    if (try_match_candidate(
+            reinterpret_cast<const char*>(static_cast<std::uintptr_t>(arg4)),
+            L"arg4",
+            true))
+    {
+        return true;
     }
 
     return false;
+}
+
+const char* ResolveKnifeModelPathSwapReplayPathCandidate(
+    const char* path) noexcept
+{
+    if (path != nullptr &&
+        reinterpret_cast<std::uintptr_t>(path) >= 0x10000)
+    {
+        char preview[kResourceHandleQueryMissTelemetryPreviewCapacity] {};
+        if (TryCopyReadableAnsiPreviewNoexcept(path, preview, sizeof(preview)))
+        {
+            return path;
+        }
+
+        std::uintptr_t indirect_pointer = 0;
+        if (TryReadPointerValueNoexcept(path, indirect_pointer) &&
+            indirect_pointer >= 0x10000)
+        {
+            const auto* indirect_path =
+                reinterpret_cast<const char*>(indirect_pointer);
+            if (TryCopyReadableAnsiPreviewNoexcept(
+                    indirect_path,
+                    preview,
+                    sizeof(preview)))
+            {
+                return indirect_path;
+            }
+        }
+    }
+
+    return path;
 }
 
 KnifeModelPathSwapQueryHookTarget::Fn ResolveKnifeModelPathSwapQueryOriginal(
@@ -53821,6 +61875,12 @@ void TryLogResourceSystemSiblingContrastLocked(
     nskinzcs2::Logger::Info(stream.str());
 }
 
+void SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooks() noexcept
+{
+    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+    SyncKnifeModelPathSwapBridgeRedirectsToInstalledQueryHooksLocked();
+}
+
 void TryLogResourceHandleUtilsProbeStatusLocked() noexcept
 {
     const auto& rs_binding = g_hook_state.resource_system_query;
@@ -54139,24 +62199,33 @@ void TryLogDemoResourceSystemSlot13MissTelemetryLocked() noexcept
     }
 
     const auto entered_count = ReadResourceHandleQueryEnteredCount(binding);
-    if (entered_count < 256)
+    if (entered_count < 64)
     {
         return;
     }
 
     auto& probe = g_hook_state.resource_handle_query_live_probe;
+    const auto& swap_state = g_hook_state.knife_model_path_swap_state;
+    const auto redirect_pairs = CountKnifeModelPathSwapQueryHookRedirectPairs(hook_target);
+    if (hook_target.monitor_only ||
+        hook_target.hit_count != 0 ||
+        redirect_pairs == 0 ||
+        swap_state.handle_redirect_pair_count == 0)
+    {
+        return;
+    }
+
     std::uint64_t signature = binding.provider_generation ^ 0x4D49535344494147ull;
     signature ^= static_cast<std::uint64_t>(binding.path_to_handle_slot) << 8;
-    signature ^= static_cast<std::uint64_t>(entered_count / 256) << 16;
+    signature ^= static_cast<std::uint64_t>(entered_count / 64) << 16;
     signature ^= hook_target.calibrated_source_handle + (signature << 6) + (signature >> 2);
     signature ^= hook_target.calibrated_target_handle + (signature << 6) + (signature >> 2);
+    signature ^= static_cast<std::uint64_t>(redirect_pairs) << 32;
+    signature ^= static_cast<std::uint64_t>(hook_target.hit_count) << 40;
     if (probe.miss_telemetry_log_signature.load(std::memory_order_acquire) == signature)
     {
         return;
     }
-    probe.miss_telemetry_log_signature.store(signature, std::memory_order_release);
-
-    // slot13 now only feeds upstream resolver diagnostics; keep the tail telemetry silent.
 
     const auto rs_hook_index_raw =
         ResourceHandleQueryHookIndex(ResourceHandleQueryInterfaceKind::ResourceSystem);
@@ -54180,10 +62249,66 @@ void TryLogDemoResourceSystemSlot13MissTelemetryLocked() noexcept
     const auto have_path_sample =
         probe.miss_other_path_sample_state.load(std::memory_order_acquire) ==
         kResourceHandleQueryMissTelemetrySampleReady;
-    if (!have_result_sample && !have_path_sample)
+    const auto have_any_miss_counts =
+        probe.miss_path_world_token_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_path_view_token_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_path_weapon_token_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_path_weapon_resource_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_path_other_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_result_zero_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_result_calibrated_source_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_result_calibrated_target_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_result_bridge_source_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_result_bridge_target_count.load(std::memory_order_acquire) != 0 ||
+        probe.miss_result_other_count.load(std::memory_order_acquire) != 0;
+    std::wstringstream summary_stream;
+    summary_stream << L"Query swapper slot13 miss summary: entered=" << entered_count
+        << L", hits=" << hook_target.hit_count
+        << L", pairs=" << redirect_pairs
+        << L", calibrated=0x" << std::hex << std::uppercase
+        << hook_target.calibrated_source_handle
+        << L"->0x" << hook_target.calibrated_target_handle
+        << std::dec << std::nouppercase
+        << L", path_counts={world:" << probe.miss_path_world_token_count.load(std::memory_order_acquire)
+        << L",view:" << probe.miss_path_view_token_count.load(std::memory_order_acquire)
+        << L",weapon_token:" << probe.miss_path_weapon_token_count.load(std::memory_order_acquire)
+        << L",weapon_resource:" << probe.miss_path_weapon_resource_count.load(std::memory_order_acquire)
+        << L",other:" << probe.miss_path_other_count.load(std::memory_order_acquire)
+        << L"}"
+        << L", result_counts={zero:" << probe.miss_result_zero_count.load(std::memory_order_acquire)
+        << L",calibrated_source:" << probe.miss_result_calibrated_source_count.load(std::memory_order_acquire)
+        << L",calibrated_target:" << probe.miss_result_calibrated_target_count.load(std::memory_order_acquire)
+        << L",bridge_source:" << probe.miss_result_bridge_source_count.load(std::memory_order_acquire)
+        << L",bridge_target:" << probe.miss_result_bridge_target_count.load(std::memory_order_acquire)
+        << L",other:" << probe.miss_result_other_count.load(std::memory_order_acquire)
+        << L"}"
+        << L", have_samples=" << ((have_result_sample || have_path_sample) ? 1 : 0)
+        << L", have_counts=" << (have_any_miss_counts ? 1 : 0);
+    if (have_path_sample)
     {
-        return;
+        summary_stream << L", sample_path=" << NarrowToWide(std::string(probe.miss_other_path_preview.data()))
+            << L", sample_caller="
+            << FormatModuleOwnerWithOffset(
+                   reinterpret_cast<void*>(probe.miss_other_path_caller_return_address))
+            << L", sample_arg4=0x" << std::hex << std::uppercase << probe.miss_other_path_arg4
+            << std::dec << std::nouppercase;
     }
+    if (have_result_sample)
+    {
+        summary_stream << L", sample_result=0x" << std::hex << std::uppercase << probe.miss_other_result_handle
+            << std::dec << std::nouppercase
+            << L", sample_relation="
+            << (probe.miss_other_result_relation != nullptr ? probe.miss_other_result_relation : L"other")
+            << L", sample_result_path="
+            << NarrowToWide(std::string(probe.miss_other_result_path_preview.data()))
+            << L", sample_result_caller="
+            << FormatModuleOwnerWithOffset(
+                   reinterpret_cast<void*>(probe.miss_other_result_caller_return_address))
+            << L", sample_result_arg4=0x" << std::hex << std::uppercase << probe.miss_other_result_arg4
+            << std::dec << std::nouppercase;
+    }
+    nskinzcs2::Logger::Info(summary_stream.str());
+    probe.miss_telemetry_log_signature.store(signature, std::memory_order_release);
 
     hook_indices[0] = static_cast<std::uint32_t>(rs_hook_index_raw);
     if (have_result_sample)
@@ -54265,6 +62390,59 @@ void NoteKnifeModelPathSwapBucketHit(
     }
 }
 
+void NoteKnifeModelPathSwapQueryRedirectHit(
+    KnifeModelPathSwapQueryHookTarget& hook_target,
+    KnifeModelPathSwapState& swap_state,
+    const KnifeModelPathSwapHandleBucket bucket,
+    const char* redirect_path,
+    const wchar_t* hit_kind,
+    const bool valid_resource_hit,
+    const std::uintptr_t caller_return_address,
+    const std::uint64_t arg4) noexcept
+{
+    NoteKnifeModelPathSwapBucketHit(swap_state, bucket);
+    swap_state.last_hit_tick = GetTickCount64();
+    swap_state.last_reason = kKnifeModelPathSwapReasonNone;
+    swap_state.degraded = false;
+
+    ++hook_target.hit_count;
+    ++hook_target.redirect_count;
+    hook_target.last_match_bucket = KnifeModelPathSwapHandleBucketLabel(bucket);
+    hook_target.last_redirect_path = redirect_path;
+    hook_target.last_hit_kind = hit_kind != nullptr ? hit_kind : L"unknown";
+
+    if (valid_resource_hit)
+    {
+        ++hook_target.valid_resource_hit_count;
+        ++hook_target.path_redirect_hit_count;
+        hook_target.last_valid_hit_caller_return_address = caller_return_address;
+        hook_target.last_valid_hit_arg4 = arg4;
+        return;
+    }
+
+    if (hit_kind == nullptr)
+    {
+        return;
+    }
+
+    if (std::wcscmp(hit_kind, L"live_result_redirect") == 0)
+    {
+        ++hook_target.live_result_redirect_hit_count;
+    }
+    else if (std::wcscmp(hit_kind, L"calibrated_handle_redirect") == 0)
+    {
+        ++hook_target.calibrated_handle_hit_count;
+    }
+    else if (std::wcscmp(hit_kind, L"learned_handle_redirect") == 0)
+    {
+        ++hook_target.learned_handle_hit_count;
+    }
+    else if (std::wcscmp(hit_kind, L"bridge_handle_redirect") == 0)
+    {
+        ++hook_target.bridge_handle_hit_count;
+    }
+}
+
 const wchar_t* ClassifyKnifeModelPathSwapQueryPathKind(
     const char* path,
     char* path_preview,
@@ -54308,6 +62486,714 @@ const wchar_t* ClassifyKnifeModelPathSwapQueryPathKind(
     }
 
     return L"other";
+}
+
+bool IsKnifeModelPathSwapKnifeQueryPathKind(const wchar_t* path_kind) noexcept
+{
+    return path_kind != nullptr &&
+        (std::wcscmp(path_kind, L"world_token") == 0 ||
+         std::wcscmp(path_kind, L"view_token") == 0 ||
+         std::wcscmp(path_kind, L"weapon_token") == 0 ||
+         std::wcscmp(path_kind, L"weapon_resource") == 0);
+}
+
+KnifeModelPathSwapHandleBucket ResolveKnifeModelPathSwapQueryPathBucket(
+    const wchar_t* path_kind) noexcept
+{
+    if (path_kind == nullptr)
+    {
+        return KnifeModelPathSwapHandleBucket::Unknown;
+    }
+
+    if (std::wcscmp(path_kind, L"world_token") == 0)
+    {
+        return KnifeModelPathSwapHandleBucket::World;
+    }
+
+    if (std::wcscmp(path_kind, L"view_token") == 0)
+    {
+        return KnifeModelPathSwapHandleBucket::View;
+    }
+
+    return KnifeModelPathSwapHandleBucket::Unknown;
+}
+
+bool TryCopyKnifeModelPathSwapQueryPreview(
+    const char* path,
+    std::array<char, kKnifeModelPathSwapQueryConsumerPreviewCapacity>& preview,
+    KnifeModelPathSwapHandleBucket& out_bucket,
+    bool& out_knife_like) noexcept
+{
+    out_bucket = KnifeModelPathSwapHandleBucket::Unknown;
+    out_knife_like = false;
+    preview.fill('\0');
+
+    if (path == nullptr)
+    {
+        return false;
+    }
+
+    bool preview_valid = false;
+    const auto* path_kind = ClassifyKnifeModelPathSwapQueryPathKind(
+        path,
+        preview.data(),
+        preview.size(),
+        preview_valid);
+    out_bucket = ResolveKnifeModelPathSwapQueryPathBucket(path_kind);
+    out_knife_like = IsKnifeModelPathSwapKnifeQueryPathKind(path_kind);
+    return preview_valid;
+}
+
+void NoteKnifeModelPathSwapQueryConsumerSample(
+    KnifeModelPathSwapQueryHookTarget& hook_target,
+    const char* path,
+    const char* redirect_path,
+    const std::uintptr_t caller_return_address,
+    const std::uint64_t arg4,
+    const std::uint64_t result_handle,
+    const KnifeModelPathSwapHandleBucket bucket,
+    const bool matched_pair,
+    const bool redirect_applied,
+    const bool valid_hit) noexcept
+{
+    std::array<char, kKnifeModelPathSwapQueryConsumerPreviewCapacity> path_preview {};
+    std::array<char, kKnifeModelPathSwapQueryConsumerPreviewCapacity> redirect_preview {};
+    KnifeModelPathSwapHandleBucket path_bucket = KnifeModelPathSwapHandleBucket::Unknown;
+    KnifeModelPathSwapHandleBucket redirect_bucket = KnifeModelPathSwapHandleBucket::Unknown;
+    bool knife_path_like = false;
+    bool knife_redirect_like = false;
+    const auto have_path_preview =
+        TryCopyKnifeModelPathSwapQueryPreview(
+            path,
+            path_preview,
+            path_bucket,
+            knife_path_like);
+    const auto have_redirect_preview =
+        TryCopyKnifeModelPathSwapQueryPreview(
+            redirect_path,
+            redirect_preview,
+            redirect_bucket,
+            knife_redirect_like);
+    if (!knife_path_like && !knife_redirect_like)
+    {
+        return;
+    }
+
+    ++hook_target.knife_query_total_count;
+    if (matched_pair)
+    {
+        ++hook_target.knife_query_matched_pair_count;
+    }
+
+    ResourceHandleQueryResultShapeKind result_shape_kind =
+        ResourceHandleQueryResultShapeKind::Unknown;
+    std::uint8_t payload_mask = 0;
+    std::uint64_t payload_qword0 = 0;
+    std::uint64_t payload_qword8 = 0;
+    std::uint64_t payload_qword10 = 0;
+    SnapshotResourceHandleQueryResultShape(
+        result_handle,
+        result_shape_kind,
+        payload_mask,
+        payload_qword0,
+        payload_qword8,
+        payload_qword10);
+    (void)payload_mask;
+    (void)payload_qword0;
+    (void)payload_qword8;
+    (void)payload_qword10;
+
+    const auto effective_bucket =
+        bucket != KnifeModelPathSwapHandleBucket::Unknown
+            ? bucket
+            : redirect_bucket != KnifeModelPathSwapHandleBucket::Unknown
+            ? redirect_bucket
+            : path_bucket;
+
+    auto* sample = static_cast<KnifeModelPathSwapQueryConsumerSample*>(nullptr);
+    for (auto& candidate : hook_target.knife_query_consumers)
+    {
+        if (!candidate.active)
+        {
+            if (sample == nullptr)
+            {
+                sample = &candidate;
+            }
+            continue;
+        }
+
+        if (candidate.caller_return_address == caller_return_address &&
+            candidate.arg4 == arg4 &&
+            candidate.result_handle == result_handle)
+        {
+            sample = &candidate;
+            break;
+        }
+    }
+
+    if (sample == nullptr)
+    {
+        ++hook_target.knife_query_consumer_overflow_count;
+        return;
+    }
+
+    if (!sample->active)
+    {
+        sample->active = true;
+        sample->caller_return_address = caller_return_address;
+        sample->arg4 = arg4;
+        sample->result_handle = result_handle;
+    }
+
+    ++sample->query_count;
+    if (matched_pair)
+    {
+        ++sample->matched_pair_count;
+    }
+    if (redirect_applied)
+    {
+        ++sample->redirect_count;
+    }
+    if (valid_hit)
+    {
+        ++sample->valid_hit_count;
+    }
+    if (effective_bucket == KnifeModelPathSwapHandleBucket::World)
+    {
+        ++sample->world_bucket_count;
+    }
+    else if (effective_bucket == KnifeModelPathSwapHandleBucket::View)
+    {
+        ++sample->view_bucket_count;
+    }
+    else
+    {
+        ++sample->other_bucket_count;
+    }
+    sample->result_shape_kind = static_cast<std::uint8_t>(result_shape_kind);
+    if (have_path_preview)
+    {
+        sample->path_preview = path_preview;
+    }
+    if (have_redirect_preview)
+    {
+        sample->redirect_preview = redirect_preview;
+    }
+}
+
+const wchar_t* ClassifyKnifeModelPathSwapQueryConsumerBindingKind(
+    const KnifeModelPathSwapQueryConsumerSample& sample,
+    const int world_entity_index,
+    const int view_entity_index) noexcept
+{
+    const auto dominant_world = sample.world_bucket_count;
+    const auto dominant_view = sample.view_bucket_count;
+
+    if (dominant_world >= dominant_view && dominant_world > sample.other_bucket_count)
+    {
+        return world_entity_index >= 0
+            ? L"entity_bound_world"
+            : L"anonymous_world";
+    }
+
+    if (dominant_view > dominant_world && dominant_view > sample.other_bucket_count)
+    {
+        return view_entity_index >= 0
+            ? L"entity_bound_view"
+            : L"anonymous_view";
+    }
+
+    return L"anonymous";
+}
+
+const wchar_t* KnifePhase2TargetModeText(
+    const nskinzcs2::runtime::KnifePhase2TargetMode mode) noexcept
+{
+    switch (mode)
+    {
+    case nskinzcs2::runtime::KnifePhase2TargetMode::FirstPersonRender:
+        return L"first_person_render";
+    case nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer:
+        return L"world_only_consumer";
+    default:
+        return L"none";
+    }
+}
+
+struct KnifeModelPathSwapConsumerCensus
+{
+    int consumer_clusters = 0;
+    int entity_bound_clusters = 0;
+    int anonymous_clusters = 0;
+    bool single_consumer_is_entity_bound_world = false;
+    std::uintptr_t single_consumer_caller_return_address = 0;
+};
+
+KnifeModelPathSwapConsumerCensus CollectKnifeModelPathSwapConsumerCensus(
+    const KnifeModelPathSwapQueryHookTarget& hook_target,
+    const int published_world_entity_index,
+    const int resolved_view_entity_index) noexcept
+{
+    KnifeModelPathSwapConsumerCensus census {};
+    for (const auto& sample : hook_target.knife_query_consumers)
+    {
+        if (!sample.active || sample.query_count == 0)
+        {
+            continue;
+        }
+
+        ++census.consumer_clusters;
+        const auto* binding_kind =
+            ClassifyKnifeModelPathSwapQueryConsumerBindingKind(
+                sample,
+                published_world_entity_index,
+                resolved_view_entity_index);
+        if (std::wcsncmp(binding_kind, L"entity_bound", 12) == 0)
+        {
+            ++census.entity_bound_clusters;
+        }
+        else
+        {
+            ++census.anonymous_clusters;
+        }
+
+        if (census.consumer_clusters == 1)
+        {
+            census.single_consumer_is_entity_bound_world =
+                std::wcscmp(binding_kind, L"entity_bound_world") == 0;
+            census.single_consumer_caller_return_address = sample.caller_return_address;
+        }
+        else
+        {
+            census.single_consumer_is_entity_bound_world = false;
+            census.single_consumer_caller_return_address = 0;
+        }
+    }
+
+    return census;
+}
+
+nskinzcs2::runtime::KnifePhase2TargetMode ResolveKnifePhase2TargetModeFromFacts(
+    const KnifePhase2TargetModeFacts& facts,
+    const wchar_t*& refusal_reason) noexcept
+{
+    refusal_reason = L"world_only_consumer_not_confirmed";
+
+    if (facts.has_real_first_person_render_target)
+    {
+        return nskinzcs2::runtime::KnifePhase2TargetMode::FirstPersonRender;
+    }
+
+    if (facts.anonymous_clusters > 0)
+    {
+        refusal_reason = L"anonymous_consumer_present";
+        return nskinzcs2::runtime::KnifePhase2TargetMode::None;
+    }
+
+    if (!facts.has_real_first_person_owner &&
+        !facts.has_real_first_person_render_target &&
+        facts.no_exposed_non_synthetic_render_owner &&
+        facts.viewmodel_absence_result ==
+            nskinzcs2::runtime::KnifeViewmodelAbsenceAuditResult::MissingHandle &&
+        facts.consumer_clusters == 1 &&
+        facts.entity_bound_clusters == 1 &&
+        facts.anonymous_clusters == 0 &&
+        facts.single_consumer_is_entity_bound_world &&
+        facts.caller_matches_valid_hit)
+    {
+        return nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer;
+    }
+
+    return nskinzcs2::runtime::KnifePhase2TargetMode::None;
+}
+
+KnifePhase2TargetSelection ResolveKnifePhase2TargetSelection(
+    const KnifeModelPathBinding& binding,
+    const nskinzcs2::runtime::KnifeRuntimeContext& context,
+    const ClientSchemaOffsets& offsets,
+    const std::optional<std::string>& target_world_model_name,
+    const std::optional<std::string>& target_first_person_model_name,
+    const std::uint64_t desired_mesh_group_mask,
+    const bool world_visual_isolation_active,
+    const std::uint64_t xuid)
+{
+    KnifePhase2TargetSelection selection {};
+    selection.desired_world_model_name =
+        target_world_model_name.has_value() && !target_world_model_name->empty()
+            ? RememberPersistentModelName(*target_world_model_name)
+            : nullptr;
+    selection.desired_first_person_model_name =
+        target_first_person_model_name.has_value() && !target_first_person_model_name->empty()
+            ? RememberPersistentModelName(*target_first_person_model_name)
+            : nullptr;
+
+    KnifePhase2TargetModeFacts facts {};
+    facts.has_real_first_person_render_target =
+        binding.first_person_render_entity != nullptr &&
+        IsResolvedRuntimeEntityIndex(binding.first_person_render_entity_index) &&
+        !IsSyntheticRuntimeEntityIndex(binding.first_person_render_entity_index);
+    facts.has_real_first_person_owner =
+        binding.first_person_entity != nullptr &&
+        IsResolvedRuntimeEntityIndex(binding.first_person_entity_index);
+    facts.no_exposed_non_synthetic_render_owner =
+        binding.no_exposed_non_synthetic_render_owner;
+    facts.viewmodel_absence_result =
+        static_cast<nskinzcs2::runtime::KnifeViewmodelAbsenceAuditResult>(
+            context.viewmodel_absence_audit_result);
+
+    {
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        const auto& rs_binding = g_hook_state.resource_system_query;
+        if (rs_binding.interface_kind == ResourceHandleQueryInterfaceKind::ResourceSystem &&
+            rs_binding.path_to_handle_slot == 13)
+        {
+            const auto hook_index = ResourceHandleQueryHookIndex(rs_binding.interface_kind);
+            if (hook_index != kInvalidResourceHandleQuerySlot &&
+                hook_index < g_hook_state.knife_model_path_swap_query_hooks.size())
+            {
+                const auto& hook_target = g_hook_state.knife_model_path_swap_query_hooks[hook_index];
+                if (hook_target.valid &&
+                    hook_target.patch.installed &&
+                    hook_target.original != nullptr)
+                {
+                    int published_world_entity_index = -1;
+                    const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+                    if (published_bridge.valid)
+                    {
+                        published_world_entity_index = published_bridge.world_entity_index;
+                    }
+
+                    int resolved_view_entity_index = -1;
+                    if (facts.has_real_first_person_render_target)
+                    {
+                        resolved_view_entity_index = binding.first_person_render_entity_index;
+                    }
+
+                    const auto census =
+                        CollectKnifeModelPathSwapConsumerCensus(
+                            hook_target,
+                            published_world_entity_index,
+                            resolved_view_entity_index);
+                    facts.consumer_clusters = census.consumer_clusters;
+                    facts.entity_bound_clusters = census.entity_bound_clusters;
+                    facts.anonymous_clusters = census.anonymous_clusters;
+                    facts.single_consumer_is_entity_bound_world =
+                        census.single_consumer_is_entity_bound_world;
+                    facts.caller_matches_valid_hit =
+                        census.single_consumer_caller_return_address != 0 &&
+                        census.single_consumer_caller_return_address ==
+                            hook_target.last_valid_hit_caller_return_address;
+                }
+            }
+        }
+    }
+
+    selection.mode = ResolveKnifePhase2TargetModeFromFacts(facts, selection.refusal_reason);
+    if (selection.mode == nskinzcs2::runtime::KnifePhase2TargetMode::None)
+    {
+        return selection;
+    }
+
+    if (selection.mode == nskinzcs2::runtime::KnifePhase2TargetMode::FirstPersonRender)
+    {
+        selection.render_entity_index = binding.first_person_render_entity_index;
+        selection.render_entity = binding.first_person_render_entity;
+        selection.render_source = binding.first_person_render_source;
+        selection.synthetic_render_proxy = false;
+        selection.desired_model_name =
+            selection.desired_first_person_model_name != nullptr
+                ? selection.desired_first_person_model_name
+                : selection.desired_world_model_name;
+        selection.desired_model_name_pointer = selection.desired_model_name;
+        selection.desired_mesh_group_mask_valid =
+            binding.first_person_render_entity != nullptr &&
+            TryReadWeaponMeshGroupMaskRaw(
+                binding.first_person_render_entity,
+                offsets,
+                selection.desired_mesh_group_mask);
+
+        if (selection.desired_model_name != nullptr &&
+            selection.desired_model_name[0] != '\0')
+        {
+            const auto live_identity =
+                ResolveKnifeRenderModelIdentitySnapshot(
+                    binding.first_person_render_entity_index,
+                    binding.first_person_render_entity,
+                    offsets);
+            const auto target_identity =
+                ResolveKnifeRenderModelIdentitySnapshotForModelPath(selection.desired_model_name);
+            selection.desired_model_name_token = target_identity.model_name_token;
+            selection.desired_model_name_token_valid =
+                target_identity.model_name_token_resolved &&
+                selection.desired_model_name_token != 0;
+
+            std::wstring resolved_handle_source;
+            std::wstring resolved_handle_reason;
+            selection.desired_model_handle_valid =
+                TryResolveKnifeDirectRenderModelHandleForWrite(
+                    selection.desired_model_name,
+                    live_identity.model_name_resolved
+                        ? live_identity.model_name
+                        : std::string(),
+                    live_identity.model_handle_resolved
+                        ? live_identity.model_handle
+                        : 0,
+                    xuid,
+                    selection.desired_model_handle,
+                    resolved_handle_source,
+                    resolved_handle_reason);
+        }
+
+        return selection;
+    }
+
+    if (binding.world_render_entity == nullptr ||
+        !IsResolvedRuntimeEntityIndex(binding.world_render_entity_index))
+    {
+        selection.mode = nskinzcs2::runtime::KnifePhase2TargetMode::None;
+        selection.refusal_reason = L"world_only_consumer_not_confirmed";
+        return selection;
+    }
+
+    selection.render_entity_index = binding.world_render_entity_index;
+    selection.render_entity = binding.world_render_entity;
+    selection.render_source = L"world_only_consumer_phase2";
+    selection.synthetic_render_proxy = false;
+    selection.desired_model_name = selection.desired_world_model_name;
+    selection.desired_model_name_pointer = selection.desired_model_name;
+    selection.desired_mesh_group_mask_valid = true;
+    selection.desired_mesh_group_mask =
+        world_visual_isolation_active
+            ? 0ull
+            : (desired_mesh_group_mask != 0 ? desired_mesh_group_mask : 1ull);
+
+    if (selection.desired_model_name != nullptr &&
+        selection.desired_model_name[0] != '\0')
+    {
+        const auto live_identity =
+            ResolveKnifeRenderModelIdentitySnapshot(
+                binding.world_render_entity_index,
+                binding.world_render_entity,
+                offsets);
+        const auto target_identity =
+            ResolveKnifeRenderModelIdentitySnapshotForModelPath(selection.desired_model_name);
+        selection.desired_model_name_token = target_identity.model_name_token;
+        selection.desired_model_name_token_valid =
+            target_identity.model_name_token_resolved &&
+            selection.desired_model_name_token != 0;
+
+        std::wstring resolved_handle_source;
+        std::wstring resolved_handle_reason;
+        selection.desired_model_handle_valid =
+            TryResolveKnifeDirectRenderModelHandleForWrite(
+                selection.desired_model_name,
+                live_identity.model_name_resolved
+                    ? live_identity.model_name
+                    : std::string(),
+                live_identity.model_handle_resolved
+                    ? live_identity.model_handle
+                    : 0,
+                xuid,
+                selection.desired_model_handle,
+                resolved_handle_source,
+                resolved_handle_reason);
+    }
+
+    return selection;
+}
+
+void TryLogDemoResourceSystemKnifeQueryConsumersLocked() noexcept
+{
+    if (!g_hook_state.demo_playing.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    const auto& binding = g_hook_state.resource_system_query;
+    if (binding.interface_kind != ResourceHandleQueryInterfaceKind::ResourceSystem ||
+        binding.path_to_handle_slot != 13)
+    {
+        return;
+    }
+
+    const auto hook_index = ResourceHandleQueryHookIndex(binding.interface_kind);
+    if (hook_index == kInvalidResourceHandleQuerySlot ||
+        hook_index >= g_hook_state.knife_model_path_swap_query_hooks.size())
+    {
+        return;
+    }
+
+    auto& hook_target = g_hook_state.knife_model_path_swap_query_hooks[hook_index];
+    if (!hook_target.valid ||
+        !hook_target.patch.installed ||
+        hook_target.original == nullptr ||
+        hook_target.knife_query_total_count == 0)
+    {
+        return;
+    }
+
+    const auto entered_count = ReadResourceHandleQueryEnteredCount(binding);
+    if (entered_count < 16)
+    {
+        return;
+    }
+
+    int published_world_entity_index = -1;
+    {
+        const auto& published_bridge = g_hook_state.published_knife_model_path_swap_bridge;
+        if (published_bridge.valid)
+        {
+            published_world_entity_index = published_bridge.world_entity_index;
+        }
+    }
+
+    int resolved_view_entity_index = -1;
+    const auto& model_path_state = g_hook_state.knife_model_path_state;
+    if (model_path_state.active &&
+        IsResolvedRuntimeEntityIndex(model_path_state.first_person_render_entity_index) &&
+        model_path_state.first_person_render_entity != nullptr)
+    {
+        resolved_view_entity_index = model_path_state.first_person_render_entity_index;
+    }
+
+    std::vector<const KnifeModelPathSwapQueryConsumerSample*> consumers;
+    consumers.reserve(hook_target.knife_query_consumers.size());
+    std::uint64_t signature = binding.provider_generation ^ 0x434F4E53554D4552ull;
+    signature ^= hook_target.knife_query_total_count + (signature << 6) + (signature >> 2);
+    signature ^= hook_target.knife_query_matched_pair_count + (signature << 6) + (signature >> 2);
+    signature ^= static_cast<std::uint64_t>(published_world_entity_index + 1) << 8;
+    signature ^= static_cast<std::uint64_t>(resolved_view_entity_index + 1) << 16;
+    for (const auto& sample : hook_target.knife_query_consumers)
+    {
+        if (!sample.active || sample.query_count == 0)
+        {
+            continue;
+        }
+
+        consumers.push_back(&sample);
+        signature ^= sample.caller_return_address + (signature << 6) + (signature >> 2);
+        signature ^= sample.arg4 + (signature << 6) + (signature >> 2);
+        signature ^= sample.result_handle + (signature << 6) + (signature >> 2);
+        signature ^= sample.query_count + (signature << 6) + (signature >> 2);
+        signature ^= sample.matched_pair_count + (signature << 6) + (signature >> 2);
+    }
+
+    if (consumers.empty() || hook_target.knife_query_summary_log_signature == signature)
+    {
+        return;
+    }
+
+    std::sort(
+        consumers.begin(),
+        consumers.end(),
+        [](const KnifeModelPathSwapQueryConsumerSample* lhs,
+           const KnifeModelPathSwapQueryConsumerSample* rhs)
+        {
+            if (lhs->query_count != rhs->query_count)
+            {
+                return lhs->query_count > rhs->query_count;
+            }
+            if (lhs->matched_pair_count != rhs->matched_pair_count)
+            {
+                return lhs->matched_pair_count > rhs->matched_pair_count;
+            }
+            return lhs->caller_return_address < rhs->caller_return_address;
+        });
+
+    int anonymous_cluster_count = 0;
+    int entity_bound_cluster_count = 0;
+    std::vector<std::wstring> consumer_text;
+    constexpr std::size_t kMaxLoggedConsumers = 6;
+    consumer_text.reserve(std::min(consumers.size(), kMaxLoggedConsumers));
+    for (std::size_t index = 0; index < consumers.size(); ++index)
+    {
+        const auto* sample = consumers[index];
+        const auto* binding_kind =
+            ClassifyKnifeModelPathSwapQueryConsumerBindingKind(
+                *sample,
+                published_world_entity_index,
+                resolved_view_entity_index);
+        if (std::wcsncmp(binding_kind, L"entity_bound", 12) == 0)
+        {
+            ++entity_bound_cluster_count;
+        }
+        else
+        {
+            ++anonymous_cluster_count;
+        }
+
+        if (index >= kMaxLoggedConsumers)
+        {
+            continue;
+        }
+
+        const auto dominant_bucket =
+            sample->world_bucket_count >= sample->view_bucket_count &&
+                sample->world_bucket_count > sample->other_bucket_count
+            ? L"world"
+            : sample->view_bucket_count > sample->world_bucket_count &&
+                    sample->view_bucket_count > sample->other_bucket_count
+                ? L"view"
+                : L"other";
+
+        std::wstringstream consumer_stream;
+        consumer_stream << L"{type=" << binding_kind
+            << L", dominant_bucket=" << dominant_bucket
+            << L", caller=" << FormatModuleOwnerWithOffset(reinterpret_cast<void*>(sample->caller_return_address))
+            << L", arg4=0x" << std::hex << std::uppercase << sample->arg4
+            << L", result=0x" << sample->result_handle
+            << std::dec << std::nouppercase
+            << L", result_shape="
+            << ResourceHandleQueryResultShapeKindText(
+                   static_cast<ResourceHandleQueryResultShapeKind>(sample->result_shape_kind))
+            << L", queries=" << sample->query_count
+            << L", matched_pair=" << sample->matched_pair_count
+            << L", redirects=" << sample->redirect_count
+            << L", valid_hits=" << sample->valid_hit_count
+            << L", entity_resolved=" << (std::wcsncmp(binding_kind, L"entity_bound", 12) == 0 ? 1 : 0)
+            << L", path=";
+        if (sample->path_preview[0] != '\0')
+        {
+            consumer_stream << NarrowToWide(std::string(sample->path_preview.data()));
+        }
+        else
+        {
+            consumer_stream << L"<unreadable>";
+        }
+        if (sample->redirect_preview[0] != '\0')
+        {
+            consumer_stream << L", redirect="
+                << NarrowToWide(std::string(sample->redirect_preview.data()));
+        }
+        if (std::wcscmp(binding_kind, L"entity_bound_world") == 0)
+        {
+            consumer_stream << L", entity=" << published_world_entity_index;
+        }
+        else if (std::wcscmp(binding_kind, L"entity_bound_view") == 0)
+        {
+            consumer_stream << L", entity=" << resolved_view_entity_index;
+        }
+        consumer_stream << L"}";
+        consumer_text.push_back(consumer_stream.str());
+    }
+
+    std::wstringstream summary_stream;
+    summary_stream << L"Query swapper knife consumer census: entered=" << entered_count
+        << L", total_knife_queries=" << hook_target.knife_query_total_count
+        << L", matched_pair_queries=" << hook_target.knife_query_matched_pair_count
+        << L", consumer_clusters=" << consumers.size()
+        << L", entity_bound_clusters=" << entity_bound_cluster_count
+        << L", anonymous_clusters=" << anonymous_cluster_count
+        << L", second_anonymous_consumer_seen=" << (anonymous_cluster_count >= 2 ? 1 : 0)
+        << L", overflow=" << hook_target.knife_query_consumer_overflow_count
+        << L", world_entity=" << published_world_entity_index
+        << L", view_entity=" << resolved_view_entity_index;
+    if (!consumer_text.empty())
+    {
+        summary_stream << L", samples=" << JoinDiagnosticSamples(consumer_text);
+    }
+    nskinzcs2::Logger::Info(summary_stream.str());
+    hook_target.knife_query_summary_log_signature = signature;
 }
 
 void MaybeLogKnifeModelPathSwapQueryBypass(
@@ -54525,14 +63411,61 @@ struct KnifeModelPathSwapLiveProbeCandidate
     KnifeModelPathSwapHandleBucket bucket = KnifeModelPathSwapHandleBucket::Unknown;
     const char* source_path = nullptr;
     const char* target_path = nullptr;
+    const wchar_t* origin = L"unknown";
 };
+
+struct KnifeModelPathSwapLiveProbeInvalidSample
+{
+    KnifeModelPathSwapHandleBucket bucket = KnifeModelPathSwapHandleBucket::Unknown;
+    const wchar_t* origin = L"unknown";
+    bool unknown_bucket = false;
+    bool missing_source = false;
+    bool missing_target = false;
+};
+
+struct KnifeModelPathSwapLiveProbeBuildSummary
+{
+    bool input_path_present = false;
+    bool input_path_compiled_variant = false;
+    int base_redirect_total = 0;
+    int base_redirect_candidates = 0;
+    int fallback_candidates = 0;
+    int target_override_candidates = 0;
+    int deduped_candidates = 0;
+    int invalid_candidates = 0;
+    int capacity_rejections = 0;
+    std::array<KnifeModelPathSwapLiveProbeInvalidSample, 6> invalid_samples {};
+    std::size_t invalid_sample_count = 0;
+};
+
+void RememberKnifeModelPathSwapLiveProbeInvalidSample(
+    KnifeModelPathSwapLiveProbeBuildSummary& summary,
+    const KnifeModelPathSwapHandleBucket bucket,
+    const char* source_path,
+    const char* target_path,
+    const wchar_t* origin) noexcept
+{
+    if (summary.invalid_sample_count >= summary.invalid_samples.size())
+    {
+        return;
+    }
+
+    auto& sample = summary.invalid_samples[summary.invalid_sample_count++];
+    sample.bucket = bucket;
+    sample.origin = origin != nullptr ? origin : L"unknown";
+    sample.unknown_bucket = bucket == KnifeModelPathSwapHandleBucket::Unknown;
+    sample.missing_source = source_path == nullptr || source_path[0] == '\0';
+    sample.missing_target = target_path == nullptr || target_path[0] == '\0';
+}
 
 bool TryAppendKnifeModelPathSwapLiveProbeCandidate(
     std::array<KnifeModelPathSwapLiveProbeCandidate, 8>& candidates,
     std::size_t& candidate_count,
     const KnifeModelPathSwapHandleBucket bucket,
     const char* source_path,
-    const char* target_path) noexcept
+    const char* target_path,
+    const wchar_t* origin,
+    KnifeModelPathSwapLiveProbeBuildSummary* summary = nullptr) noexcept
 {
     if (bucket == KnifeModelPathSwapHandleBucket::Unknown ||
         source_path == nullptr ||
@@ -54540,6 +63473,16 @@ bool TryAppendKnifeModelPathSwapLiveProbeCandidate(
         target_path == nullptr ||
         target_path[0] == '\0')
     {
+        if (summary != nullptr)
+        {
+            ++summary->invalid_candidates;
+            RememberKnifeModelPathSwapLiveProbeInvalidSample(
+                *summary,
+                bucket,
+                source_path,
+                target_path,
+                origin);
+        }
         return false;
     }
 
@@ -54550,12 +63493,20 @@ bool TryAppendKnifeModelPathSwapLiveProbeCandidate(
             std::strcmp(candidate.source_path, source_path) == 0 &&
             std::strcmp(candidate.target_path, target_path) == 0)
         {
+            if (summary != nullptr)
+            {
+                ++summary->deduped_candidates;
+            }
             return true;
         }
     }
 
     if (candidate_count >= candidates.size())
     {
+        if (summary != nullptr)
+        {
+            ++summary->capacity_rejections;
+        }
         return false;
     }
 
@@ -54563,6 +63514,24 @@ bool TryAppendKnifeModelPathSwapLiveProbeCandidate(
     candidate.bucket = bucket;
     candidate.source_path = source_path;
     candidate.target_path = target_path;
+    candidate.origin = origin != nullptr ? origin : L"unknown";
+    if (summary != nullptr)
+    {
+        if (candidate.origin != nullptr &&
+            std::wcscmp(candidate.origin, L"bridge_redirect") == 0)
+        {
+            ++summary->base_redirect_candidates;
+        }
+        else if (candidate.origin != nullptr &&
+                 std::wcscmp(candidate.origin, L"target_override") == 0)
+        {
+            ++summary->target_override_candidates;
+        }
+        else
+        {
+            ++summary->fallback_candidates;
+        }
+    }
     return true;
 }
 
@@ -54570,13 +63539,101 @@ std::size_t BuildKnifeModelPathSwapLiveProbeCandidates(
     const KnifeModelPathSwapQueryHookTarget& hook_target,
     const KnifeModelPathSwapState& swap_state,
     const char* path,
-    std::array<KnifeModelPathSwapLiveProbeCandidate, 8>& candidates) noexcept
+    std::array<KnifeModelPathSwapLiveProbeCandidate, 8>& candidates,
+    KnifeModelPathSwapLiveProbeBuildSummary* summary = nullptr) noexcept
 {
     candidates = {};
     std::size_t candidate_count = 0;
+    const auto* replay_path = ResolveKnifeModelPathSwapReplayPathCandidate(path);
 
     const auto base_redirect_count =
         std::min(hook_target.handle_redirect_count, hook_target.handle_redirects.size());
+    if (summary != nullptr)
+    {
+        *summary = {};
+        summary->input_path_present =
+            replay_path != nullptr &&
+            reinterpret_cast<std::uintptr_t>(replay_path) >= 0x10000;
+        summary->base_redirect_total = static_cast<int>(base_redirect_count);
+    }
+
+    const auto resolve_stable_source_path =
+        [&](const KnifeModelPathSwapHandleBucket bucket, const bool compiled_variant) noexcept
+        -> const char*
+        {
+            const char* stable_path = nullptr;
+            switch (bucket)
+            {
+            case KnifeModelPathSwapHandleBucket::World:
+                stable_path = hook_target.source_world_path;
+                break;
+            case KnifeModelPathSwapHandleBucket::View:
+                stable_path = hook_target.source_view_path;
+                break;
+            case KnifeModelPathSwapHandleBucket::Hud:
+            case KnifeModelPathSwapHandleBucket::Unknown:
+            default:
+                stable_path = nullptr;
+                break;
+            }
+
+            if (stable_path != nullptr && stable_path[0] != '\0')
+            {
+                if (const auto variant =
+                        TryBuildKnifeModelPathSwapPathVariant(stable_path, compiled_variant);
+                    variant.has_value())
+                {
+                    return RememberPersistentModelName(*variant);
+                }
+
+                return stable_path;
+            }
+
+            return ResolveKnifeModelPathSwapBucketPath(
+                swap_state,
+                bucket,
+                false,
+                compiled_variant);
+        };
+    const auto resolve_stable_target_path =
+        [&](const KnifeModelPathSwapHandleBucket bucket, const bool compiled_variant) noexcept
+        -> const char*
+        {
+            const char* stable_path = nullptr;
+            switch (bucket)
+            {
+            case KnifeModelPathSwapHandleBucket::World:
+                stable_path = hook_target.target_world_path;
+                break;
+            case KnifeModelPathSwapHandleBucket::View:
+                stable_path = hook_target.target_view_path;
+                break;
+            case KnifeModelPathSwapHandleBucket::Hud:
+            case KnifeModelPathSwapHandleBucket::Unknown:
+            default:
+                stable_path = nullptr;
+                break;
+            }
+
+            if (stable_path != nullptr && stable_path[0] != '\0')
+            {
+                if (const auto variant =
+                        TryBuildKnifeModelPathSwapPathVariant(stable_path, compiled_variant);
+                    variant.has_value())
+                {
+                    return RememberPersistentModelName(*variant);
+                }
+
+                return stable_path;
+            }
+
+            return ResolveKnifeModelPathSwapBucketPath(
+                swap_state,
+                bucket,
+                true,
+                compiled_variant);
+        };
+
     for (std::size_t index = 0; index < base_redirect_count; ++index)
     {
         const auto& redirect = hook_target.handle_redirects[index];
@@ -54589,34 +63646,39 @@ std::size_t BuildKnifeModelPathSwapLiveProbeCandidates(
 
         const auto compiled_variant =
             std::strstr(redirect.redirect_path, ".vmdl_c") != nullptr;
-        const auto source_path =
-            ResolveKnifeModelPathSwapSourcePathForBucket(redirect.bucket, compiled_variant);
+        const auto source_path = resolve_stable_source_path(redirect.bucket, compiled_variant);
         TryAppendKnifeModelPathSwapLiveProbeCandidate(
             candidates,
             candidate_count,
             redirect.bucket,
             source_path,
-            redirect.redirect_path);
+            redirect.redirect_path,
+            L"bridge_redirect",
+            summary);
     }
 
     const auto compiled_variant =
-        path != nullptr &&
-        reinterpret_cast<std::uintptr_t>(path) >= 0x10000 &&
-        TryContainsSubstringNoexcept(path, ".vmdl_c");
+        replay_path != nullptr &&
+        reinterpret_cast<std::uintptr_t>(replay_path) >= 0x10000 &&
+        TryContainsSubstringNoexcept(replay_path, ".vmdl_c");
+    if (summary != nullptr)
+    {
+        summary->input_path_compiled_variant = compiled_variant;
+    }
 
     const auto append_bucket_fallback =
         [&](const KnifeModelPathSwapHandleBucket bucket, const char* target_override) noexcept
         {
-            const auto source_path =
-                ResolveKnifeModelPathSwapSourcePathForBucket(bucket, compiled_variant);
-            const auto target_path =
-                ResolveKnifeModelPathSwapRedirectPathForBucket(bucket, compiled_variant);
+            const auto source_path = resolve_stable_source_path(bucket, compiled_variant);
+            const auto target_path = resolve_stable_target_path(bucket, compiled_variant);
             TryAppendKnifeModelPathSwapLiveProbeCandidate(
                 candidates,
                 candidate_count,
                 bucket,
                 source_path,
-                target_path);
+                target_path,
+                L"bucket_fallback",
+                summary);
             if (target_override != nullptr &&
                 target_override[0] != '\0')
             {
@@ -54625,7 +63687,9 @@ std::size_t BuildKnifeModelPathSwapLiveProbeCandidates(
                     candidate_count,
                     bucket,
                     source_path,
-                    target_override);
+                    target_override,
+                    L"target_override",
+                    summary);
             }
         };
 
@@ -54691,7 +63755,12 @@ bool TryLearnKnifeModelPathSwapLiveHandleRedirect(
         observed_shape_kind == ResourceHandleQueryResultShapeKind::LowScalar;
     std::array<KnifeModelPathSwapLiveProbeCandidate, 8> candidates {};
     const auto candidate_count =
-        BuildKnifeModelPathSwapLiveProbeCandidates(hook_target, swap_state, path, candidates);
+        BuildKnifeModelPathSwapLiveProbeCandidates(
+            hook_target,
+            swap_state,
+            path,
+            candidates,
+            nullptr);
     for (std::size_t index = 0; index < candidate_count; ++index)
     {
         if (hook_target.live_handle_probe_budget <= 0)
@@ -54756,6 +63825,62 @@ bool TryLearnKnifeModelPathSwapLiveHandleRedirect(
                 candidate.target_path,
                 arg3,
                 arg4);
+        const auto allow_calibrated_target_fallback =
+            observed_is_low_scalar &&
+            source_probe_invoked &&
+            source_probe_result != 0 &&
+            target_probe_invoked &&
+            target_probe_result == 0 &&
+            hook_target.calibrated_target_handle != 0 &&
+            hook_target.calibrated_target_handle != observed_result;
+        if (allow_calibrated_target_fallback)
+        {
+            const auto live_result_redirect_learned =
+                TryAppendKnifeModelPathSwapLiveResultRedirect(
+                    hook_target.learned_live_result_redirects,
+                    hook_target.learned_live_result_redirect_count,
+                    observed_result,
+                    reinterpret_cast<std::uintptr_t>(path),
+                    arg3,
+                    arg4,
+                    caller_return_address,
+                    hook_target.calibrated_target_handle,
+                    candidate.bucket,
+                    candidate.target_path);
+            if (live_result_redirect_learned)
+            {
+                TryAppendKnifeModelPathSwapHandleRedirect(
+                    hook_target.learned_handle_redirects,
+                    hook_target.learned_handle_redirect_count,
+                    source_probe_result,
+                    hook_target.calibrated_target_handle,
+                    candidate.bucket,
+                    candidate.target_path);
+
+                KnifeModelPathSwapHandleRedirect metadata_redirect {};
+                metadata_redirect.bucket = candidate.bucket;
+                metadata_redirect.redirect_path = candidate.target_path;
+                MaybeLogKnifeModelPathSwapLiveHandleProbeAttempt(
+                    hook_target,
+                    observed_result,
+                    reinterpret_cast<std::uintptr_t>(path),
+                    arg3,
+                    arg4,
+                    caller_return_address,
+                    metadata_redirect,
+                    candidate.source_path,
+                    source_probe_result,
+                    true,
+                    hook_target.calibrated_target_handle,
+                    true,
+                    L"learned_live_result_calibrated_target_fallback");
+                out_target_handle = hook_target.calibrated_target_handle;
+                out_bucket_label = KnifeModelPathSwapHandleBucketLabel(candidate.bucket);
+                out_redirect_path = candidate.target_path;
+                return true;
+            }
+        }
+
         if (!target_probe_invoked ||
             target_probe_result == 0 ||
             target_probe_result == source_probe_result ||
@@ -54867,6 +63992,20 @@ struct KnifeModelPathSwapLiveLearningSample
     std::uintptr_t caller_return_address = 0;
 };
 
+std::uint64_t ComputeKnifeModelPathSwapLiveLearningSampleSignature(
+    const KnifeModelPathSwapLiveLearningSample& sample,
+    const void* this_ptr) noexcept
+{
+    std::uint64_t signature = 0x4C49564553414D50ull;
+    signature ^= sample.observed_result + (signature << 6) + (signature >> 2);
+    signature ^= sample.arg2_value + (signature << 6) + (signature >> 2);
+    signature ^= sample.arg3 + (signature << 6) + (signature >> 2);
+    signature ^= sample.arg4 + (signature << 6) + (signature >> 2);
+    signature ^= sample.caller_return_address + (signature << 6) + (signature >> 2);
+    signature ^= reinterpret_cast<std::uintptr_t>(this_ptr) + (signature << 6) + (signature >> 2);
+    return signature;
+}
+
 bool IsKnifeModelPathSwapLiveLearningSampleReplayable(
     const KnifeModelPathSwapQueryHookTarget& hook_target,
     const KnifeModelPathSwapState& swap_state,
@@ -54900,11 +64039,25 @@ bool IsKnifeModelPathSwapLiveLearningSampleReplayable(
         observed_shape_kind != ResourceHandleQueryResultShapeKind::LowScalar;
 
     std::array<KnifeModelPathSwapLiveProbeCandidate, 8> candidates {};
+    KnifeModelPathSwapLiveProbeBuildSummary build_summary {};
     const auto candidate_count = BuildKnifeModelPathSwapLiveProbeCandidates(
         hook_target,
         swap_state,
         reinterpret_cast<const char*>(sample.arg2_value),
-        candidates);
+        candidates,
+        &build_summary);
+    struct ReplayabilityProbeAttempt
+    {
+        KnifeModelPathSwapHandleBucket bucket = KnifeModelPathSwapHandleBucket::Unknown;
+        const char* source_path = nullptr;
+        const wchar_t* origin = L"unknown";
+        bool invoked = false;
+        std::uint64_t result = 0;
+        bool rejected_by_observed_mismatch = false;
+        bool skipped_duplicate = false;
+    };
+    std::array<ReplayabilityProbeAttempt, 8> attempts {};
+    std::size_t attempt_count = 0;
     std::array<const char*, 8> tested_source_paths {};
     std::size_t tested_source_path_count = 0;
     for (std::size_t index = 0; index < candidate_count; ++index)
@@ -54928,6 +64081,14 @@ bool IsKnifeModelPathSwapLiveLearningSampleReplayable(
         }
         if (already_tested)
         {
+            if (attempt_count < attempts.size())
+            {
+                auto& attempt = attempts[attempt_count++];
+                attempt.bucket = candidate.bucket;
+                attempt.source_path = candidate.source_path;
+                attempt.origin = candidate.origin;
+                attempt.skipped_duplicate = true;
+            }
             continue;
         }
 
@@ -54944,6 +64105,15 @@ bool IsKnifeModelPathSwapLiveLearningSampleReplayable(
             candidate.source_path,
             sample.arg3,
             sample.arg4);
+        if (attempt_count < attempts.size())
+        {
+            auto& attempt = attempts[attempt_count++];
+            attempt.bucket = candidate.bucket;
+            attempt.source_path = candidate.source_path;
+            attempt.origin = candidate.origin;
+            attempt.invoked = source_probe_invoked;
+            attempt.result = source_probe_result;
+        }
         if (!source_probe_invoked || source_probe_result == 0)
         {
             continue;
@@ -54952,10 +64122,156 @@ bool IsKnifeModelPathSwapLiveLearningSampleReplayable(
         if (require_source_probe_observed_match &&
             source_probe_result != sample.observed_result)
         {
+            if (attempt_count != 0)
+            {
+                attempts[attempt_count - 1].rejected_by_observed_mismatch = true;
+            }
             continue;
         }
 
         return true;
+    }
+
+    const auto diagnostic_signature =
+        ComputeKnifeModelPathSwapLiveLearningSampleSignature(sample, this_ptr) ^
+        static_cast<std::uint64_t>(hook_target.slot) ^
+        (static_cast<std::uint64_t>(candidate_count) << 32);
+    static std::uint64_t s_last_replayability_diagnostic_signature = 0;
+    if (s_last_replayability_diagnostic_signature != diagnostic_signature)
+    {
+        s_last_replayability_diagnostic_signature = diagnostic_signature;
+
+        std::wstringstream stream;
+        auto join_attempt_sources =
+            [&](const bool dedupe_only, const bool zero_only)
+            {
+                std::wstringstream summary_stream;
+                bool any = false;
+                for (std::size_t attempt_index = 0; attempt_index < attempt_count; ++attempt_index)
+                {
+                    const auto& attempt = attempts[attempt_index];
+                    const auto is_dedupe = attempt.skipped_duplicate;
+                    const auto is_zero =
+                        !attempt.skipped_duplicate &&
+                        attempt.invoked &&
+                        attempt.result == 0 &&
+                        !attempt.rejected_by_observed_mismatch;
+                    if ((dedupe_only && !is_dedupe) ||
+                        (zero_only && !is_zero) ||
+                        (!dedupe_only && !zero_only))
+                    {
+                        continue;
+                    }
+
+                    if (any)
+                    {
+                        summary_stream << L" | ";
+                    }
+                    any = true;
+                    summary_stream << NarrowToWide(
+                        std::string(KnifeModelPathSwapHandleBucketLabel(attempt.bucket)))
+                        << L":"
+                        << NarrowToWide(
+                            attempt.source_path != nullptr ? std::string(attempt.source_path) : std::string())
+                        << L"@"
+                        << (attempt.origin != nullptr ? attempt.origin : L"unknown");
+                }
+
+                return any ? summary_stream.str() : std::wstring(L"<none>");
+            };
+        auto join_invalid_samples =
+            [&]()
+            {
+                std::wstringstream summary_stream;
+                bool any = false;
+                for (std::size_t sample_index = 0;
+                     sample_index < build_summary.invalid_sample_count;
+                     ++sample_index)
+                {
+                    const auto& sample = build_summary.invalid_samples[sample_index];
+                    if (any)
+                    {
+                        summary_stream << L" | ";
+                    }
+                    any = true;
+                    summary_stream << (sample.origin != nullptr ? sample.origin : L"unknown")
+                        << L":"
+                        << NarrowToWide(
+                            std::string(KnifeModelPathSwapHandleBucketLabel(sample.bucket)))
+                        << L":";
+                    bool appended_reason = false;
+                    if (sample.unknown_bucket)
+                    {
+                        summary_stream << L"unknown_bucket";
+                        appended_reason = true;
+                    }
+                    if (sample.missing_source)
+                    {
+                        if (appended_reason)
+                        {
+                            summary_stream << L"+";
+                        }
+                        summary_stream << L"missing_source";
+                        appended_reason = true;
+                    }
+                    if (sample.missing_target)
+                    {
+                        if (appended_reason)
+                        {
+                            summary_stream << L"+";
+                        }
+                        summary_stream << L"missing_target";
+                        appended_reason = true;
+                    }
+                    if (!appended_reason)
+                    {
+                        summary_stream << L"invalid";
+                    }
+                }
+
+                return any ? summary_stream.str() : std::wstring(L"<none>");
+            };
+
+        stream << L"Query swapper replayability diagnostic: iface="
+            << ResourceHandleQueryInterfaceKindText(hook_target.interface_kind)
+            << L", slot=" << hook_target.slot
+            << L", observed=0x" << std::hex << std::uppercase << sample.observed_result
+            << std::dec << std::nouppercase
+            << L", caller="
+            << FormatModuleOwnerWithOffset(reinterpret_cast<void*>(sample.caller_return_address))
+            << L", arg2=" << FormatPointer(reinterpret_cast<void*>(sample.arg2_value))
+            << L", arg3=" << FormatPointer(reinterpret_cast<void*>(sample.arg3))
+            << L", arg4=" << FormatPointer(reinterpret_cast<void*>(sample.arg4))
+            << L", require_match=" << (require_source_probe_observed_match ? 1 : 0)
+            << L", candidate_count=" << candidate_count
+            << L", tested_count=" << tested_source_path_count;
+        for (std::size_t attempt_index = 0; attempt_index < attempt_count; ++attempt_index)
+        {
+            const auto& attempt = attempts[attempt_index];
+            stream << L" | c" << attempt_index
+                << L"[" << NarrowToWide(std::string(KnifeModelPathSwapHandleBucketLabel(attempt.bucket))) << L"]="
+                << NarrowToWide(attempt.source_path != nullptr ? std::string(attempt.source_path) : std::string())
+                << L"@" << (attempt.origin != nullptr ? attempt.origin : L"unknown")
+                << L"{dup=" << (attempt.skipped_duplicate ? 1 : 0)
+                << L",invoked=" << (attempt.invoked ? 1 : 0)
+                << L",result=0x" << std::hex << std::uppercase << attempt.result
+                << std::dec << std::nouppercase
+                << L",shape_mismatch=" << (attempt.rejected_by_observed_mismatch ? 1 : 0)
+                << L"}";
+        }
+        stream << L", zero_sources=" << join_attempt_sources(false, true)
+            << L", deduped_sources=" << join_attempt_sources(true, false)
+            << L", candidate_build={path_present=" << (build_summary.input_path_present ? 1 : 0)
+            << L", compiled_variant=" << (build_summary.input_path_compiled_variant ? 1 : 0)
+            << L", base_redirect_total=" << build_summary.base_redirect_total
+            << L", base_redirect_candidates=" << build_summary.base_redirect_candidates
+            << L", fallback_candidates=" << build_summary.fallback_candidates
+            << L", target_override_candidates=" << build_summary.target_override_candidates
+            << L", deduped_candidates=" << build_summary.deduped_candidates
+            << L", invalid_candidates=" << build_summary.invalid_candidates
+            << L", capacity_rejections=" << build_summary.capacity_rejections
+            << L"}, invalid_samples=" << join_invalid_samples();
+        nskinzcs2::Logger::Info(stream.str());
     }
 
     return false;
@@ -54966,10 +64282,15 @@ bool TrySelectKnifeModelPathSwapLiveLearningSample(
     const KnifeModelPathSwapState& swap_state,
     void* this_ptr,
     KnifeModelPathSwapLiveLearningSample& out_sample,
-    bool& out_saw_live_sample) noexcept
+    bool& out_saw_live_sample,
+    KnifeModelPathSwapLiveLearningSample* out_latest_live_sample) noexcept
 {
     out_sample = {};
     out_saw_live_sample = false;
+    if (out_latest_live_sample != nullptr)
+    {
+        *out_latest_live_sample = {};
+    }
 
     const auto hook_index =
         ResourceHandleQueryHookIndex(ResourceHandleQueryInterfaceKind::ResourceSystem);
@@ -54982,6 +64303,18 @@ bool TrySelectKnifeModelPathSwapLiveLearningSample(
     const auto sample_count = std::min(
         probe.result_sample_count.load(std::memory_order_acquire),
         static_cast<std::uint32_t>(probe.result_sample_handles.size()));
+    bool latest_live_sample_recorded = false;
+    const auto record_latest_live_sample =
+        [&](const KnifeModelPathSwapLiveLearningSample& candidate_sample) noexcept
+        {
+            if (latest_live_sample_recorded || out_latest_live_sample == nullptr)
+            {
+                return;
+            }
+
+            *out_latest_live_sample = candidate_sample;
+            latest_live_sample_recorded = true;
+        };
     const auto try_pick =
         [&](const bool low_scalar_only) noexcept
         {
@@ -55015,6 +64348,7 @@ bool TrySelectKnifeModelPathSwapLiveLearningSample(
                 candidate_sample.caller_return_address =
                     probe.result_sample_caller_return_addresses[index];
                 out_saw_live_sample = true;
+                record_latest_live_sample(candidate_sample);
                 if (!IsKnifeModelPathSwapLiveLearningSampleReplayable(
                         hook_target,
                         swap_state,
@@ -55051,6 +64385,7 @@ bool TrySelectKnifeModelPathSwapLiveLearningSample(
     candidate_sample.arg4 = probe.miss_other_result_arg4;
     candidate_sample.caller_return_address = probe.miss_other_result_caller_return_address;
     out_saw_live_sample = true;
+    record_latest_live_sample(candidate_sample);
     if (!IsKnifeModelPathSwapLiveLearningSampleReplayable(
             hook_target,
             swap_state,
@@ -55126,6 +64461,11 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
 
 void TryPrimeKnifeModelPathSwapLiveResultRedirectAtSafePoint() noexcept
 {
+    if (IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        return;
+    }
+
     std::unique_lock lock(g_hook_state.resource_handle_query_mutex);
 
     auto& binding = g_hook_state.resource_system_query;
@@ -55144,6 +64484,16 @@ void TryPrimeKnifeModelPathSwapLiveResultRedirectAtSafePoint() noexcept
         hook_target.monitor_only ||
         hook_target.interface_kind != ResourceHandleQueryInterfaceKind::ResourceSystem)
     {
+        return;
+    }
+
+    const auto bridge_established =
+        HasEstablishedKnifeModelPathSwapResourceBridge(
+            hook_target,
+            g_hook_state.knife_model_path_swap_state);
+    if (bridge_established && hook_target.valid_resource_hit_count > 0)
+    {
+        hook_target.last_safe_point_unreplayable_signature = 0;
         return;
     }
 
@@ -55191,20 +64541,148 @@ void TryPrimeKnifeModelPathSwapLiveResultRedirectAtSafePoint() noexcept
 
     KnifeModelPathSwapLiveLearningSample sample {};
     bool saw_live_sample = false;
-    if (!TrySelectKnifeModelPathSwapLiveLearningSample(
-            hook_target,
-            g_hook_state.knife_model_path_swap_state,
-            this_ptr,
-            sample,
-            saw_live_sample))
+    KnifeModelPathSwapLiveLearningSample latest_live_sample {};
+    bool have_replayable_sample = TrySelectKnifeModelPathSwapLiveLearningSample(
+        hook_target,
+        g_hook_state.knife_model_path_swap_state,
+        this_ptr,
+        sample,
+        saw_live_sample,
+        &latest_live_sample);
+    if (bridge_established && saw_live_sample)
     {
+        const auto sample_already_covered =
+            FindKnifeModelPathSwapLiveResultRedirect(
+                hook_target,
+                latest_live_sample.observed_result,
+                latest_live_sample.arg2_value,
+                latest_live_sample.arg3,
+                latest_live_sample.arg4,
+                latest_live_sample.caller_return_address) != nullptr ||
+            FindKnifeModelPathSwapHandleRedirect(
+                hook_target,
+                latest_live_sample.observed_result) != nullptr;
+        if (sample_already_covered)
+        {
+            hook_target.last_safe_point_unreplayable_signature = 0;
+            return;
+        }
+    }
+
+    if (!have_replayable_sample)
+    {
+        if (saw_live_sample &&
+            FindKnifeModelPathSwapLiveResultRedirect(
+                hook_target,
+                latest_live_sample.observed_result,
+                latest_live_sample.arg2_value,
+                latest_live_sample.arg3,
+                latest_live_sample.arg4,
+                latest_live_sample.caller_return_address) != nullptr)
+        {
+            hook_target.last_safe_point_unreplayable_signature = 0;
+            return;
+        }
+
+        const auto latest_live_signature =
+            saw_live_sample
+                ? ComputeKnifeModelPathSwapLiveLearningSampleSignature(
+                      latest_live_sample,
+                      this_ptr)
+                : 0;
+        const auto should_attempt_same_signature_replay =
+            saw_live_sample &&
+            !demo_playing &&
+            latest_live_signature != 0 &&
+            hook_target.live_handle_probe_budget == kKnifeModelPathSwapLiveHandleProbeBudget &&
+            hook_target.last_safe_point_unreplayable_signature != latest_live_signature &&
+            latest_live_sample.arg2_value >= 0x10000;
+        if (should_attempt_same_signature_replay)
+        {
+            const auto replay_path = ResolveKnifeModelPathSwapReplayPathCandidate(
+                reinterpret_cast<const char*>(latest_live_sample.arg2_value));
+            const auto replay_arg3 = latest_live_sample.arg3;
+            const auto replay_arg4 = latest_live_sample.arg4;
+            const auto replay_caller_return_address = latest_live_sample.caller_return_address;
+            const auto replay_expected_observed = latest_live_sample.observed_result;
+            lock.unlock();
+
+            std::uint64_t warm_replay_result = 0;
+            ScopedKnifeModelPathSwapDemoResultSampling capture_demo_result_sampling {true};
+            const auto warm_replay_invoked = SafeInvokeFunctionPointer(
+                reinterpret_cast<void*>(&HandleKnifeModelPathSwapQueryCall),
+                warm_replay_result,
+                hook_index,
+                this_ptr,
+                replay_path,
+                replay_arg3,
+                replay_arg4,
+                replay_caller_return_address);
+
+            lock.lock();
+
+            std::wstringstream warm_replay_stream;
+            warm_replay_stream << L"Query swapper safe-point warm replay: invoked="
+                << (warm_replay_invoked ? 1 : 0)
+                << L", returned=0x" << std::hex << std::uppercase << warm_replay_result
+                << L", expected_observed=0x" << replay_expected_observed
+                << std::dec << std::nouppercase
+                << L", matched=" << ((warm_replay_invoked && warm_replay_result == replay_expected_observed) ? 1 : 0)
+                << L", caller="
+                << FormatModuleOwnerWithOffset(reinterpret_cast<void*>(replay_caller_return_address))
+                << L", arg2=" << FormatPointer(reinterpret_cast<void*>(latest_live_sample.arg2_value))
+                << L", arg3=" << FormatPointer(reinterpret_cast<void*>(replay_arg3))
+                << L", arg4=" << FormatPointer(reinterpret_cast<void*>(replay_arg4));
+            nskinzcs2::Logger::Info(warm_replay_stream.str());
+
+            KnifeModelPathSwapLiveLearningSample retried_sample {};
+            bool retried_saw_live_sample = false;
+            KnifeModelPathSwapLiveLearningSample retried_latest_live_sample {};
+            have_replayable_sample = TrySelectKnifeModelPathSwapLiveLearningSample(
+                hook_target,
+                g_hook_state.knife_model_path_swap_state,
+                this_ptr,
+                retried_sample,
+                retried_saw_live_sample,
+                &retried_latest_live_sample);
+            if (retried_saw_live_sample)
+            {
+                saw_live_sample = true;
+                latest_live_sample = retried_latest_live_sample;
+            }
+            if (have_replayable_sample)
+            {
+                sample = retried_sample;
+            }
+        }
+    }
+
+    if (!have_replayable_sample)
+    {
+        const auto latest_live_signature =
+            saw_live_sample
+                ? ComputeKnifeModelPathSwapLiveLearningSampleSignature(
+                      latest_live_sample,
+                      this_ptr)
+                : 0;
+        if (saw_live_sample &&
+            latest_live_signature != 0 &&
+            hook_target.live_handle_probe_budget == kKnifeModelPathSwapLiveHandleProbeBudget &&
+            hook_target.last_safe_point_unreplayable_signature == latest_live_signature)
+        {
+            return;
+        }
+
+        hook_target.last_safe_point_unreplayable_signature = latest_live_signature;
         LogKnifeModelPathSwapSafePointLiveLearningDiagnostic(
             saw_live_sample ? L"no_replayable_live_sample" : L"no_live_sample",
             hook_target,
-            nullptr,
+            saw_live_sample ? &latest_live_sample : nullptr,
             this_ptr);
         return;
     }
+
+    hook_target.last_safe_point_unreplayable_signature = 0;
 
     if (FindKnifeModelPathSwapLiveResultRedirect(
             hook_target,
@@ -55242,7 +64720,8 @@ void TryPrimeKnifeModelPathSwapLiveResultRedirectAtSafePoint() noexcept
             hook_target,
             g_hook_state.knife_model_path_swap_state,
             this_ptr,
-            reinterpret_cast<const char*>(sample.arg2_value),
+            ResolveKnifeModelPathSwapReplayPathCandidate(
+                reinterpret_cast<const char*>(sample.arg2_value)),
             sample.arg3,
             sample.arg4,
             sample.observed_result,
@@ -55271,45 +64750,49 @@ void TryPrimeKnifeModelPathSwapLiveResultRedirectAtSafePoint() noexcept
             << L", budget_left=" << hook_target.live_handle_probe_budget;
         nskinzcs2::Logger::Info(stream.str());
 
-        const auto replay_path = reinterpret_cast<const char*>(sample.arg2_value);
-        const auto replay_arg3 = sample.arg3;
-        const auto replay_arg4 = sample.arg4;
-        const auto replay_caller_return_address = sample.caller_return_address;
-        const auto replay_expected_target = learned_target_handle;
-        const auto replay_bucket_label = learned_bucket_label;
-        const auto replay_redirect_path = learned_redirect_path;
-        lock.unlock();
+        if (!demo_playing)
+        {
+            const auto replay_path = ResolveKnifeModelPathSwapReplayPathCandidate(
+                reinterpret_cast<const char*>(sample.arg2_value));
+            const auto replay_arg3 = sample.arg3;
+            const auto replay_arg4 = sample.arg4;
+            const auto replay_caller_return_address = sample.caller_return_address;
+            const auto replay_expected_target = learned_target_handle;
+            const auto replay_bucket_label = learned_bucket_label;
+            const auto replay_redirect_path = learned_redirect_path;
+            lock.unlock();
 
-        std::uint64_t replay_result = 0;
-        const auto replay_invoked = SafeInvokeFunctionPointer(
-            reinterpret_cast<void*>(&HandleKnifeModelPathSwapQueryCall),
-            replay_result,
-            hook_index,
-            this_ptr,
-            replay_path,
-            replay_arg3,
-            replay_arg4,
-            replay_caller_return_address);
+            std::uint64_t replay_result = 0;
+            const auto replay_invoked = SafeInvokeFunctionPointer(
+                reinterpret_cast<void*>(&HandleKnifeModelPathSwapQueryCall),
+                replay_result,
+                hook_index,
+                this_ptr,
+                replay_path,
+                replay_arg3,
+                replay_arg4,
+                replay_caller_return_address);
 
-        std::wstringstream replay_stream;
-        replay_stream << L"Query swapper safe-point replay: invoked="
-            << (replay_invoked ? 1 : 0)
-            << L", returned=0x" << std::hex << std::uppercase << replay_result
-            << L", expected=0x" << replay_expected_target
-            << std::dec << std::nouppercase
-            << L", matched=" << ((replay_invoked && replay_result == replay_expected_target) ? 1 : 0)
-            << L", bucket="
-            << NarrowToWide(
-                   replay_bucket_label != nullptr ? std::string(replay_bucket_label) : std::string())
-            << L", redirect_path="
-            << NarrowToWide(
-                   replay_redirect_path != nullptr ? std::string(replay_redirect_path) : std::string())
-            << L", caller="
-            << FormatModuleOwnerWithOffset(reinterpret_cast<void*>(replay_caller_return_address))
-            << L", arg2=" << FormatPointer(reinterpret_cast<void*>(sample.arg2_value))
-            << L", arg3=" << FormatPointer(reinterpret_cast<void*>(replay_arg3))
-            << L", arg4=" << FormatPointer(reinterpret_cast<void*>(replay_arg4));
-        nskinzcs2::Logger::Info(replay_stream.str());
+            std::wstringstream replay_stream;
+            replay_stream << L"Query swapper safe-point replay: invoked="
+                << (replay_invoked ? 1 : 0)
+                << L", returned=0x" << std::hex << std::uppercase << replay_result
+                << L", expected=0x" << replay_expected_target
+                << std::dec << std::nouppercase
+                << L", matched=" << ((replay_invoked && replay_result == replay_expected_target) ? 1 : 0)
+                << L", bucket="
+                << NarrowToWide(
+                       replay_bucket_label != nullptr ? std::string(replay_bucket_label) : std::string())
+                << L", redirect_path="
+                << NarrowToWide(
+                       replay_redirect_path != nullptr ? std::string(replay_redirect_path) : std::string())
+                << L", caller="
+                << FormatModuleOwnerWithOffset(reinterpret_cast<void*>(replay_caller_return_address))
+                << L", arg2=" << FormatPointer(reinterpret_cast<void*>(sample.arg2_value))
+                << L", arg3=" << FormatPointer(reinterpret_cast<void*>(replay_arg3))
+                << L", arg4=" << FormatPointer(reinterpret_cast<void*>(replay_arg4));
+            nskinzcs2::Logger::Info(replay_stream.str());
+        }
         return;
     }
 
@@ -55344,6 +64827,11 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
         return original(this_ptr, path, arg3, arg4);
     }
 
+    if (IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        return original(this_ptr, path, arg3, arg4);
+    }
+
     struct ReentryGuard
     {
         ~ReentryGuard()
@@ -55356,18 +64844,32 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
     ReentryGuard reentry_guard {};
 
     const bool demo_playing = g_hook_state.demo_playing.load(std::memory_order_acquire);
+    const bool should_sample_live_result =
+        !demo_playing || g_knife_model_path_swap_force_demo_result_sampling;
     NoteResourceHandleQueryLiveEntry(hook_index);
     if (!demo_playing)
     {
         TryProbeResourceHandleQueryCarrier(hook_index, this_ptr, path, arg3, arg4);
     }
 
+    std::unique_lock<std::mutex> query_lock(g_hook_state.resource_handle_query_mutex);
     auto& hook_state = g_hook_state.knife_model_path_swap_query_hooks[hook_index];
     auto& swap_state = g_hook_state.knife_model_path_swap_state;
     if (hook_state.monitor_only)
     {
         const auto result = original(this_ptr, path, arg3, arg4);
-        if (!demo_playing)
+        NoteKnifeModelPathSwapQueryConsumerSample(
+            hook_state,
+            path,
+            nullptr,
+            caller_return_address,
+            arg4,
+            result,
+            KnifeModelPathSwapHandleBucket::Unknown,
+            false,
+            false,
+            false);
+        if (should_sample_live_result)
         {
             TrySampleResourceHandleQueryResult(
                 hook_index,
@@ -55400,7 +64902,18 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
     if (!swap_state.enabled)
     {
         const auto result = original(this_ptr, path, arg3, arg4);
-        if (!demo_playing)
+        NoteKnifeModelPathSwapQueryConsumerSample(
+            hook_state,
+            path,
+            nullptr,
+            caller_return_address,
+            arg4,
+            result,
+            KnifeModelPathSwapHandleBucket::Unknown,
+            false,
+            false,
+            false);
+        if (should_sample_live_result)
         {
             TrySampleResourceHandleQueryResult(
                 hook_index,
@@ -55432,32 +64945,55 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
 
     const char* redirect_path = nullptr;
     const char* bucket_label = nullptr;
+    const wchar_t* matched_input_label = L"none";
     const auto apply_redirect =
-        TryResolveKnifeModelPathSwapRedirectPath(path, swap_state, redirect_path, bucket_label) &&
+        TryResolveKnifeModelPathSwapRedirectPath(
+            path,
+            arg3,
+            arg4,
+            swap_state,
+            redirect_path,
+            bucket_label,
+            matched_input_label) &&
         redirect_path != nullptr &&
         redirect_path[0] != '\0';
 
     if (apply_redirect)
     {
-        NoteKnifeModelPathSwapBucketHit(
+        const wchar_t* path_hit_kind = L"path_redirect";
+        if (matched_input_label != nullptr)
+        {
+            if (std::wcscmp(matched_input_label, L"arg3") == 0)
+            {
+                path_hit_kind = L"path_redirect_arg3";
+            }
+            else if (std::wcscmp(matched_input_label, L"arg4") == 0)
+            {
+                path_hit_kind = L"path_redirect_arg4";
+            }
+            else if (std::wcscmp(matched_input_label, L"arg3*") == 0)
+            {
+                path_hit_kind = L"path_redirect_arg3_indirect";
+            }
+            else if (std::wcscmp(matched_input_label, L"arg4*") == 0)
+            {
+                path_hit_kind = L"path_redirect_arg4_indirect";
+            }
+        }
+        NoteKnifeModelPathSwapQueryRedirectHit(
+            hook_state,
             swap_state,
-            bucket_label != nullptr && strcmp(bucket_label, "world") == 0
-                ? KnifeModelPathSwapHandleBucket::World
-                : (bucket_label != nullptr && strcmp(bucket_label, "hud") == 0
-                    ? KnifeModelPathSwapHandleBucket::Hud
-                    : KnifeModelPathSwapHandleBucket::View));
-        swap_state.last_hit_tick = GetTickCount64();
-        swap_state.last_reason = kKnifeModelPathSwapReasonNone;
-        swap_state.degraded = false;
-        ++hook_state.hit_count;
-        ++hook_state.redirect_count;
-        hook_state.last_match_bucket = bucket_label;
-        hook_state.last_redirect_path = redirect_path;
+            ResolveKnifeModelPathSwapHandleBucketFromLabel(bucket_label),
+            redirect_path,
+            path_hit_kind,
+            true,
+            caller_return_address,
+            arg4);
     }
 
     const auto result =
         original(this_ptr, apply_redirect ? redirect_path : path, arg3, arg4);
-    if (!demo_playing)
+    if (should_sample_live_result)
     {
         TrySampleResourceHandleQueryResult(
             hook_index,
@@ -55484,22 +65020,26 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
                 live_result_bucket_label,
                 live_result_redirect_path))
         {
-            NoteKnifeModelPathSwapBucketHit(
+            NoteKnifeModelPathSwapQueryConsumerSample(
+                hook_state,
+                path,
+                live_result_redirect_path,
+                caller_return_address,
+                arg4,
+                live_result_target_handle,
+                ResolveKnifeModelPathSwapHandleBucketFromLabel(live_result_bucket_label),
+                live_result_bucket_label != nullptr,
+                true,
+                false);
+            NoteKnifeModelPathSwapQueryRedirectHit(
+                hook_state,
                 swap_state,
-                live_result_bucket_label != nullptr &&
-                        std::strcmp(live_result_bucket_label, "world") == 0
-                    ? KnifeModelPathSwapHandleBucket::World
-                    : (live_result_bucket_label != nullptr &&
-                            std::strcmp(live_result_bucket_label, "hud") == 0
-                        ? KnifeModelPathSwapHandleBucket::Hud
-                        : KnifeModelPathSwapHandleBucket::View));
-            swap_state.last_hit_tick = GetTickCount64();
-            swap_state.last_reason = kKnifeModelPathSwapReasonNone;
-            swap_state.degraded = false;
-            ++hook_state.hit_count;
-            ++hook_state.redirect_count;
-            hook_state.last_match_bucket = live_result_bucket_label;
-            hook_state.last_redirect_path = live_result_redirect_path;
+                ResolveKnifeModelPathSwapHandleBucketFromLabel(live_result_bucket_label),
+                live_result_redirect_path,
+                L"live_result_redirect",
+                true,
+                caller_return_address,
+                arg4);
             return live_result_target_handle;
         }
     }
@@ -55519,22 +65059,26 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
                 calibrated_bucket_label,
                 calibrated_redirect_path))
         {
-            NoteKnifeModelPathSwapBucketHit(
+            NoteKnifeModelPathSwapQueryConsumerSample(
+                hook_state,
+                path,
+                calibrated_redirect_path,
+                caller_return_address,
+                arg4,
+                calibrated_target_handle,
+                ResolveKnifeModelPathSwapHandleBucketFromLabel(calibrated_bucket_label),
+                calibrated_bucket_label != nullptr,
+                true,
+                false);
+            NoteKnifeModelPathSwapQueryRedirectHit(
+                hook_state,
                 swap_state,
-                calibrated_bucket_label != nullptr &&
-                        std::strcmp(calibrated_bucket_label, "world") == 0
-                    ? KnifeModelPathSwapHandleBucket::World
-                    : (calibrated_bucket_label != nullptr &&
-                            std::strcmp(calibrated_bucket_label, "hud") == 0
-                        ? KnifeModelPathSwapHandleBucket::Hud
-                        : KnifeModelPathSwapHandleBucket::View));
-            swap_state.last_hit_tick = GetTickCount64();
-            swap_state.last_reason = kKnifeModelPathSwapReasonNone;
-            swap_state.degraded = false;
-            ++hook_state.hit_count;
-            ++hook_state.redirect_count;
-            hook_state.last_match_bucket = calibrated_bucket_label;
-            hook_state.last_redirect_path = calibrated_redirect_path;
+                ResolveKnifeModelPathSwapHandleBucketFromLabel(calibrated_bucket_label),
+                calibrated_redirect_path,
+                L"calibrated_handle_redirect",
+                false,
+                caller_return_address,
+                arg4);
             return calibrated_target_handle;
         }
     }
@@ -55558,21 +65102,26 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
                 learned_bucket_label,
                 learned_redirect_path))
         {
-            NoteKnifeModelPathSwapBucketHit(
+            NoteKnifeModelPathSwapQueryConsumerSample(
+                hook_state,
+                path,
+                learned_redirect_path,
+                caller_return_address,
+                arg4,
+                learned_target_handle,
+                ResolveKnifeModelPathSwapHandleBucketFromLabel(learned_bucket_label),
+                learned_bucket_label != nullptr,
+                true,
+                false);
+            NoteKnifeModelPathSwapQueryRedirectHit(
+                hook_state,
                 swap_state,
-                learned_bucket_label != nullptr && std::strcmp(learned_bucket_label, "world") == 0
-                    ? KnifeModelPathSwapHandleBucket::World
-                    : (learned_bucket_label != nullptr &&
-                            std::strcmp(learned_bucket_label, "hud") == 0
-                        ? KnifeModelPathSwapHandleBucket::Hud
-                        : KnifeModelPathSwapHandleBucket::View));
-            swap_state.last_hit_tick = GetTickCount64();
-            swap_state.last_reason = kKnifeModelPathSwapReasonNone;
-            swap_state.degraded = false;
-            ++hook_state.hit_count;
-            ++hook_state.redirect_count;
-            hook_state.last_match_bucket = learned_bucket_label;
-            hook_state.last_redirect_path = learned_redirect_path;
+                ResolveKnifeModelPathSwapHandleBucketFromLabel(learned_bucket_label),
+                learned_redirect_path,
+                L"learned_handle_redirect",
+                false,
+                caller_return_address,
+                arg4);
             return learned_target_handle;
         }
     }
@@ -55582,14 +65131,28 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
         swap_state.last_hit_tick = GetTickCount64();
         swap_state.last_reason = kKnifeModelPathSwapReasonNone;
         swap_state.degraded = false;
+        NoteKnifeModelPathSwapQueryConsumerSample(
+            hook_state,
+            path,
+            handle_redirect->redirect_path,
+            caller_return_address,
+            arg4,
+            handle_redirect->target_handle,
+            handle_redirect->bucket,
+            true,
+            true,
+            false);
         if (!apply_redirect)
         {
-            NoteKnifeModelPathSwapBucketHit(swap_state, handle_redirect->bucket);
-            ++hook_state.hit_count;
-            ++hook_state.redirect_count;
-            hook_state.last_match_bucket =
-                KnifeModelPathSwapHandleBucketLabel(handle_redirect->bucket);
-            hook_state.last_redirect_path = handle_redirect->redirect_path;
+            NoteKnifeModelPathSwapQueryRedirectHit(
+                hook_state,
+                swap_state,
+                handle_redirect->bucket,
+                handle_redirect->redirect_path,
+                L"bridge_handle_redirect",
+                false,
+                caller_return_address,
+                arg4);
         }
         return handle_redirect->target_handle;
     }
@@ -55602,6 +65165,17 @@ std::uint64_t HandleKnifeModelPathSwapQueryCall(
         arg4,
         caller_return_address,
         result);
+    NoteKnifeModelPathSwapQueryConsumerSample(
+        hook_state,
+        apply_redirect ? redirect_path : path,
+        apply_redirect ? redirect_path : nullptr,
+        caller_return_address,
+        arg4,
+        result,
+        ResolveKnifeModelPathSwapHandleBucketFromLabel(bucket_label),
+        bucket_label != nullptr,
+        apply_redirect,
+        apply_redirect);
     MaybeLogKnifeModelPathSwapQueryMiss(
         hook_state,
         swap_state,
@@ -55733,6 +65307,16 @@ bool TryInstallKnifeModelPathSwapQueryHooks(
             reinterpret_cast<KnifeModelPathSwapQueryHookTarget::Fn>(hook_target.patch.original);
         hook_target.calibrated_source_handle = binding->last_source_handle;
         hook_target.calibrated_target_handle = binding->last_target_handle;
+        hook_target.source_world_path =
+            ResolveKnifeModelPathSwapEffectiveSourcePath(
+                g_hook_state.knife_model_path_swap_state,
+                KnifeModelPathSwapHandleBucket::World);
+        hook_target.source_view_path =
+            ResolveKnifeModelPathSwapEffectiveSourcePath(
+                g_hook_state.knife_model_path_swap_state,
+                KnifeModelPathSwapHandleBucket::View);
+        hook_target.target_world_path = g_hook_state.knife_model_path_swap_state.target_world_path;
+        hook_target.target_view_path = g_hook_state.knife_model_path_swap_state.target_view_path;
         hook_target.handle_redirects = binding->handle_redirects;
         hook_target.handle_redirect_count = binding->handle_redirect_count;
         ResetKnifeModelPathSwapQueryHookLearnedRedirects(
@@ -55939,6 +65523,40 @@ void AdvanceKnifeModelPathSwapQueryMainChain(
     const bool frame_callbacks_active,
     nskinzcs2::runtime::Status& status)
 {
+    if (!ShouldRunKnifeModelPathSwapQueryRuntime())
+    {
+        ClearKnifeModelPathSwapState(true);
+        ClearKnifeModelPathSwapQueryHooks();
+        g_hook_state.resource_handle_query_earliest_safe_tick.store(0, std::memory_order_release);
+
+        {
+            std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+
+            auto reset_binding_for_inactive_runtime =
+                [](ResourceHandleQueryBinding& binding) noexcept
+                {
+                    binding.state = ResourceHandleQueryState::Inactive;
+                    if (binding.interface_instance == nullptr)
+                    {
+                        binding.last_failure_reason = kResourceHandleQueryReasonUnavailable;
+                    }
+                    else
+                    {
+                        binding.last_failure_reason = nullptr;
+                        binding.last_failure_detail.clear();
+                    }
+                };
+
+            reset_binding_for_inactive_runtime(g_hook_state.resource_handle_utils_query);
+            reset_binding_for_inactive_runtime(g_hook_state.resource_system_query);
+        }
+
+        status.diagnostics.push_back(BuildResourceHandleQueryRuntimeText());
+        return;
+    }
+
+    const auto demo_seek_safety_window_active =
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive();
     const auto now = GetTickCount64();
     const auto frame_callback_count = g_hook_state.frame_callback_count.load();
     const auto base_callbacks_ready =
@@ -55994,6 +65612,37 @@ void AdvanceKnifeModelPathSwapQueryMainChain(
     g_hook_state.resource_handle_query_safe_point_gate.store(
         static_cast<std::uint32_t>(gate),
         std::memory_order_release);
+
+    if (demo_seek_safety_window_active)
+    {
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        std::array<ResourceHandleQueryBinding*, 2> bindings = {{
+            &g_hook_state.resource_handle_utils_query,
+            &g_hook_state.resource_system_query,
+        }};
+
+        for (auto* binding : bindings)
+        {
+            if (binding == nullptr)
+            {
+                continue;
+            }
+
+            if (binding->interface_instance == nullptr)
+            {
+                binding->state = ResourceHandleQueryState::Inactive;
+                binding->last_failure_reason = kResourceHandleQueryReasonUnavailable;
+                continue;
+            }
+
+            binding->state = ResourceHandleQueryState::AwaitingSafePoint;
+            binding->last_failure_reason = kResourceHandleQueryReasonDemoReentrancyGuard;
+            binding->last_failure_detail = L"demo_seek_safety_cooldown";
+        }
+
+        status.diagnostics.push_back(BuildResourceHandleQueryRuntimeText());
+        return;
+    }
 
     const auto safe_point =
         base_callbacks_ready &&
@@ -56087,6 +65736,7 @@ void AdvanceKnifeModelPathSwapQueryMainChain(
 
         TryLogResourceHandleUtilsProbeStatusLocked();
         TryLogDemoResourceSystemSlot13MissTelemetryLocked();
+        TryLogDemoResourceSystemKnifeQueryConsumersLocked();
     }
 
     if (safe_point)
@@ -56108,7 +65758,6 @@ KnifeModelPathSwapApplyResult TryEnsureWatchedKnifeModelPathSwap(
     const std::vector<void*>& entity_cache,
     const RuntimePlayerBinding& player_binding,
     const nskinzcs2::runtime::KnifeAppearanceRequest& request,
-    const nskinzcs2::runtime::KnifeApplyGateResult& gate,
     const nskinzcs2::runtime::KnifeRuntimeContext& context,
     const int world_entity_index,
     void* world_weapon_entity,
@@ -56122,11 +65771,28 @@ KnifeModelPathSwapApplyResult TryEnsureWatchedKnifeModelPathSwap(
         request.model_definition != 0;
     if (!result.requested)
     {
-        ClearKnifeModelPathSwapState(true);
+        if (DoesKnifeModelPathSwapStateBelongToXuid(xuid))
+        {
+            ClearKnifeModelPathSwapState(true);
+        }
         return result;
     }
 
-    const auto target_definition_index = gate.resolved_model_definition;
+    if (IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        if (DoesKnifeModelPathSwapStateBelongToXuid(xuid))
+        {
+            ClearKnifeModelPathSwapState(true);
+        }
+        result.degraded = true;
+        result.reason = kKnifeModelPathSwapReasonDemoSeekSafetyCooldown;
+        return result;
+    }
+
+    // The resource-layer swap target is the watched player's requested knife model.
+    // Gate degradation controls whether model writes are considered confirmed on this
+    // frame, but it must not erase the stable swap configuration itself.
+    const auto target_definition_index = request.model_definition;
     const auto source_world_definition_index =
         ResolveKnifeModelPathSwapSourceWorldDefinition(context, current_definition_index);
     const auto source_view_definition_index =
@@ -56161,164 +65827,170 @@ KnifeModelPathSwapApplyResult TryEnsureWatchedKnifeModelPathSwap(
         target_view_path != nullptr;
     if (!valid_swap_configuration)
     {
-        ClearKnifeModelPathSwapState(true);
+        if (DoesKnifeModelPathSwapStateBelongToXuid(xuid))
+        {
+            ClearKnifeModelPathSwapState(true);
+        }
         result.degraded = true;
         result.reason = kKnifeModelPathSwapReasonInvalidModelDefinition;
         return result;
     }
 
     auto& swap_state = g_hook_state.knife_model_path_swap_state;
-    const auto same_identity =
-        KnifeModelPathSwapConfigurationMatches(
-            swap_state,
-            xuid,
-            source_world_definition_index,
-            target_definition_index,
-            source_world_path,
-            source_view_path,
-            target_world_path,
-            target_view_path);
-    if (!same_identity)
     {
-        swap_state = {};
-        swap_state.armed_frame = g_hook_state.frame_callback_count.load();
-    }
-
-    swap_state.enabled = true;
-    swap_state.xuid = xuid;
-    swap_state.source_definition_index = source_world_definition_index;
-    swap_state.target_definition_index = target_definition_index;
-    swap_state.source_world_path = source_world_path;
-    swap_state.source_view_path = source_view_path;
-    swap_state.query_source_world_path = source_world_path;
-    swap_state.query_source_view_path = source_view_path;
-    swap_state.target_world_path = target_world_path;
-    swap_state.target_view_path = target_view_path;
-    if (g_hook_state.knife_model_path_state.active &&
-        g_hook_state.knife_model_path_state.xuid == xuid)
-    {
-        const auto reuse_world_snapshot =
-            KnifeSwapEntityMatchesExpectedModel(
-                g_hook_state.knife_model_path_state.world_render_entity,
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        const auto same_identity =
+            KnifeModelPathSwapConfigurationMatches(
+                swap_state,
+                xuid,
+                source_world_definition_index,
+                target_definition_index,
                 source_world_path,
-                offsets);
-        const auto reuse_view_snapshot =
-            KnifeSwapEntityMatchesExpectedModel(
-                g_hook_state.knife_model_path_state.first_person_render_entity,
                 source_view_path,
-                offsets);
-
-        if (reuse_world_snapshot)
+                target_world_path,
+                target_view_path);
+        if (!same_identity)
         {
-            swap_state.source_world_entity = g_hook_state.knife_model_path_state.world_render_entity;
-            if (g_hook_state.knife_model_path_state.original_world_render_model_handle_valid &&
-                g_hook_state.knife_model_path_state.original_world_render_model_handle != 0)
+            swap_state = {};
+            swap_state.armed_frame = g_hook_state.frame_callback_count.load();
+        }
+
+        swap_state.enabled = true;
+        swap_state.xuid = xuid;
+        swap_state.source_definition_index = source_world_definition_index;
+        swap_state.target_definition_index = target_definition_index;
+        swap_state.source_world_path = source_world_path;
+        swap_state.source_view_path = source_view_path;
+        swap_state.query_source_world_path = source_world_path;
+        swap_state.query_source_view_path = source_view_path;
+        swap_state.target_world_path = target_world_path;
+        swap_state.target_view_path = target_view_path;
+        if (g_hook_state.knife_model_path_state.active &&
+            g_hook_state.knife_model_path_state.xuid == xuid)
+        {
+            const auto reuse_world_snapshot =
+                KnifeSwapEntityMatchesExpectedModel(
+                    g_hook_state.knife_model_path_state.world_render_entity,
+                    source_world_path,
+                    offsets);
+            const auto reuse_view_snapshot =
+                KnifeSwapEntityMatchesExpectedModel(
+                    g_hook_state.knife_model_path_state.first_person_render_entity,
+                    source_view_path,
+                    offsets);
+
+            if (reuse_world_snapshot)
             {
-                swap_state.source_world_handle_valid = true;
-                swap_state.source_world_handle =
-                    g_hook_state.knife_model_path_state.original_world_render_model_handle;
-                PersistResourceHandleQueryLiveHandleSnapshots(
-                    swap_state.source_world_handle,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0);
+                swap_state.source_world_entity = g_hook_state.knife_model_path_state.world_render_entity;
+                if (g_hook_state.knife_model_path_state.original_world_render_model_handle_valid &&
+                    g_hook_state.knife_model_path_state.original_world_render_model_handle != 0)
+                {
+                    swap_state.source_world_handle_valid = true;
+                    swap_state.source_world_handle =
+                        g_hook_state.knife_model_path_state.original_world_render_model_handle;
+                    PersistResourceHandleQueryLiveHandleSnapshots(
+                        swap_state.source_world_handle,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0);
+                }
+                if (g_hook_state.knife_model_path_state.original_world_render_model_name_token_valid &&
+                    g_hook_state.knife_model_path_state.original_world_render_model_name_token != 0)
+                {
+                    swap_state.source_world_token =
+                        g_hook_state.knife_model_path_state.original_world_render_model_name_token;
+                    PersistResourceHandleQueryLiveTokenSnapshots(
+                        swap_state.source_world_token,
+                        0,
+                        0,
+                        0);
+                }
             }
-            if (g_hook_state.knife_model_path_state.original_world_render_model_name_token_valid &&
-                g_hook_state.knife_model_path_state.original_world_render_model_name_token != 0)
+
+            if (reuse_view_snapshot)
             {
-                swap_state.source_world_token =
-                    g_hook_state.knife_model_path_state.original_world_render_model_name_token;
-                PersistResourceHandleQueryLiveTokenSnapshots(
-                    swap_state.source_world_token,
-                    0,
-                    0,
-                    0);
+                swap_state.source_view_entity =
+                    g_hook_state.knife_model_path_state.first_person_render_entity;
+                if (g_hook_state.knife_model_path_state.original_first_person_model_handle_valid &&
+                    g_hook_state.knife_model_path_state.original_first_person_model_handle != 0)
+                {
+                    swap_state.source_view_handle_valid = true;
+                    swap_state.source_view_handle =
+                        g_hook_state.knife_model_path_state.original_first_person_model_handle;
+                    PersistResourceHandleQueryLiveHandleSnapshots(
+                        0,
+                        swap_state.source_view_handle,
+                        0,
+                        0,
+                        0,
+                        0);
+                }
+                if (g_hook_state.knife_model_path_state.original_first_person_model_name_token_valid &&
+                    g_hook_state.knife_model_path_state.original_first_person_model_name_token != 0)
+                {
+                    swap_state.source_view_token =
+                        g_hook_state.knife_model_path_state.original_first_person_model_name_token;
+                    PersistResourceHandleQueryLiveTokenSnapshots(
+                        0,
+                        swap_state.source_view_token,
+                        0,
+                        0);
+                }
             }
         }
 
-        if (reuse_view_snapshot)
+        CaptureKnifeModelPathSwapLiveSourceSnapshot(
+            entity_list,
+            entity_cache,
+            player_binding,
+            context,
+            world_entity_index,
+            world_weapon_entity,
+            offsets,
+            xuid,
+            swap_state);
+
+        const auto try_remember_entity =
+            [&](const int entity_index, void*& destination) noexcept
+            {
+                if (destination != nullptr ||
+                    entity_index < 0 ||
+                    static_cast<std::size_t>(entity_index) >= entity_cache.size())
+                {
+                    return false;
+                }
+
+                destination = entity_cache[static_cast<std::size_t>(entity_index)];
+                return destination != nullptr;
+            };
+
+        if (swap_state.source_world_entity == nullptr)
         {
-            swap_state.source_view_entity =
-                g_hook_state.knife_model_path_state.first_person_render_entity;
-            if (g_hook_state.knife_model_path_state.original_first_person_model_handle_valid &&
-                g_hook_state.knife_model_path_state.original_first_person_model_handle != 0)
+            if (world_weapon_entity != nullptr)
             {
-                swap_state.source_view_handle_valid = true;
-                swap_state.source_view_handle =
-                    g_hook_state.knife_model_path_state.original_first_person_model_handle;
-                PersistResourceHandleQueryLiveHandleSnapshots(
-                    0,
-                    swap_state.source_view_handle,
-                    0,
-                    0,
-                    0,
-                    0);
+                swap_state.source_world_entity = world_weapon_entity;
             }
-            if (g_hook_state.knife_model_path_state.original_first_person_model_name_token_valid &&
-                g_hook_state.knife_model_path_state.original_first_person_model_name_token != 0)
+            else
             {
-                swap_state.source_view_token =
-                    g_hook_state.knife_model_path_state.original_first_person_model_name_token;
-                PersistResourceHandleQueryLiveTokenSnapshots(
-                    0,
-                    swap_state.source_view_token,
-                    0,
-                    0);
+                try_remember_entity(world_entity_index, swap_state.source_world_entity);
             }
         }
-    }
 
-    CaptureKnifeModelPathSwapLiveSourceSnapshot(
-        entity_list,
-        entity_cache,
-        player_binding,
-        context,
-        world_entity_index,
-        world_weapon_entity,
-        offsets,
-        xuid,
-        swap_state);
-
-    const auto try_remember_entity =
-        [&](const int entity_index, void*& destination) noexcept
+        if (swap_state.source_view_entity == nullptr)
         {
-            if (destination != nullptr ||
-                entity_index < 0 ||
-                static_cast<std::size_t>(entity_index) >= entity_cache.size())
-            {
-                return false;
-            }
-
-            destination = entity_cache[static_cast<std::size_t>(entity_index)];
-            return destination != nullptr;
-        };
-
-    if (swap_state.source_world_entity == nullptr)
-    {
-        if (world_weapon_entity != nullptr)
-        {
-            swap_state.source_world_entity = world_weapon_entity;
+            try_remember_entity(context.direct_first_person_render_entity_index, swap_state.source_view_entity);
+            try_remember_entity(context.viewmodel_render_entity_index, swap_state.source_view_entity);
+            try_remember_entity(context.real_viewmodel_entity_index, swap_state.source_view_entity);
+            try_remember_entity(context.viewmodel_entity_index, swap_state.source_view_entity);
+            try_remember_entity(context.providee_entity_index, swap_state.source_view_entity);
         }
-        else
+
+        if (swap_state.armed_frame == 0)
         {
-            try_remember_entity(world_entity_index, swap_state.source_world_entity);
+            swap_state.armed_frame = g_hook_state.frame_callback_count.load();
         }
-    }
-
-    if (swap_state.source_view_entity == nullptr)
-    {
-        try_remember_entity(context.direct_first_person_render_entity_index, swap_state.source_view_entity);
-        try_remember_entity(context.viewmodel_render_entity_index, swap_state.source_view_entity);
-        try_remember_entity(context.real_viewmodel_entity_index, swap_state.source_view_entity);
-        try_remember_entity(context.viewmodel_entity_index, swap_state.source_view_entity);
-        try_remember_entity(context.providee_entity_index, swap_state.source_view_entity);
-    }
-
-    if (swap_state.armed_frame == 0)
-    {
-        swap_state.armed_frame = g_hook_state.frame_callback_count.load();
     }
 
     g_hook_state.knife_model_path_state = {};
@@ -56329,6 +66001,7 @@ KnifeModelPathSwapApplyResult TryEnsureWatchedKnifeModelPathSwap(
 
     if (!KnifeModelPathSwapQueryHookReady())
     {
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
         swap_state.degraded = true;
         swap_state.last_reason = kKnifeModelPathSwapReasonQuerySwapperInactive;
         result.degraded = true;
@@ -56339,20 +66012,23 @@ KnifeModelPathSwapApplyResult TryEnsureWatchedKnifeModelPathSwap(
     RefreshKnifeModelPathSwapHandleRedirectBridge(entity_cache, offsets, swap_state);
 
     const auto current_frame = g_hook_state.frame_callback_count.load();
-    if (!KnifeModelPathSwapHasObservedHits(swap_state) &&
-        swap_state.handle_redirect_pair_count == 0 &&
-        swap_state.armed_frame != 0 &&
-        current_frame > swap_state.armed_frame + kKnifeModelPathSwapNoHitFrameBudget)
     {
-        swap_state.degraded = true;
-        swap_state.last_reason = kKnifeModelPathSwapReasonNoPathHits;
-        result.degraded = true;
-        result.reason = swap_state.last_reason;
-        return result;
-    }
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        if (!KnifeModelPathSwapHasObservedHits(swap_state) &&
+            swap_state.handle_redirect_pair_count == 0 &&
+            swap_state.armed_frame != 0 &&
+            current_frame > swap_state.armed_frame + kKnifeModelPathSwapNoHitFrameBudget)
+        {
+            swap_state.degraded = true;
+            swap_state.last_reason = kKnifeModelPathSwapReasonNoPathHits;
+            result.degraded = true;
+            result.reason = swap_state.last_reason;
+            return result;
+        }
 
-    swap_state.degraded = false;
-    swap_state.last_reason = kKnifeModelPathSwapReasonQuerySwapperOwned;
+        swap_state.degraded = false;
+        swap_state.last_reason = kKnifeModelPathSwapReasonQuerySwapperOwned;
+    }
     result.active = true;
     return result;
 }
@@ -56828,7 +66504,8 @@ bool TryApplyKnifeCarrierProfile(
             refresh_item_view,
             applied_entity_indices,
             applied_weapon_writes,
-            pending_refresh_requests);
+            pending_refresh_requests,
+            nullptr);
 
     return applied ||
         DoesAppliedEconItemMatchProfile(
@@ -56953,7 +66630,8 @@ bool TryRestoreKnifeModelPath(
                   applied_weapon_writes,
                   pending_refresh_requests);
     auto direct_render_restored = true;
-    if (state.direct_render_rebind_attempted)
+    if (state.direct_render_rebind_attempted &&
+        !state.resource_only_render_active)
     {
         direct_render_restored =
             TryRestoreKnifeDirectRenderModelState(
@@ -57398,6 +67076,7 @@ bool TryApplyKnifeModelAndFinishPath(
                 g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask);
         g_hook_state.knife_model_path_state.direct_render_rebind_attempted = false;
         g_hook_state.knife_model_path_state.direct_render_rebind_succeeded = false;
+        g_hook_state.knife_model_path_state.resource_only_render_active = false;
         g_hook_state.knife_model_path_state.synthetic_world_visual_isolation_active = false;
     }
     else
@@ -57638,10 +67317,102 @@ bool TryApplyKnifeModelAndFinishPath(
             binding,
             first_person_owner_model_kind,
             allow_guarded_real_owner_synthetic_render_proxy);
+    const auto query_backed_first_person_render_active =
+        synthetic_first_person_render_proxy &&
+        context.resource_model_swap_ready &&
+        context.resource_query_target_handle_ready &&
+        context.resource_query_redirect_hits > 0;
+    bool query_backed_first_person_restore_needed = false;
+    bool query_backed_first_person_restore_performed = false;
+    if (query_backed_first_person_render_active &&
+        binding.first_person_render_entity != nullptr &&
+        g_hook_state.knife_model_path_state.original_first_person_model_handle_valid &&
+        g_hook_state.knife_model_path_state.original_first_person_model_name_token_valid)
+    {
+        std::uint64_t live_first_person_model_handle = 0;
+        std::uint64_t live_first_person_model_name_token = 0;
+        std::uint64_t live_first_person_mesh_group_mask = 0;
+        const auto live_first_person_model_handle_valid =
+            TryReadEntityModelHandle(
+                binding.first_person_render_entity,
+                offsets,
+                live_first_person_model_handle);
+        const auto live_first_person_model_name_token_valid =
+            TryReadEntityModelNameToken(
+                binding.first_person_render_entity,
+                offsets,
+                live_first_person_model_name_token);
+        const auto live_first_person_mesh_group_mask_valid =
+            !g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask_valid ||
+            TryReadWeaponMeshGroupMaskRaw(
+                binding.first_person_render_entity,
+                offsets,
+                live_first_person_mesh_group_mask);
+        query_backed_first_person_restore_needed =
+            !live_first_person_model_handle_valid ||
+            !live_first_person_model_name_token_valid ||
+            live_first_person_model_handle !=
+                g_hook_state.knife_model_path_state.original_first_person_model_handle ||
+            live_first_person_model_name_token !=
+                g_hook_state.knife_model_path_state.original_first_person_model_name_token ||
+            (g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask_valid &&
+             (!live_first_person_mesh_group_mask_valid ||
+              live_first_person_mesh_group_mask !=
+                  g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask));
+    }
     const auto previous_synthetic_world_visual_isolation_active =
         g_hook_state.knife_model_path_state.synthetic_world_visual_isolation_active;
     g_hook_state.knife_model_path_state.synthetic_world_visual_isolation_active = false;
-    if (!g_hook_state.knife_model_path_state.direct_render_rebind_attempted ||
+    if (query_backed_first_person_render_active)
+    {
+        if (query_backed_first_person_restore_needed)
+        {
+            query_backed_first_person_restore_performed =
+                TryRestoreKnifeSyntheticRenderProxyModelState(
+                    binding.first_person_render_entity_index,
+                    binding.first_person_render_entity,
+                    offsets,
+                    g_hook_state.knife_model_path_state.original_first_person_model_handle_valid,
+                    g_hook_state.knife_model_path_state.original_first_person_model_handle,
+                    g_hook_state.knife_model_path_state.original_first_person_model_name_token_valid,
+                    g_hook_state.knife_model_path_state.original_first_person_model_name_token,
+                    g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask_valid,
+                    g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask,
+                    first_person_signature ^ 0x78DBull,
+                    xuid,
+                    L"first_person_query_backed_resource_redirect_late_restore");
+        }
+        const auto query_backed_first_person_resource_ready =
+            !query_backed_first_person_restore_needed ||
+            query_backed_first_person_restore_performed;
+        g_hook_state.knife_model_path_state.direct_render_rebind_attempted = false;
+        g_hook_state.knife_model_path_state.direct_render_rebind_succeeded =
+            g_hook_state.knife_model_path_state.direct_render_rebind_succeeded ||
+            query_backed_first_person_resource_ready;
+        g_hook_state.knife_model_path_state.resource_only_render_active =
+            query_backed_first_person_resource_ready;
+
+        if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+        {
+            std::wstringstream stream;
+            stream << L"Knife synthetic first-person resource-only path active for XUID " << xuid
+                << L": render_entity=" << binding.first_person_render_entity_index
+                << L", resource_hits=" << context.resource_query_redirect_hits
+                << L", restore_needed=" << (query_backed_first_person_restore_needed ? 1 : 0)
+                << L", restore_performed="
+                << (query_backed_first_person_restore_performed ? 1 : 0)
+                << L", resource_ready=" << (query_backed_first_person_resource_ready ? 1 : 0)
+                << L", direct_restore_armed=0"
+                << L", reason=query_backed_view_resource_redirect_active";
+            nskinzcs2::Logger::Info(stream.str());
+        }
+    }
+    else
+    {
+        g_hook_state.knife_model_path_state.resource_only_render_active = false;
+    }
+    if ((!g_hook_state.knife_model_path_state.direct_render_rebind_attempted &&
+         !g_hook_state.knife_model_path_state.resource_only_render_active) ||
         synthetic_first_person_retry_needed)
     {
         const auto isolate_world_visual_rebind =
@@ -57764,6 +67535,70 @@ bool TryApplyKnifeModelAndFinishPath(
             nskinzcs2::Logger::Info(stream.str());
         }
 
+        if (query_backed_first_person_render_active)
+        {
+            const auto restore_state_available =
+                g_hook_state.knife_model_path_state.original_first_person_model_handle_valid &&
+                g_hook_state.knife_model_path_state.original_first_person_model_name_token_valid;
+            bool restore_needed = false;
+            if (restore_state_available)
+            {
+                std::uint64_t live_first_person_model_handle = 0;
+                std::uint64_t live_first_person_model_name_token = 0;
+                const auto live_first_person_model_handle_valid =
+                    TryReadEntityModelHandle(
+                        binding.first_person_render_entity,
+                        offsets,
+                        live_first_person_model_handle);
+                const auto live_first_person_model_name_token_valid =
+                    TryReadEntityModelNameToken(
+                        binding.first_person_render_entity,
+                        offsets,
+                        live_first_person_model_name_token);
+                restore_needed =
+                    !live_first_person_model_handle_valid ||
+                    !live_first_person_model_name_token_valid ||
+                    live_first_person_model_handle !=
+                        g_hook_state.knife_model_path_state.original_first_person_model_handle ||
+                    live_first_person_model_name_token !=
+                        g_hook_state.knife_model_path_state.original_first_person_model_name_token;
+            }
+
+            query_backed_first_person_restore_performed =
+                !restore_needed ||
+                (restore_state_available &&
+                 TryRestoreKnifeSyntheticRenderProxyModelState(
+                     binding.first_person_render_entity_index,
+                     binding.first_person_render_entity,
+                     offsets,
+                     g_hook_state.knife_model_path_state.original_first_person_model_handle_valid,
+                     g_hook_state.knife_model_path_state.original_first_person_model_handle,
+                     g_hook_state.knife_model_path_state.original_first_person_model_name_token_valid,
+                     g_hook_state.knife_model_path_state.original_first_person_model_name_token,
+                     g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask_valid,
+                     g_hook_state.knife_model_path_state.original_first_person_mesh_group_mask,
+                     first_person_signature ^ 0x78DAull,
+                     xuid,
+                     L"first_person_query_backed_resource_redirect"));
+
+            first_person_direct_rebind_attempted = true;
+            first_person_direct_rebind =
+                query_backed_first_person_restore_performed || !restore_state_available;
+
+            if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+            {
+                std::wstringstream stream;
+                stream << L"Knife synthetic first-person direct rebind bypassed for XUID " << xuid
+                    << L": render_entity=" << binding.first_person_render_entity_index
+                    << L", resource_hits=" << context.resource_query_redirect_hits
+                    << L", restore_state_available=" << (restore_state_available ? 1 : 0)
+                    << L", restore_needed=" << (restore_needed ? 1 : 0)
+                    << L", restore_performed=" << (query_backed_first_person_restore_performed ? 1 : 0)
+                    << L", reason=query_backed_view_resource_redirect_active";
+                nskinzcs2::Logger::Info(stream.str());
+            }
+        }
+
         if (shared_render_target)
         {
             if (shared_target_model_name.has_value() && can_rebind_world)
@@ -57816,30 +67651,22 @@ bool TryApplyKnifeModelAndFinishPath(
             if (guarded_synthetic_first_person_only_rebind ||
                 guarded_synthetic_atomic_rebind)
             {
-                if (resolved_first_person_target_model_name.has_value() && can_rebind_first_person)
+                if (synthetic_first_person_render_proxy)
                 {
-                    first_person_direct_rebind_attempted = true;
-                    first_person_direct_rebind =
-                        TryWriteKnifeSyntheticRenderProxyModelState(
-                            entity_cache,
-                            binding.first_person_render_entity_index,
-                            binding.first_person_render_entity,
-                            offsets,
-                            *resolved_first_person_target_model_name,
-                            desired_first_person_mesh_group_mask,
-                            first_person_signature,
-                            L"first_person_synthetic",
-                            xuid);
-                }
-                else if (ShouldLogWatchedKnifeAnimationTrace(xuid))
-                {
-                    std::wstringstream stream;
-                    stream << L"Knife direct render rebind skipped for XUID " << xuid
-                        << L": target_definition=" << model_request.model_definition
-                        << L", target=first_person, entity=" << binding.first_person_render_entity_index
-                        << L", synthetic=1, reason="
-                        << (can_rebind_first_person ? L"target_model_path_unresolved" : L"original_restore_state_unreadable");
-                    nskinzcs2::Logger::Info(stream.str());
+                    first_person_direct_rebind_attempted = query_backed_first_person_render_active;
+                    first_person_direct_rebind = query_backed_first_person_render_active;
+                    if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+                    {
+                        std::wstringstream stream;
+                        stream << L"Knife direct render rebind skipped for XUID " << xuid
+                            << L": target_definition=" << model_request.model_definition
+                            << L", target=first_person, entity=" << binding.first_person_render_entity_index
+                            << L", synthetic=1, reason="
+                            << (query_backed_first_person_render_active
+                                    ? L"synthetic_first_person_resource_only_path_query_backed"
+                                    : L"synthetic_first_person_resource_only_path_waiting_for_query_hit");
+                        nskinzcs2::Logger::Info(stream.str());
+                    }
                 }
 
                 if (first_person_direct_rebind)
@@ -57967,29 +67794,18 @@ bool TryApplyKnifeModelAndFinishPath(
 
                 if (synthetic_first_person_render_proxy)
                 {
-                    if (resolved_first_person_target_model_name.has_value() && can_rebind_first_person)
-                    {
-                        first_person_direct_rebind_attempted = true;
-                        first_person_direct_rebind =
-                            TryWriteKnifeSyntheticRenderProxyModelState(
-                                entity_cache,
-                                binding.first_person_render_entity_index,
-                                binding.first_person_render_entity,
-                                offsets,
-                                *resolved_first_person_target_model_name,
-                                desired_first_person_mesh_group_mask,
-                                first_person_signature,
-                                L"first_person_synthetic",
-                                xuid);
-                    }
-                    else if (ShouldLogWatchedKnifeAnimationTrace(xuid))
+                    first_person_direct_rebind_attempted = query_backed_first_person_render_active;
+                    first_person_direct_rebind = query_backed_first_person_render_active;
+                    if (ShouldLogWatchedKnifeAnimationTrace(xuid))
                     {
                         std::wstringstream stream;
                         stream << L"Knife direct render rebind skipped for XUID " << xuid
                             << L": target_definition=" << model_request.model_definition
                             << L", target=first_person, entity=" << binding.first_person_render_entity_index
                             << L", synthetic=1, reason="
-                            << (can_rebind_first_person ? L"target_model_path_unresolved" : L"original_restore_state_unreadable");
+                            << (query_backed_first_person_render_active
+                                    ? L"synthetic_first_person_resource_only_path_query_backed"
+                                    : L"synthetic_first_person_resource_only_path_waiting_for_query_hit");
                         nskinzcs2::Logger::Info(stream.str());
                     }
                 }
@@ -58139,10 +67955,12 @@ bool TryApplyKnifeModelAndFinishPath(
         g_hook_state.knife_model_path_state.direct_render_rebind_attempted = true;
         g_hook_state.knife_model_path_state.direct_render_rebind_succeeded =
             (world_direct_rebind || world_direct_rebind_skipped) && first_person_direct_rebind;
+        g_hook_state.knife_model_path_state.resource_only_render_active = false;
     }
 
     const auto isolate_world_visual =
         allow_synthetic_world_visual_isolation &&
+        g_hook_state.knife_model_path_state.direct_render_rebind_attempted &&
         g_hook_state.knife_model_path_state.direct_render_rebind_succeeded;
     if (synthetic_first_person_render_proxy &&
         !allow_synthetic_world_visual_isolation &&
@@ -58255,9 +68073,21 @@ bool TryApplyKnifeModelAndFinishPath(
         pending_shared_render_target
         ? pending_shared_target_model_name
         : pending_first_person_target_model_name;
+    const auto phase2_target_selection =
+        ResolveKnifePhase2TargetSelection(
+            binding,
+            context,
+            offsets,
+            effective_pending_world_target_model_name,
+            effective_pending_first_person_target_model_name,
+            1ull,
+            isolate_world_visual &&
+                g_hook_state.knife_model_path_state.synthetic_world_visual_isolation_active,
+            xuid);
 
+    const auto render_rebind_ready =
+        IsKnifeModelPathRenderRebindReady(g_hook_state.knife_model_path_state);
     const auto strict_verification_ready =
-        g_hook_state.knife_model_path_state.direct_render_rebind_succeeded &&
         IsKnifeModelPathStrictlyVerified(
             g_hook_state.knife_model_path_state,
             model_request.model_definition);
@@ -58271,22 +68101,32 @@ bool TryApplyKnifeModelAndFinishPath(
         g_hook_state.knife_model_path_state.verified_viewmodel_render_entity_index = -1;
     }
 
-    if (g_hook_state.knife_model_path_state.direct_render_rebind_succeeded &&
+    if (render_rebind_ready &&
         !strict_verification_ready &&
         !allow_visual_only_fallback)
     {
         g_hook_state.pending_knife_post_refresh_verification.active = true;
         g_hook_state.pending_knife_post_refresh_verification.xuid = xuid;
         g_hook_state.pending_knife_post_refresh_verification.desired_signature = world_signature;
+        g_hook_state.pending_knife_post_refresh_verification.target_mode =
+            phase2_target_selection.mode;
         g_hook_state.pending_knife_post_refresh_verification.target_definition_index = model_request.model_definition;
         g_hook_state.pending_knife_post_refresh_verification.expected_world_render_model_name =
             effective_pending_world_target_model_name.has_value()
             ? RememberPersistentModelName(*effective_pending_world_target_model_name)
             : nullptr;
         g_hook_state.pending_knife_post_refresh_verification.expected_first_person_render_model_name =
-            effective_pending_first_person_target_model_name.has_value()
-            ? RememberPersistentModelName(*effective_pending_first_person_target_model_name)
-            : nullptr;
+            phase2_target_selection.mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer
+                ? nullptr
+                : (effective_pending_first_person_target_model_name.has_value()
+                    ? RememberPersistentModelName(*effective_pending_first_person_target_model_name)
+                    : nullptr);
+        g_hook_state.pending_knife_post_refresh_verification.expected_world_render_model_handle =
+            phase2_target_selection.desired_model_handle;
+        g_hook_state.pending_knife_post_refresh_verification.expected_world_render_model_handle_valid =
+            phase2_target_selection.mode ==
+                nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer &&
+            phase2_target_selection.desired_model_handle_valid;
         g_hook_state.pending_knife_post_refresh_verification.world_entity_index = binding.world_entity_index;
         g_hook_state.pending_knife_post_refresh_verification.world_entity = binding.world_entity;
         g_hook_state.pending_knife_post_refresh_verification.world_item_view = binding.world_item_view;
@@ -58326,13 +68166,16 @@ bool TryApplyKnifeModelAndFinishPath(
         g_hook_state.pending_knife_post_refresh_verification.first_person_render_item_view =
             binding.first_person_render_item_view;
         g_hook_state.pending_knife_post_refresh_verification.first_person_render_desired_mesh_group_mask =
-            IsSyntheticRuntimeEntityIndex(binding.first_person_render_entity_index)
+            phase2_target_selection.mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer
+                ? 0ull
+                : IsSyntheticRuntimeEntityIndex(binding.first_person_render_entity_index)
                 ? g_hook_state.knife_model_path_state.desired_first_person_render_mesh_group_mask
                 : 1ull;
         g_hook_state.pending_knife_post_refresh_verification.first_person_render_untrusted =
-            binding.first_person_render_only ||
+            phase2_target_selection.mode != nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer &&
+            (binding.first_person_render_only ||
             (IsSyntheticRuntimeEntityIndex(binding.first_person_render_entity_index) &&
-             binding.first_person_direct_render_source);
+             binding.first_person_direct_render_source));
         g_hook_state.pending_knife_post_refresh_verification.first_person_binding_source =
             binding.first_person_binding_source;
         g_hook_state.pending_knife_post_refresh_verification.first_person_render_source =
@@ -58346,28 +68189,17 @@ bool TryApplyKnifeModelAndFinishPath(
         g_hook_state.pending_knife_post_refresh_verification = {};
     }
 
-    if (binding.first_person_render_entity != nullptr &&
-        IsResolvedRuntimeEntityIndex(binding.first_person_render_entity_index))
-    {
-        TryArmKnifePhase2ModelBindInterception(
-            binding,
-            offsets,
-            effective_pending_world_target_model_name,
-            effective_pending_first_person_target_model_name,
-            first_person_signature,
-            world_signature,
-            IsSyntheticRuntimeEntityIndex(binding.first_person_render_entity_index)
-                ? g_hook_state.knife_model_path_state.desired_first_person_render_mesh_group_mask
-                : 1ull,
-            isolate_world_visual &&
-                g_hook_state.knife_model_path_state.synthetic_world_visual_isolation_active,
-            xuid,
-            model_request.model_definition);
-    }
-    else
-    {
-        g_hook_state.knife_phase2_model_bind_interception = {};
-    }
+    TryArmKnifePhase2ModelBindInterception(
+        binding,
+        phase2_target_selection,
+        phase2_target_selection.mode == nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer
+            ? world_signature
+            : first_person_signature,
+        world_signature,
+        isolate_world_visual &&
+            g_hook_state.knife_model_path_state.synthetic_world_visual_isolation_active,
+        xuid,
+        model_request.model_definition);
 
     if (ShouldLogWatchedKnifeAnimationTrace(xuid))
     {
@@ -58583,6 +68415,7 @@ void PollGameThreadStateModern()
     g_hook_state.client_entity_factory_requested.store(false);
     g_hook_state.watched_xuid.store(0);
     g_hook_state.probed_xuid.store(0);
+    TryUpdateConsolePlayerCapture(now, demo_playing);
 
     if (!demo_playing)
     {
@@ -58676,11 +68509,14 @@ void PollGameThreadStateModern()
     {
         const auto rebuild_reason =
             RebuildReasonText(nskinzcs2::runtime::RuntimeRebuildReason::ManualRefresh);
+        constexpr std::uint64_t kManualRefreshKeychainCreateCooldownMs = 5000;
         ResetRuntimeState(rebuild_reason);
         UpdateKnifeRefreshHelperEpochForRebuildReason(nskinzcs2::runtime::RuntimeRebuildReason::ManualRefresh);
         g_hook_state.last_applied_demo_tick = demo_tick;
         g_hook_state.last_applied_config_revision = config_revision;
         g_hook_state.next_runtime_poll_millis.store(0);
+        g_hook_state.keychain_module_create_cooldown_until_millis.store(
+            now + kManualRefreshKeychainCreateCooldownMs);
         if (!rebuild_reason.empty())
         {
             nskinzcs2::Logger::Info(rebuild_reason);
@@ -58702,11 +68538,22 @@ void PollGameThreadStateModern()
 
     std::unordered_set<std::uint64_t> target_xuids;
     std::unordered_map<std::uint32_t, std::uint64_t> target_xuids_by_account;
-    target_xuids.reserve(config.profiles.size() + config.knife_profiles.size() + config.glove_profiles.size());
-    target_xuids_by_account.reserve(config.profiles.size() + config.knife_profiles.size() + config.glove_profiles.size());
+    target_xuids.reserve(
+        config.profiles.size() +
+        config.knife_profiles.size() +
+        config.glove_profiles.size() +
+        config.keychain_profiles.size());
+    target_xuids_by_account.reserve(
+        config.profiles.size() +
+        config.knife_profiles.size() +
+        config.glove_profiles.size() +
+        config.keychain_profiles.size());
     int enabled_profiles = 0;
     bool has_glove_profile = false;
     bool has_weapon_profile = false;
+    bool has_knife_profile = false;
+    bool has_keychain_profile = false;
+    bool observe_demo_keychain = false;
     bool needs_runtime_wearable_factory = false;
     std::unordered_set<std::uint64_t> skipped_knife_override_xuids;
     bool knife_model_override_ready = false;
@@ -58750,6 +68597,7 @@ void PollGameThreadStateModern()
         target_xuids.insert(profile.xuid);
         target_xuids_by_account[AccountIdFromXuid(profile.xuid)] = profile.xuid;
         has_weapon_profile = true;
+        has_knife_profile = true;
     }
 
     for (const auto& profile : config.glove_profiles)
@@ -58768,11 +68616,27 @@ void PollGameThreadStateModern()
             profile.mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish;
     }
 
+    for (const auto& profile : config.keychain_profiles)
+    {
+        if (!profile.enabled || profile.xuid == 0 || profile.keychain_kit <= 0)
+        {
+            continue;
+        }
+
+        ++enabled_profiles;
+        target_xuids.insert(profile.xuid);
+        target_xuids_by_account[AccountIdFromXuid(profile.xuid)] = profile.xuid;
+        has_keychain_profile = true;
+        observe_demo_keychain = true;
+    }
+
     if (trace.active())
     {
         std::wstringstream stream;
         stream << L"Config analysis complete: enabled_profiles=" << enabled_profiles
             << L", has_weapon_profile=" << (has_weapon_profile ? 1 : 0)
+            << L", has_knife_profile=" << (has_knife_profile ? 1 : 0)
+            << L", has_keychain_profile=" << (has_keychain_profile ? 1 : 0)
             << L", knife_profiles=" << config.knife_profiles.size()
             << L", has_glove_profile=" << (has_glove_profile ? 1 : 0)
             << L", needs_runtime_wearable_factory=" << (needs_runtime_wearable_factory ? 1 : 0);
@@ -58783,7 +68647,7 @@ void PollGameThreadStateModern()
     g_hook_state.client_entity_factory_requested.store(needs_runtime_wearable_factory);
     g_hook_state.skipped_knife_override_count.store(static_cast<int>(skipped_knife_override_xuids.size()));
 
-    if (enabled_profiles == 0)
+    if (enabled_profiles == 0 && !observe_demo_keychain)
     {
         trace.Step(L"No enabled profiles are active; deep entity scanning remains idle.");
         ResetRuntimeState({});
@@ -58794,7 +68658,11 @@ void PollGameThreadStateModern()
         return;
     }
 
-    g_hook_state.next_runtime_poll_millis.store(now + (has_glove_profile ? 125ull : 75ull));
+    const auto runtime_poll_interval_ms =
+        has_glove_profile
+            ? 125ull
+            : (has_weapon_profile || has_knife_profile ? 75ull : 125ull);
+    g_hook_state.next_runtime_poll_millis.store(now + runtime_poll_interval_ms);
     trace.Step(L"Enabled profiles detected; resolving live entity scan ceiling.");
 
     std::unordered_set<int> knife_definition_indices;
@@ -58879,7 +68747,7 @@ void PollGameThreadStateModern()
     bool watched_knife_animation_observed = false;
     bool watched_knife_model_path_observed = false;
     bool watched_knife_trace_observed = false;
-    bool watched_knife_model_swap_requested = false;
+    bool target_knife_model_swap_requested = HasConfiguredKnifeModelSwapRequest(config);
     std::unordered_set<int> applied_weapon_entities;
     std::unordered_set<int> prioritized_weapon_entities;
     std::unordered_set<std::uint64_t> glove_applied_xuids;
@@ -59071,6 +68939,20 @@ void PollGameThreadStateModern()
             heuristic_watched_xuid);
     const auto watched_xuid = watched_resolution.watched_xuid;
     g_hook_state.watched_xuid.store(watched_xuid);
+    if (watched_xuid != 0)
+    {
+        if (const auto* watched_knife_profile =
+                nskinzcs2::ConfigStore::FindMatchingKnifeProfile(config, watched_xuid);
+            watched_knife_profile != nullptr)
+        {
+            const auto watched_knife_request =
+                nskinzcs2::runtime::BuildKnifeAppearanceRequest(*watched_knife_profile);
+            target_knife_model_swap_requested =
+                target_knife_model_swap_requested ||
+                (watched_knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish &&
+                    watched_knife_request.model_definition != 0);
+        }
+    }
     const auto emit_watched_knife_deep_trace =
         g_hook_state.runtime_trace_polls_remaining.load() > 0 ||
         g_hook_state.frame_stage_trace_callbacks_remaining.load() > 0;
@@ -59151,6 +69033,11 @@ void PollGameThreadStateModern()
     if (rebuild_decision.rebuild)
     {
         const auto rebuild_reason = RebuildReasonText(rebuild_decision.reason);
+        const auto rebuild_requires_stabilization_delay =
+            rebuild_decision.reason == nskinzcs2::runtime::RuntimeRebuildReason::DemoSeek ||
+            rebuild_decision.reason == nskinzcs2::runtime::RuntimeRebuildReason::FullUpdate;
+        constexpr std::uint64_t kSeekRebuildStabilizationDelayMs = 2500;
+        constexpr std::uint64_t kKeychainCreatePostSeekCooldownMs = 5000;
         ResetRuntimeState(rebuild_reason, AttributeBindingReleaseModeForRebuildReason(rebuild_decision.reason));
         UpdateKnifeRefreshHelperEpochForRebuildReason(rebuild_decision.reason);
         runtime_entities.last_demo_tick = demo_tick;
@@ -59159,7 +69046,14 @@ void PollGameThreadStateModern()
         runtime_entities.last_watched_xuid = watched_xuid;
         g_hook_state.last_applied_demo_tick = demo_tick;
         g_hook_state.last_applied_config_revision = config_revision;
-        g_hook_state.next_runtime_poll_millis.store(0);
+        g_hook_state.next_runtime_poll_millis.store(
+            rebuild_requires_stabilization_delay
+                ? now + kSeekRebuildStabilizationDelayMs
+                : 0);
+        g_hook_state.keychain_module_create_cooldown_until_millis.store(
+            rebuild_requires_stabilization_delay
+                ? now + kKeychainCreatePostSeekCooldownMs
+                : 0);
         g_hook_state.runtime_trace_polls_remaining.store(
             kEnableAutomaticWatchedKnifeTracingOnUpdate ? kWatchedKnifeRuntimeTracePollBudget : 0);
         g_hook_state.frame_stage_trace_callbacks_remaining.store(
@@ -59167,6 +69061,15 @@ void PollGameThreadStateModern()
         if (!rebuild_reason.empty())
         {
             nskinzcs2::Logger::Info(rebuild_reason);
+        }
+        if (rebuild_requires_stabilization_delay)
+        {
+            std::wstringstream stream;
+            stream << L"Scheduled post-seek runtime stabilization cooldown"
+                << L": delay_ms=" << kSeekRebuildStabilizationDelayMs
+                << L", reason=" << RebuildReasonKeyText(rebuild_decision.reason)
+                << L", demo_tick=" << demo_tick;
+            nskinzcs2::Logger::Info(stream.str());
         }
         trace.Step(L"Rebuild reset runtime state and deferred deep scan to the next traced poll.");
         UpdateRuntimeText(std::move(level_name), rebuild_reason);
@@ -59294,7 +69197,97 @@ void PollGameThreadStateModern()
         }
     }
 
-    if (watched_xuid != 0)
+    if (has_knife_profile && watched_xuid != 0)
+    {
+        if (auto watched_player = runtime_entities.players_by_xuid.find(watched_xuid);
+            watched_player != runtime_entities.players_by_xuid.end())
+        {
+            auto& binding = watched_player->second;
+            const auto previous = previous_player_bindings.find(watched_xuid);
+            auto unique_owned_knife_entity_index = -1;
+            auto unique_owned_knife_definition_index = 0;
+            auto unique_owned_knife_handle = kInvalidEntityHandle;
+            std::size_t owned_knife_count = 0;
+            for (const auto entity_index : binding.owned_weapon_entity_indices)
+            {
+                if (entity_index < 0 || static_cast<std::size_t>(entity_index) >= entity_cache.size())
+                {
+                    continue;
+                }
+
+                void* owned_weapon_entity = entity_cache[static_cast<std::size_t>(entity_index)];
+                if (owned_weapon_entity == nullptr)
+                {
+                    continue;
+                }
+
+                auto* owned_item_view =
+                    ResolveWeaponItemView(owned_weapon_entity, g_hook_state.schema_offsets);
+                int owned_definition_index = 0;
+                if (owned_item_view == nullptr ||
+                    !TryReadItemDefinitionIndex(
+                        owned_item_view,
+                        g_hook_state.schema_offsets,
+                        owned_definition_index) ||
+                    !IsKnownDefinitionIndex(owned_definition_index, known_definition_indices) ||
+                    NormalizeBaseItem(
+                        owned_definition_index,
+                        knife_definition_indices,
+                        glove_definition_indices) != 42)
+                {
+                    continue;
+                }
+
+                ++owned_knife_count;
+                if (owned_knife_count == 1)
+                {
+                    unique_owned_knife_entity_index = entity_index;
+                    unique_owned_knife_definition_index = owned_definition_index;
+                    if (const auto owned_handle =
+                            binding.owned_weapon_handles_by_entity_index.find(entity_index);
+                        owned_handle != binding.owned_weapon_handles_by_entity_index.end())
+                    {
+                        unique_owned_knife_handle = owned_handle->second;
+                    }
+                }
+            }
+
+            if (!binding.active_weapon_is_knife &&
+                owned_knife_count == 1 &&
+                unique_owned_knife_entity_index >= 0)
+            {
+                const auto live_active_entity_index = binding.active_weapon_entity_index;
+                const auto live_active_definition_index = binding.active_weapon_definition_index;
+                binding.active_weapon_entity_index = unique_owned_knife_entity_index;
+                binding.active_weapon_definition_index = unique_owned_knife_definition_index;
+                binding.active_weapon_is_knife = true;
+                binding.active_weapon_handle = unique_owned_knife_handle;
+
+                const auto previous_active_entity_index =
+                    previous != previous_player_bindings.end()
+                        ? previous->second.active_weapon_entity_index
+                        : -1;
+                const auto signature =
+                    watched_xuid ^
+                    (static_cast<std::uint64_t>(
+                         static_cast<std::uint32_t>(binding.active_weapon_entity_index))
+                     << 32) ^
+                    0x4B4E4946454F574Eull;
+                std::wstringstream stream;
+                stream << L"Watched knife active binding rebuilt from owned knife set: xuid="
+                    << watched_xuid
+                    << L", owned_knife_entity=" << binding.active_weapon_entity_index
+                    << L", owned_knife_definition=" << unique_owned_knife_definition_index
+                    << L", live_active_entity=" << live_active_entity_index
+                    << L", live_active_definition=" << live_active_definition_index
+                    << L", previous_active_entity=" << previous_active_entity_index
+                    << L", owned_weapon_count=" << binding.owned_weapon_entity_indices.size();
+                LogProfileDiagnosticOnce(signature, stream.str());
+            }
+        }
+    }
+
+    if (has_knife_profile && watched_xuid != 0)
     {
         if (const auto watched_player = runtime_entities.players_by_xuid.find(watched_xuid);
             watched_player != runtime_entities.players_by_xuid.end())
@@ -59330,6 +69323,11 @@ void PollGameThreadStateModern()
                         {
                             watched_knife_request.mode = nskinzcs2::runtime::KnifeSlotMode::FinishOnly;
                         }
+                        target_knife_model_swap_requested =
+                            target_knife_model_swap_requested ||
+                            (watched_knife_profile != nullptr &&
+                                watched_knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish &&
+                                watched_knife_request.model_definition != 0);
 
                         auto watched_knife_context =
                             ResolveKnifeRuntimeContext(
@@ -59355,6 +69353,15 @@ void PollGameThreadStateModern()
                             g_hook_state.knife_animation_hook_ready.load();
                         watched_knife_context.attack_classifier_ready =
                             nskinzcs2::runtime::KnifeAnimationAttackClassifierReady();
+                        PopulateKnifeResourceModelSwapEvidence(
+                            watched_knife_context,
+                            watched_xuid,
+                            watched_xuid,
+                            watched_entity_index,
+                            player_binding.active_weapon_entity_index,
+                            watched_knife_request.model_definition,
+                            entity_cache,
+                            g_hook_state.schema_offsets);
 
                         bool model_path_handles_trace = false;
                         nskinzcs2::runtime::KnifeApplyGateResult watched_knife_gate {};
@@ -59417,6 +69424,31 @@ void PollGameThreadStateModern()
         }
     }
 
+    g_hook_state.demo_keychain_authoritative_xuid.store(0, std::memory_order_release);
+    if (has_keychain_profile)
+    {
+        RunDemoKeychainController(
+            entity_list,
+            highest_live_entity_index,
+            entity_cache,
+            config,
+            pawn_xuids,
+            target_xuids_by_account,
+            knife_definition_indices,
+            glove_definition_indices,
+            observer_resolution,
+            observer_real_viewmodel_resolution,
+            bridge_resolution,
+            bridge_real_viewmodel_resolution,
+            g_hook_state.demo_keychain_authoritative_xuid.load(std::memory_order_acquire),
+            watched_xuid,
+            now);
+    }
+    else
+    {
+        ResetDemoKeychainControllerState(false);
+    }
+
     if (has_weapon_profile)
     {
         for (auto& [xuid, player_binding] : runtime_entities.players_by_xuid)
@@ -59457,11 +69489,15 @@ void PollGameThreadStateModern()
                 normalized_base_item == 42
                     ? nullptr
                     : nskinzcs2::ConfigStore::FindMatchingProfile(config, xuid, normalized_base_item);
+            const auto* keychain_profile =
+                normalized_base_item == 42
+                    ? nullptr
+                    : nskinzcs2::ConfigStore::FindMatchingKeychainProfile(config, xuid, normalized_base_item);
             const auto* knife_profile =
                 normalized_base_item == 42
                     ? nskinzcs2::ConfigStore::FindMatchingKnifeProfile(config, xuid)
                     : nullptr;
-            if (weapon_profile == nullptr && knife_profile == nullptr)
+            if (weapon_profile == nullptr && knife_profile == nullptr && keychain_profile == nullptr)
             {
                 continue;
             }
@@ -59527,6 +69563,19 @@ void PollGameThreadStateModern()
                          &bridge_resolution);
                 knife_context.animation_hook_ready = g_hook_state.knife_animation_hook_ready.load();
                 knife_context.attack_classifier_ready = nskinzcs2::runtime::KnifeAnimationAttackClassifierReady();
+                target_knife_model_swap_requested =
+                    target_knife_model_swap_requested ||
+                    (knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish &&
+                        knife_request.model_definition != 0);
+                PopulateKnifeResourceModelSwapEvidence(
+                    knife_context,
+                    xuid,
+                    watched_xuid,
+                    entity_index,
+                    player_binding.active_weapon_entity_index,
+                    knife_request.model_definition,
+                    entity_cache,
+                    g_hook_state.schema_offsets);
                 knife_gate =
                     nskinzcs2::runtime::EvaluateKnifeApplyGate(
                         {knife_request, knife_context});
@@ -59540,13 +69589,18 @@ void PollGameThreadStateModern()
                     knife_viewmodel_sync_ready = true;
                 }
 
-                const auto runtime_signature =
+                auto runtime_signature =
                     BuildKnifeProfileApplySignature(
                         knife_request,
                         xuid,
                         current_definition_index,
                         kTargetTagWeaponEntity) ^
                     0x32ull;
+                runtime_signature =
+                    BuildKnifeRuntimeChainDiagnosticSignature(
+                        runtime_signature,
+                        knife_context,
+                        knife_gate);
                 std::wstringstream runtime_stream;
                 runtime_stream << L"Knife runtime chain for XUID " << xuid
                     << L": world_entity=" << knife_context.world_entity_index
@@ -59576,6 +69630,12 @@ void PollGameThreadStateModern()
                     << L", hud_fallback_allowed=" << (knife_context.hud_proxy_fallback_allowed ? 1 : 0)
                     << L", owner_kind=" << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(knife_context.first_person_owner_kind)
                     << L", sync_ready=" << (knife_gate.knife_sync_ready ? 1 : 0)
+                    << L", resource_swap_ready=" << (knife_context.resource_model_swap_ready ? 1 : 0)
+                    << L", resource_target_handle_ready="
+                    << (knife_context.resource_query_target_handle_ready ? 1 : 0)
+                    << L", resource_pairs=" << knife_context.resource_query_redirect_pairs
+                    << L", resource_hits=" << knife_context.resource_query_redirect_hits
+                    << L", resource_readback=" << (knife_context.resource_model_path_readback_changed ? 1 : 0)
                     << L", finish_writes=" << (knife_gate.allow_finish_writes ? 1 : 0)
                     << L", model_writes=" << (knife_gate.allow_model_writes ? 1 : 0)
                     << L", animation_remap=" << (knife_gate.allow_animation_remap ? 1 : 0)
@@ -59603,15 +69663,14 @@ void PollGameThreadStateModern()
                             entity_cache,
                             player_binding,
                             knife_request,
-                            knife_gate,
                             knife_context,
                             entity_index,
                             entity,
                             g_hook_state.schema_offsets,
                             xuid,
                             current_definition_index);
-                    watched_knife_model_swap_requested =
-                        watched_knife_model_swap_requested || swap_result.requested;
+                    target_knife_model_swap_requested =
+                        target_knife_model_swap_requested || swap_result.requested;
                     knife_model_override_ready =
                         knife_model_override_ready || swap_result.active;
                     if (knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish)
@@ -59671,8 +69730,7 @@ void PollGameThreadStateModern()
                 apply_linked_weapon_writes = false;
                 require_exact_hud_viewmodel = false;
                 prefer_standard_weapon_appearance_pipeline =
-                    knife_gate.allow_finish_writes &&
-                    knife_gate.knife_sync_ready &&
+                    knife_gate.allow_model_writes &&
                     knife_gate.resolved_mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish;
                 weapon_signature =
                     BuildKnifeProfileApplySignature(runtime_knife_request, xuid, current_definition_index, kTargetTagWeaponEntity);
@@ -59694,9 +69752,26 @@ void PollGameThreadStateModern()
             else
             {
                 ++matched_profiles;
-                effective_profile = *weapon_profile;
+                const auto keychain_only_profile =
+                    weapon_profile == nullptr &&
+                    keychain_profile != nullptr;
+                if (weapon_profile != nullptr)
+                {
+                    effective_profile = *weapon_profile;
+                }
+                else
+                {
+                    effective_profile = {};
+                    effective_profile.name =
+                        keychain_profile != nullptr && !keychain_profile->name.empty()
+                            ? keychain_profile->name
+                            : std::string("Default");
+                    effective_profile.xuid = xuid;
+                    effective_profile.base_item = normalized_base_item;
+                }
                 allow_knife_definition_override = false;
                 apply_linked_weapon_writes =
+                    keychain_profile == nullptr &&
                     ShouldApplyLinkedWeaponWrites(effective_profile, weapon_binding.knife_sync_ready);
                 require_exact_hud_viewmodel =
                     RequiresExactHudViewmodelPathImpl(
@@ -59707,10 +69782,24 @@ void PollGameThreadStateModern()
                         effective_profile,
                         xuid,
                         current_definition_index,
-                        kTargetTagWeaponEntity);
+                        kTargetTagWeaponEntity,
+                        keychain_profile);
                 weapon_mesh_group_mask =
                     ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
+                if (keychain_only_profile &&
+                    !TryReadWeaponMeshGroupMask(entity, g_hook_state.schema_offsets, weapon_mesh_group_mask))
+                {
+                    weapon_mesh_group_mask =
+                        ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
+                }
                 use_temporary_world_refresh_model = UsesTemporaryWorldWeaponRefreshModel(effective_profile);
+                const auto demo_keychain_controller_owns_apply =
+                    keychain_only_profile &&
+                    g_hook_state.demo_playing.load(std::memory_order_acquire);
+                if (demo_keychain_controller_owns_apply)
+                {
+                    continue;
+                }
             }
             bool direct_applied = false;
             bool linked_applied = false;
@@ -59760,14 +69849,19 @@ void PollGameThreadStateModern()
                     }
 
                     direct_applied = TryApplyStandardWeaponAppearancePipeline(
+                        entity_list,
+                        highest_live_entity_index,
+                        entity_cache,
                         rendered_world_trace,
                         g_hook_state.schema_offsets,
                         effective_profile,
+                        keychain_profile,
                         xuid,
                         current_definition_index,
                         weapon_signature,
                         weapon_mesh_group_mask,
                         allow_knife_definition_override,
+                        knife_profile != nullptr ? &knife_context : nullptr,
                         applied_weapon_entities,
                         applied_weapons);
                     handled_by_exact_weapon_pipeline = direct_applied;
@@ -59799,7 +69893,8 @@ void PollGameThreadStateModern()
                                   effective_profile,
                                   xuid,
                                   current_definition_index,
-                                  kTargetTagWeaponViewModel);
+                                  kTargetTagWeaponViewModel,
+                                  keychain_profile);
                     std::wstringstream diagnostic;
                     diagnostic << L"Prioritized active weapon apply for XUID " << xuid
                         << L" on entity " << entity_index << L".";
@@ -59834,21 +69929,31 @@ void PollGameThreadStateModern()
                         weapon_binding.viewmodel_entity_index = rendered_world_trace.hud_weapon_entity_index;
                     }
                     direct_applied = TryApplyStandardWeaponAppearancePipeline(
+                        entity_list,
+                        highest_live_entity_index,
+                        entity_cache,
                         rendered_world_trace,
                         g_hook_state.schema_offsets,
                         effective_profile,
+                        keychain_profile,
                         xuid,
                         current_definition_index,
                         weapon_signature,
                         weapon_mesh_group_mask,
                         allow_knife_definition_override,
+                        knife_profile != nullptr ? &knife_context : nullptr,
                         applied_weapon_entities,
                         applied_weapons);
                 }
                 else
                 {
                     const auto warning_signature =
-                        BuildProfileApplySignature(effective_profile, xuid, current_definition_index, kTargetTagWeaponCanonical ^ 0x7200ull);
+                        BuildProfileApplySignature(
+                            effective_profile,
+                            xuid,
+                            current_definition_index,
+                            kTargetTagWeaponCanonical ^ 0x7200ull,
+                            keychain_profile);
                     std::wstringstream warning_stream;
                     warning_stream << L"Failed to resolve exact world weapon trace for XUID " << xuid
                         << L" on owned weapon entity " << entity_index << L".";
@@ -59881,7 +69986,8 @@ void PollGameThreadStateModern()
                     applied_weapons,
                     ShouldQueuePrimaryWeaponMaterialRefreshImpl(xuid == watched_xuid, player_binding.active_weapon_entity_index == entity_index)
                         ? &pending_weapon_refresh_requests
-                        : nullptr);
+                        : nullptr,
+                    keychain_profile);
                 const auto fallback_refresh_queued =
                     pending_weapon_refresh_requests.size() > queued_refresh_request_count_before;
                 if (is_runtime_knife_profile && (direct_applied || fallback_refresh_queued))
@@ -59905,7 +70011,12 @@ void PollGameThreadStateModern()
                                 hud_weapon_entity))
                         {
                             const auto hud_diagnostic_signature =
-                                BuildProfileApplySignature(effective_profile, xuid, current_definition_index, kTargetTagWeaponViewModel ^ 0x7100ull);
+                                BuildProfileApplySignature(
+                                    effective_profile,
+                                    xuid,
+                                    current_definition_index,
+                                    kTargetTagWeaponViewModel ^ 0x7100ull,
+                                    keychain_profile);
                             std::wstringstream hud_diagnostic;
                             hud_diagnostic << L"Resolved exact HUD weapon entity " << hud_weapon_entity_index
                                 << L" for watched XUID " << xuid << L" from weapon entity " << entity_index << L".";
@@ -59913,7 +70024,12 @@ void PollGameThreadStateModern()
 
                             weapon_binding.viewmodel_entity_index = hud_weapon_entity_index;
                             const auto hud_signature =
-                                BuildProfileApplySignature(effective_profile, xuid, current_definition_index, kTargetTagWeaponViewModel);
+                                BuildProfileApplySignature(
+                                    effective_profile,
+                                    xuid,
+                                    current_definition_index,
+                                    kTargetTagWeaponViewModel,
+                                    keychain_profile);
                             const auto hud_mesh_group_mask =
                                 ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
                             hud_viewmodel_applied =
@@ -59941,13 +70057,19 @@ void PollGameThreadStateModern()
                                     hud_item_view,
                                     applied_weapon_entities,
                                     applied_weapons,
-                                    &pending_weapon_refresh_requests) ||
+                                    &pending_weapon_refresh_requests,
+                                    keychain_profile) ||
                                 hud_viewmodel_applied;
                         }
                         else
                         {
                             const auto hud_warning_signature =
-                                BuildProfileApplySignature(effective_profile, xuid, current_definition_index, kTargetTagWeaponViewModel ^ 0x7200ull);
+                                BuildProfileApplySignature(
+                                    effective_profile,
+                                    xuid,
+                                    current_definition_index,
+                                    kTargetTagWeaponViewModel ^ 0x7200ull,
+                                    keychain_profile);
                             std::wstringstream hud_warning;
                             hud_warning << L"Exact HUD weapon entity was not resolved for watched XUID " << xuid
                                 << L" on active weapon entity " << entity_index
@@ -59974,7 +70096,8 @@ void PollGameThreadStateModern()
                                 allow_knife_definition_override,
                                 applied_weapon_entities,
                                 applied_weapons,
-                                &pending_weapon_refresh_requests) ||
+                                &pending_weapon_refresh_requests,
+                                keychain_profile) ||
                             linked_applied;
                         linked_applied =
                             TryApplyWeaponLinkedHandle(
@@ -59993,7 +70116,8 @@ void PollGameThreadStateModern()
                                 allow_knife_definition_override,
                                 applied_weapon_entities,
                                 applied_weapons,
-                                 &pending_weapon_refresh_requests) ||
+                                 &pending_weapon_refresh_requests,
+                                keychain_profile) ||
                              linked_applied;
                     }
                 }
@@ -60082,7 +70206,8 @@ void PollGameThreadStateModern()
                               effective_profile,
                               xuid,
                               current_definition_index,
-                              kTargetTagWeaponViewModel);
+                              kTargetTagWeaponViewModel,
+                              keychain_profile);
                 std::wstringstream diagnostic;
                 diagnostic << L"Prioritized active weapon apply for XUID " << xuid
                     << L" on entity " << entity_index << L".";
@@ -60136,11 +70261,15 @@ void PollGameThreadStateModern()
                     normalized_base_item == 42
                         ? nullptr
                         : nskinzcs2::ConfigStore::FindMatchingProfile(config, xuid, normalized_base_item);
+                const auto* keychain_profile =
+                    normalized_base_item == 42
+                        ? nullptr
+                        : nskinzcs2::ConfigStore::FindMatchingKeychainProfile(config, xuid, normalized_base_item);
                 const auto* knife_profile =
                     normalized_base_item == 42
                         ? nskinzcs2::ConfigStore::FindMatchingKnifeProfile(config, xuid)
                         : nullptr;
-                if (weapon_profile == nullptr && knife_profile == nullptr)
+                if (weapon_profile == nullptr && knife_profile == nullptr && keychain_profile == nullptr)
                 {
                     continue;
                 }
@@ -60204,6 +70333,15 @@ void PollGameThreadStateModern()
                             g_hook_state.entity_system_ready.load(),
                             &observer_resolution,
                             &bridge_resolution);
+                    PopulateKnifeResourceModelSwapEvidence(
+                        knife_context,
+                        xuid,
+                        watched_xuid,
+                        entity_index,
+                        player_binding.active_weapon_entity_index,
+                        knife_request.model_definition,
+                        entity_cache,
+                        g_hook_state.schema_offsets);
                     const auto gate =
                         nskinzcs2::runtime::EvaluateKnifeApplyGate(
                             {knife_request, knife_context});
@@ -60236,20 +70374,24 @@ void PollGameThreadStateModern()
                             current_definition_index);
                     apply_linked_weapon_writes = false;
                     prefer_standard_weapon_appearance_pipeline =
-                        gate.allow_finish_writes &&
-                        gate.knife_sync_ready &&
+                        gate.allow_model_writes &&
                         gate.resolved_mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish;
                     weapon_signature =
                         BuildKnifeProfileApplySignature(runtime_knife_request, xuid, current_definition_index, kTargetTagWeaponEntity);
                     weapon_mesh_group_mask = 1ull;
                     use_temporary_world_refresh_model = false;
-                    const auto runtime_signature =
+                    auto runtime_signature =
                         BuildKnifeProfileApplySignature(
                             runtime_knife_request,
                             xuid,
                             current_definition_index,
                             kTargetTagWeaponEntity) ^
                         0x32ull;
+                    runtime_signature =
+                        BuildKnifeRuntimeChainDiagnosticSignature(
+                            runtime_signature,
+                            knife_context,
+                            gate);
                     std::wstringstream runtime_stream;
                     runtime_stream << L"Knife runtime chain for XUID " << xuid
                         << L": world_entity=" << knife_context.world_entity_index
@@ -60267,7 +70409,15 @@ void PollGameThreadStateModern()
                         << L", providee_entity=" << knife_context.providee_entity_index
                         << L", owner_kind=" << nskinzcs2::runtime::KnifeFirstPersonOwnerKindText(knife_context.first_person_owner_kind)
                         << L", sync_ready=" << (gate.knife_sync_ready ? 1 : 0)
+                        << L", resource_swap_ready=" << (knife_context.resource_model_swap_ready ? 1 : 0)
+                        << L", resource_target_handle_ready="
+                        << (knife_context.resource_query_target_handle_ready ? 1 : 0)
+                        << L", resource_pairs=" << knife_context.resource_query_redirect_pairs
+                        << L", resource_hits=" << knife_context.resource_query_redirect_hits
+                        << L", resource_readback=" << (knife_context.resource_model_path_readback_changed ? 1 : 0)
                         << L", finish_writes=" << (gate.allow_finish_writes ? 1 : 0)
+                        << L", model_writes=" << (gate.allow_model_writes ? 1 : 0)
+                        << L", animation_remap=" << (gate.allow_animation_remap ? 1 : 0)
                         << L", requested_definition=" << knife_request.model_definition
                         << L", definition_override=" << effective_profile.override_item;
                     LogProfileDiagnosticOnce(runtime_signature, runtime_stream.str());
@@ -60281,19 +70431,50 @@ void PollGameThreadStateModern()
                 else
                 {
                     ++matched_profiles;
-                    effective_profile = *weapon_profile;
+                    const auto keychain_only_profile =
+                        weapon_profile == nullptr &&
+                        keychain_profile != nullptr;
+                    if (weapon_profile != nullptr)
+                    {
+                        effective_profile = *weapon_profile;
+                    }
+                    else
+                    {
+                        effective_profile = {};
+                        effective_profile.name =
+                            keychain_profile != nullptr && !keychain_profile->name.empty()
+                                ? keychain_profile->name
+                                : std::string("Default");
+                        effective_profile.xuid = xuid;
+                        effective_profile.base_item = normalized_base_item;
+                    }
                     allow_knife_definition_override = false;
                     apply_linked_weapon_writes =
+                        keychain_profile == nullptr &&
                         ShouldApplyLinkedWeaponWrites(effective_profile, weapon_binding.knife_sync_ready);
                     weapon_signature =
                         BuildProfileApplySignature(
                             effective_profile,
                             xuid,
                             current_definition_index,
-                            kTargetTagWeaponEntity);
+                            kTargetTagWeaponEntity,
+                            keychain_profile);
                     weapon_mesh_group_mask =
                         ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
+                    if (keychain_only_profile &&
+                        !TryReadWeaponMeshGroupMask(entity, g_hook_state.schema_offsets, weapon_mesh_group_mask))
+                    {
+                        weapon_mesh_group_mask =
+                            ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
+                    }
                     use_temporary_world_refresh_model = UsesTemporaryWorldWeaponRefreshModel(effective_profile);
+                    const auto demo_keychain_controller_owns_apply =
+                        keychain_only_profile &&
+                        g_hook_state.demo_playing.load(std::memory_order_acquire);
+                    if (demo_keychain_controller_owns_apply)
+                    {
+                        continue;
+                    }
                 }
 
                 const auto weapon_refresh_target =
@@ -60345,14 +70526,19 @@ void PollGameThreadStateModern()
 
                         handled_by_exact_weapon_pipeline =
                             TryApplyStandardWeaponAppearancePipeline(
+                                entity_list,
+                                highest_live_entity_index,
+                                entity_cache,
                                 rendered_world_trace,
                                 g_hook_state.schema_offsets,
                                 effective_profile,
+                                keychain_profile,
                                 xuid,
                                 current_definition_index,
                                 weapon_signature,
                                 weapon_mesh_group_mask,
                                 allow_knife_definition_override,
+                                nullptr,
                                 applied_weapon_entities,
                                 applied_weapons);
                         if (!handled_by_exact_weapon_pipeline)
@@ -60380,7 +70566,8 @@ void PollGameThreadStateModern()
                                 effective_profile,
                                 xuid,
                                 current_definition_index,
-                                kTargetTagWeaponViewModel);
+                                kTargetTagWeaponViewModel,
+                                keychain_profile);
                         std::wstringstream diagnostic;
                         diagnostic << L"Weapon world/viewmodel pair rebound for XUID " << xuid
                             << L" on entity " << entity_index << L".";
@@ -60416,14 +70603,19 @@ void PollGameThreadStateModern()
                             weapon_binding.viewmodel_entity_index = rendered_world_trace.hud_weapon_entity_index;
                         }
                         TryApplyStandardWeaponAppearancePipeline(
+                            entity_list,
+                            highest_live_entity_index,
+                            entity_cache,
                             rendered_world_trace,
                             g_hook_state.schema_offsets,
                             effective_profile,
+                            keychain_profile,
                             xuid,
                             current_definition_index,
                             weapon_signature,
                             weapon_mesh_group_mask,
                             allow_knife_definition_override,
+                            nullptr,
                             applied_weapon_entities,
                             applied_weapons);
                         if (weapon_binding.knife_sync_ready)
@@ -60433,7 +70625,8 @@ void PollGameThreadStateModern()
                                     effective_profile,
                                     xuid,
                                     current_definition_index,
-                                    kTargetTagWeaponViewModel);
+                                    kTargetTagWeaponViewModel,
+                                    keychain_profile);
                             std::wstringstream diagnostic;
                             diagnostic << L"Weapon world/viewmodel pair rebound for XUID " << xuid
                                 << L" on entity " << entity_index << L".";
@@ -60448,7 +70641,8 @@ void PollGameThreadStateModern()
                             effective_profile,
                             xuid,
                             current_definition_index,
-                            kTargetTagWeaponCanonical ^ 0x7200ull);
+                            kTargetTagWeaponCanonical ^ 0x7200ull,
+                            keychain_profile);
                     std::wstringstream warning_stream;
                     warning_stream << L"Failed to resolve exact world weapon trace for XUID "
                         << xuid
@@ -60480,7 +70674,8 @@ void PollGameThreadStateModern()
                     weapon_item_view,
                     applied_weapon_entities,
                     applied_weapons,
-                    &pending_weapon_refresh_requests);
+                    &pending_weapon_refresh_requests,
+                    keychain_profile);
                 const auto fallback_refresh_queued =
                     pending_weapon_refresh_requests.size() > queued_refresh_request_count_before;
                 if (knife_profile != nullptr && (fallback_direct_applied || fallback_refresh_queued))
@@ -60508,7 +70703,8 @@ void PollGameThreadStateModern()
                             allow_knife_definition_override,
                             applied_weapon_entities,
                             applied_weapons,
-                            &pending_weapon_refresh_requests) ||
+                            &pending_weapon_refresh_requests,
+                            keychain_profile) ||
                         linked_applied;
                     linked_applied =
                         TryApplyWeaponLinkedHandle(
@@ -60527,7 +70723,8 @@ void PollGameThreadStateModern()
                             allow_knife_definition_override,
                             applied_weapon_entities,
                             applied_weapons,
-                            &pending_weapon_refresh_requests) ||
+                            &pending_weapon_refresh_requests,
+                            keychain_profile) ||
                         linked_applied;
                 }
 
@@ -60544,7 +70741,8 @@ void PollGameThreadStateModern()
                                   effective_profile,
                                   xuid,
                                   current_definition_index,
-                                  kTargetTagWeaponViewModel);
+                                  kTargetTagWeaponViewModel,
+                                  keychain_profile);
                     std::wstringstream diagnostic;
                     diagnostic << L"Weapon world/viewmodel pair rebound for XUID " << xuid
                         << L" on entity " << entity_index << L".";
@@ -60914,11 +71112,8 @@ void PollGameThreadStateModern()
                     g_hook_state.schema_offsets,
                     pawn_glove_item_view,
                     pawn_glove_definition_index);
-            const auto prefer_pawn_render_fallback =
-                request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
-                pawn_glove_valid;
 
-            if (!prefer_pawn_render_fallback)
+            if (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish)
             {
                 TryResolveWearableGloveCarrier(
                     entity_list,
@@ -60935,8 +71130,7 @@ void PollGameThreadStateModern()
 
             std::uint32_t runtime_glove_handle = player_binding.runtime_glove_handle;
             bool created_runtime_glove = false;
-            if (!prefer_pawn_render_fallback &&
-                !carrier.valid &&
+            if (!carrier.valid &&
                 request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish)
             {
                 int runtime_glove_entity_index = -1;
@@ -61012,6 +71206,7 @@ void PollGameThreadStateModern()
 
             const auto using_pawn_render_fallback =
                 request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                !carrier.valid &&
                 pawn_glove_valid;
             if (using_pawn_render_fallback)
             {
@@ -61467,10 +71662,13 @@ void PollGameThreadStateModern()
             if (using_pawn_render_fallback)
             {
                 glove_pawn_fallback_bound = true;
-                ScheduleRuntimeOwnedGloveAttributeBindingRelease(
-                    active_glove_item_view,
-                    applied_glove_entity_index,
-                    applied_glove_signature);
+                if (ShouldAllowDirectAttributeListWrites(g_hook_state.schema_offsets))
+                {
+                    ScheduleRuntimeOwnedGloveAttributeBindingRelease(
+                        active_glove_item_view,
+                        applied_glove_entity_index,
+                        applied_glove_signature);
+                }
             }
 
             RememberAppliedSignature(
@@ -61496,7 +71694,7 @@ void PollGameThreadStateModern()
         }
     }
 
-    if (!watched_knife_model_swap_requested)
+    if (!target_knife_model_swap_requested)
     {
         ClearKnifeModelPathSwapState(true);
     }
@@ -61708,14 +71906,27 @@ DemoSafetyPrepareReason ResolveDemoSafetyPrepareReason(
 
 void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(const int cur_stage)
 {
+    const auto has_runtime_mutations = HasDemoSeekSensitiveRuntimeMutations();
     std::size_t binding_count = 0;
     {
         std::lock_guard<std::mutex> lock(g_hook_state.runtime_owned_attribute_mutex);
         binding_count = g_hook_state.runtime_owned_attribute_bindings.size();
     }
 
-    if (binding_count == 0 &&
-        g_hook_state.tracked_weapon_restore_points.empty())
+    const auto tracked_weapon_count = g_hook_state.tracked_weapon_restore_points.size();
+    const auto active_knife_path_state = g_hook_state.knife_model_path_state.active ? 1 : 0;
+    const auto active_pending_knife_rebuild = g_hook_state.pending_knife_rebuild_state.active ? 1 : 0;
+    const auto active_pending_knife_verify = g_hook_state.pending_knife_post_refresh_verification.active ? 1 : 0;
+    const auto active_phase2_interception = g_hook_state.knife_phase2_model_bind_interception.active ? 1 : 0;
+    int active_knife_swap_state = 0;
+    int active_knife_published_bridge = 0;
+    {
+        std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+        active_knife_swap_state = g_hook_state.knife_model_path_swap_state.enabled ? 1 : 0;
+        active_knife_published_bridge = g_hook_state.published_knife_model_path_swap_bridge.valid ? 1 : 0;
+    }
+
+    if (!has_runtime_mutations)
     {
         return;
     }
@@ -61747,13 +71958,12 @@ void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(const int cur_stage)
             demo_tick,
             previous_demo_tick,
             previous_demo_paused,
-            true);
+            has_runtime_mutations);
     if (prepare_reason == DemoSafetyPrepareReason::None)
     {
         return;
     }
 
-    const auto tracked_weapon_count = g_hook_state.tracked_weapon_restore_points.size();
     if (prepare_reason == DemoSafetyPrepareReason::LikelySeek)
     {
         PrepareAppliedCosmeticStateForDemoSeekBeforeOriginalFrameStage(L"likely demo seek pre-clean");
@@ -61769,7 +71979,13 @@ void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(const int cur_stage)
             << L", previous_paused=" << (previous_demo_paused ? 1 : 0)
             << L", current_paused=" << (demo_paused ? 1 : 0)
             << L", released_attribute_bindings=" << binding_count
-            << L", tracked_weapon_snapshots=" << tracked_weapon_count;
+            << L", tracked_weapon_snapshots=" << tracked_weapon_count
+            << L", knife_path_state=" << active_knife_path_state
+            << L", knife_pending_rebuild=" << active_pending_knife_rebuild
+            << L", knife_pending_verify=" << active_pending_knife_verify
+            << L", knife_phase2_interception=" << active_phase2_interception
+            << L", knife_swap_state=" << active_knife_swap_state
+            << L", knife_published_bridge=" << active_knife_published_bridge;
         nskinzcs2::Logger::Info(stream.str());
         return;
     }
@@ -61802,16 +72018,7 @@ void SuspendKnifeAnimationHookBeforeLikelyDemoSeek(const int cur_stage)
         return;
     }
 
-    bool has_runtime_owned_attribute_mutations = false;
-    {
-        std::lock_guard<std::mutex> lock(g_hook_state.runtime_owned_attribute_mutex);
-        has_runtime_owned_attribute_mutations =
-            !g_hook_state.runtime_owned_attribute_bindings.empty();
-    }
-
-    const auto has_runtime_mutations =
-        has_runtime_owned_attribute_mutations ||
-        !g_hook_state.tracked_weapon_restore_points.empty();
+    const auto has_runtime_mutations = HasDemoSeekSensitiveRuntimeMutations();
     const auto prepare_reason =
         ResolveDemoSafetyPrepareReason(
             cur_stage,
@@ -61906,6 +72113,10 @@ int HookedClientConnect(void* this_ptr, CreateInterfaceFn app_system_factory)
 
         if (void* cvar = app_system_factory("VEngineCvar007", nullptr))
         {
+            if (g_hook_state.engine_cvar == nullptr)
+            {
+                g_hook_state.engine_cvar = cvar;
+            }
             nskinzcs2::Logger::Info(L"Late-resolved VEngineCvar007 through Source2Client::Connect app-system factory at " + FormatPointer(cvar) + L".");
         }
     }
@@ -62116,11 +72327,22 @@ std::vector<std::pair<std::uint16_t, float>> nskinzcs2::runtime::BuildWeaponRefr
     return BuildWeaponRefreshAttributesImpl(profile);
 }
 
+std::vector<std::pair<std::uint16_t, float>> nskinzcs2::runtime::BuildWeaponRefreshAttributes(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
+{
+    return BuildWeaponRefreshAttributesImpl(profile, keychain_profile);
+}
+
 std::vector<std::uint16_t> nskinzcs2::runtime::BuildMissingWeaponAttributeDefinitionIndices(
     const nskinzcs2::model::CosmeticProfile& profile,
-    const std::vector<std::uint16_t>& existing_definition_indices)
+    const std::vector<std::uint16_t>& existing_definition_indices,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
-    return BuildMissingWeaponAttributeDefinitionIndicesImpl(profile, existing_definition_indices);
+    return BuildMissingWeaponAttributeDefinitionIndicesImpl(
+        profile,
+        existing_definition_indices,
+        keychain_profile);
 }
 
 nskinzcs2::runtime::CanonicalWeaponCarrierKind nskinzcs2::runtime::ResolveCanonicalWeaponCarrierKind(
@@ -62688,9 +72910,22 @@ bool nskinzcs2::runtime::ProbeKnifeRefreshGuardBindingRestoresOnAbandonForTests(
 }
 
 bool nskinzcs2::runtime::ProbeKnifeRefreshAttachmentPromotionAllowedForTests(
-    const nskinzcs2::model::CosmeticProfile& profile) noexcept
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile) noexcept
 {
-    return ShouldPromoteWeaponRefreshAttachmentToRuntimeOwned(profile);
+    return ShouldPromoteWeaponRefreshAttachmentToRuntimeOwned(profile, keychain_profile);
+}
+
+bool nskinzcs2::runtime::ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile) noexcept
+{
+    RuntimeOwnedAttributeListBinding binding {};
+    binding.restore_on_abandon =
+        ShouldRestorePromotedWeaponRefreshAttachmentOnAbandon(profile, keychain_profile);
+    return RuntimeOwnedAttributeBindingRestoresOriginalOnRelease(
+        binding,
+        AttributeBindingReleaseMode::AbandonInstalled);
 }
 
 bool nskinzcs2::runtime::ProbePassiveWatchedKnifeTraceGateForTests(
@@ -62848,31 +73083,15 @@ void nskinzcs2::RuntimeController::Start()
 
 void nskinzcs2::RuntimeController::Stop()
 {
+    Logger::Info(L"Runtime stop requested.");
     stop_requested_.store(true);
     if (worker_.joinable())
     {
         worker_.join();
     }
+    Logger::Info(L"Runtime stop: worker joined.");
 
-    g_hook_state.frame_stage_patch.Remove();
-    g_hook_state.connect_patch.Remove();
-    ClearKnifeModelPathSwapQueryHooks();
-    RemoveGlobalResourceSwapper();
-    ReleaseRuntimeOwnedAttributeListBindings(AttributeBindingReleaseMode::AbandonInstalled);
-    RestoreWeaponSkinRefreshBinding(g_hook_state.weapon_skin_refresh);
-    g_hook_state.frame_stage_hook_installed.store(false);
-    g_hook_state.connect_hook_installed.store(false);
-    g_hook_state.runtime_faulted.store(false);
-    g_hook_state.weapon_skin_refresh_ready.store(false);
-    g_hook_state.weapon_skin_refresh_state.store(nskinzcs2::runtime::WeaponSkinRefreshState::Disabled);
-    g_hook_state.knife_refresh_helper_policy.store(kDefaultKnifeRefreshHelperPolicy);
-    g_hook_state.knife_refresh_helper_epoch_generation.store(0);
-    ClearKnifeRefreshHelperEpoch();
-    g_hook_state.weapon_skin_refresh_attempted_since_rearm.store(false);
-    g_hook_state.weapon_skin_refresh_unavailable_logged.store(false);
-    g_hook_state.weapon_skin_refresh_fault_logged.store(false);
-    g_hook_state.weapon_skin_refresh_rearm_logged.store(false);
-    g_hook_state.resource_handle_query_earliest_safe_tick.store(0);
+    RunRuntimeCleanupSequence(L"Runtime stop cleanup", false, false);
     global_swapper_early_attempted_.store(false);
     global_swapper_early_reason_.clear();
     global_swapper_early_route_.clear();
@@ -62881,6 +73100,7 @@ void nskinzcs2::RuntimeController::Stop()
     hook_activation_requested_.store(false);
     logged_unavailable_refresh_.store(false);
     g_hook_state.app_state = nullptr;
+    Logger::Info(L"Runtime stop completed.");
 }
 
 std::wstring nskinzcs2::RuntimeController::CurrentProcessPath()
@@ -62973,6 +73193,7 @@ void nskinzcs2::RuntimeController::WorkerLoopImpl()
             auto status = BuildStatusSkeleton();
             status.process_path = CurrentProcessPath();
             status.process_detected = IsCs2Process(status.process_path);
+            g_hook_state.demo_keychain_authoritative_xuid.store(0, std::memory_order_release);
 
             if (!status.process_detected)
             {
@@ -62995,6 +73216,7 @@ void nskinzcs2::RuntimeController::WorkerLoopImpl()
                 continue;
             }
 
+            ConsumeDemoKeychainRefresh(status);
             ConsumeManualRefresh(status);
             if (!hook_installed_.load() && !hook_activation_requested_.load())
             {
@@ -63112,28 +73334,7 @@ void nskinzcs2::RuntimeController::ReportWorkerThreadFailure(const wchar_t* mess
 {
     Logger::Error(message);
 
-    g_hook_state.frame_stage_patch.Remove();
-    g_hook_state.connect_patch.Remove();
-    ClearKnifeModelPathSwapQueryHooks();
-    RemoveGlobalResourceSwapper();
-    ReleaseRuntimeOwnedAttributeListBindings(AttributeBindingReleaseMode::AbandonInstalled);
-    RestoreWeaponSkinRefreshBinding(g_hook_state.weapon_skin_refresh);
-    g_hook_state.frame_stage_hook_installed.store(false);
-    g_hook_state.connect_hook_installed.store(false);
-    g_hook_state.runtime_faulted.store(false);
-    g_hook_state.manual_refresh_requested.store(false);
-    g_hook_state.weapon_skin_refresh_ready.store(false);
-    g_hook_state.weapon_skin_refresh_state.store(nskinzcs2::runtime::WeaponSkinRefreshState::Disabled);
-    g_hook_state.knife_refresh_helper_policy.store(kDefaultKnifeRefreshHelperPolicy);
-    g_hook_state.knife_refresh_helper_epoch_generation.store(0);
-    ClearKnifeRefreshHelperEpoch();
-    g_hook_state.weapon_skin_refresh_attempted_since_rearm.store(false);
-    g_hook_state.weapon_skin_refresh_unavailable_logged.store(false);
-    g_hook_state.weapon_skin_refresh_fault_logged.store(false);
-    g_hook_state.weapon_skin_refresh_rearm_logged.store(false);
-    g_hook_state.resource_system_interface = nullptr;
-    g_hook_state.resource_handle_utils_interface = nullptr;
-    SyncResourceHandleQueryBindings();
+    RunRuntimeCleanupSequence(L"Runtime fault cleanup", true, true);
     hook_installed_.store(false);
     global_swapper_early_attempted_.store(false);
     global_swapper_early_reason_.clear();
@@ -63476,6 +73677,10 @@ bool nskinzcs2::RuntimeController::TryInstallRuntimeHook(runtime::Status& status
     {
         g_hook_state.engine_to_client = bindings.engine_to_client.address;
     }
+    if (g_hook_state.engine_cvar == nullptr)
+    {
+        g_hook_state.engine_cvar = bindings.engine_cvar.address;
+    }
 
     const auto previous_source2_client_interface = g_hook_state.source2_client_interface.load();
     if (previous_source2_client_interface == nullptr)
@@ -63535,6 +73740,10 @@ bool nskinzcs2::RuntimeController::TryRunManualCarrierOnlyProbe(
     if (bindings.engine_to_client.address != nullptr && g_hook_state.engine_to_client == nullptr)
     {
         g_hook_state.engine_to_client = bindings.engine_to_client.address;
+    }
+    if (bindings.engine_cvar.address != nullptr && g_hook_state.engine_cvar == nullptr)
+    {
+        g_hook_state.engine_cvar = bindings.engine_cvar.address;
     }
     if (bindings.game_ui_service.address != nullptr && g_hook_state.game_ui_service == nullptr)
     {
@@ -64072,6 +74281,34 @@ bool nskinzcs2::RuntimeController::TryRunManualCarrierOnlyProbe(
     return true;
 }
 
+void nskinzcs2::RuntimeController::ConsumeDemoKeychainRefresh(runtime::Status& status)
+{
+    if (!state_.ConsumeDemoKeychainRefreshRequest())
+    {
+        return;
+    }
+
+    if (!hook_installed_.load())
+    {
+        hook_activation_requested_.store(true);
+        carrier_probe_requested_.store(false);
+        g_hook_state.manual_refresh_requested.store(true);
+        g_hook_state.resource_handle_query_earliest_safe_tick.store(GetTickCount64() + 1500);
+        status.last_error.clear();
+        status.diagnostics.push_back(
+            L"Demo keychain refresh requested before the runtime hook was attached, so a one-shot manual refresh was armed instead.");
+        Logger::Info(
+            L"Demo keychain refresh requested before the runtime hook was attached; escalating to a one-shot manual refresh.");
+        return;
+    }
+
+    g_hook_state.next_runtime_poll_millis.store(0, std::memory_order_release);
+    status.diagnostics.push_back(
+        L"Demo keychain refresh requested. The next runtime poll will rescan the current demo weapon without a full rebuild.");
+    Logger::Info(
+        L"Demo keychain refresh requested. The next runtime poll will rescan the current demo weapon without a full rebuild.");
+}
+
 void nskinzcs2::RuntimeController::ConsumeManualRefresh(runtime::Status& status)
 {
     if (!state_.ConsumeManualRefreshRequest())
@@ -64115,6 +74352,7 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
 {
     const auto knife_refresh_policy = g_hook_state.knife_refresh_helper_policy.load();
     const auto knife_refresh_epoch_armed = KnifeRefreshHelperEpochArmed();
+    const auto demo_keychain_state = SnapshotDemoKeychainControllerState();
     status.hook_installed = g_hook_state.frame_stage_hook_installed.load();
     status.frame_callbacks_active = g_hook_state.frame_seen.load();
     status.frame_callback_count = g_hook_state.frame_callback_count.load();
@@ -64136,7 +74374,19 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     status.knife_viewmodel_sync_ready = g_hook_state.knife_viewmodel_sync_ready.load();
     status.runtime_rebuilding = g_hook_state.runtime_rebuilding.load();
     status.watched_xuid = g_hook_state.watched_xuid.load();
-    status.probed_xuid = g_hook_state.probed_xuid.load();
+    status.probed_xuid = 0;
+    status.demo_keychain_authoritative_xuid = 0;
+    status.demo_keychain_state = demo_keychain_state.state;
+    status.demo_keychain_create_disabled = demo_keychain_state.session_create_disabled;
+    status.demo_keychain_owner_xuid = demo_keychain_state.owner_xuid;
+    status.demo_console_capture_ready = false;
+    status.demo_console_query_inflight = false;
+    status.demo_keychain_weapon_entity_index = demo_keychain_state.weapon_entity_index;
+    status.demo_keychain_base_item = demo_keychain_state.base_item;
+    status.demo_keychain_module_entity_index = demo_keychain_state.keychain_module_entity_index;
+    status.demo_keychain_live_def_id = static_cast<int>(demo_keychain_state.live_keychain_kit);
+    status.demo_keychain_stable_frame_count = static_cast<int>(demo_keychain_state.stable_frame_count);
+    status.demo_console_player_count = 0;
     status.highest_entity_index = g_hook_state.highest_live_entity_index.load();
     status.player_controller_count = g_hook_state.player_controller_count.load();
     status.player_pawn_count = g_hook_state.player_pawn_count.load();
@@ -64153,6 +74403,10 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     status.weapon_skin_refresh_state = g_hook_state.weapon_skin_refresh_state.load();
     status.level_name = SnapshotLevelName();
     status.rebuild_reason = g_hook_state.last_rebuild_reason;
+    status.demo_keychain_profile_name = NarrowToWide(demo_keychain_state.matched_profile_name);
+    status.demo_keychain_issue = demo_keychain_state.last_issue;
+    status.demo_console_detail.clear();
+    status.demo_console_issue.clear();
     status.demo_guard_passed =
         status.demo_playing || HasResourceHandleQueryLiveLevelContext(status);
 
@@ -64272,12 +74526,6 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     }
     status.diagnostics.push_back(
         L"Crash guard: knife attribute-list vector growth and runtime-owned installs are disabled; fallback/in-place writes only.");
-
-    if (status.probed_xuid != 0)
-    {
-        status.diagnostics.push_back(
-            L"Probed weapon-owner XUID: " + std::to_wstring(status.probed_xuid));
-    }
 
     if (status.demo_playing)
     {
@@ -64807,6 +75055,116 @@ nskinzcs2::runtime::KnifeViewmodelAbsenceAuditResult nskinzcs2::runtime::ProbeCl
          audit.shared_with_render_object ||
          audit.reverse_viewmodel_ref_count != 0);
     return ClassifyKnifeViewmodelAbsenceAudit(audit);
+}
+
+nskinzcs2::runtime::KnifePhase2TargetMode nskinzcs2::runtime::ProbeResolveKnifePhase2TargetSelectionForTests(
+    const KnifePhase2TargetSelectionProbeInput& input) noexcept
+{
+    KnifePhase2TargetModeFacts facts {};
+    facts.has_real_first_person_render_target = input.has_real_first_person_render_target;
+    facts.has_real_first_person_owner = input.has_real_first_person_owner;
+    facts.no_exposed_non_synthetic_render_owner =
+        input.no_exposed_non_synthetic_render_owner;
+    facts.viewmodel_absence_result = input.viewmodel_absence_result;
+    facts.consumer_clusters = input.consumer_clusters;
+    facts.entity_bound_clusters = input.entity_bound_clusters;
+    facts.anonymous_clusters = input.anonymous_clusters;
+    facts.single_consumer_is_entity_bound_world =
+        input.single_consumer_is_entity_bound_world;
+    facts.caller_matches_valid_hit = input.caller_matches_valid_hit;
+
+    const wchar_t* refusal_reason = nullptr;
+    return ResolveKnifePhase2TargetModeFromFacts(facts, refusal_reason);
+}
+
+bool nskinzcs2::runtime::ProbeEvaluateKnifeWorldOnlyRenderVerificationForTests(
+    const KnifeWorldOnlyRenderVerificationProbeInput& input) noexcept
+{
+    KnifeWorldOnlyRenderVerificationInputs verification_inputs;
+    verification_inputs.world_render_state_resolved = input.world_render_state_resolved;
+    verification_inputs.world_render_expected_model_resolved =
+        input.world_render_expected_model_resolved;
+    verification_inputs.world_render_model_matches_target =
+        input.world_render_model_matches_target;
+    verification_inputs.world_render_handle_matches_target_or_donor =
+        input.world_render_handle_matches_target_or_donor;
+    verification_inputs.world_render_mesh_matches_target =
+        input.world_render_mesh_matches_target;
+    verification_inputs.resource_hits = input.resource_hits;
+    verification_inputs.resource_readback = input.resource_readback;
+    return EvaluateKnifeWorldOnlyRenderVerification(verification_inputs).verified;
+}
+
+nskinzcs2::runtime::KnifePhase2ArmProbeResult nskinzcs2::runtime::ProbeKnifePhase2ArmGateForTests(
+    const KnifePhase2ArmProbeInput& input) noexcept
+{
+    KnifePhase2ArmProbeResult result {};
+
+    KnifeModelPathBinding binding {};
+    binding.world_entity_index = input.world_render_entity_index;
+    binding.world_entity =
+        input.world_render_entity_index >= 0 ? reinterpret_cast<void*>(0x1000ull) : nullptr;
+    binding.world_item_view =
+        input.world_render_entity_index >= 0 ? reinterpret_cast<void*>(0x1100ull) : nullptr;
+    binding.world_render_entity_index = input.world_render_entity_index;
+    binding.world_render_entity =
+        input.world_render_entity_index >= 0 ? reinterpret_cast<void*>(0x1200ull) : nullptr;
+    binding.world_render_item_view =
+        input.world_render_entity_index >= 0 ? reinterpret_cast<void*>(0x1300ull) : nullptr;
+    binding.first_person_render_entity_index = input.first_person_render_entity_index;
+    binding.first_person_render_entity =
+        input.first_person_render_entity_index != -1 ? reinterpret_cast<void*>(0x1400ull) : nullptr;
+    binding.first_person_render_source = L"owner";
+
+    KnifePhase2TargetSelection selection {};
+    selection.mode = input.target_mode;
+    selection.desired_mesh_group_mask_valid = true;
+    selection.desired_mesh_group_mask = 1ull;
+    switch (input.target_mode)
+    {
+    case nskinzcs2::runtime::KnifePhase2TargetMode::WorldOnlyConsumer:
+        selection.render_entity_index = binding.world_render_entity_index;
+        selection.render_entity = binding.world_render_entity;
+        selection.render_source = L"world_only_consumer_phase2";
+        selection.synthetic_render_proxy = false;
+        selection.desired_world_model_name =
+            RememberPersistentModelName("models/weapons/w_knife_karam.vmdl");
+        selection.desired_model_name = selection.desired_world_model_name;
+        selection.desired_model_name_pointer = selection.desired_model_name;
+        break;
+    case nskinzcs2::runtime::KnifePhase2TargetMode::FirstPersonRender:
+        selection.render_entity_index = binding.first_person_render_entity_index;
+        selection.render_entity = binding.first_person_render_entity;
+        selection.render_source = binding.first_person_render_source;
+        selection.synthetic_render_proxy = input.first_person_render_entity_synthetic;
+        selection.desired_first_person_model_name =
+            RememberPersistentModelName("models/weapons/v_knife_karam.vmdl");
+        selection.desired_model_name = selection.desired_first_person_model_name;
+        selection.desired_model_name_pointer = selection.desired_model_name;
+        break;
+    default:
+        selection.refusal_reason = L"world_only_consumer_not_confirmed";
+        break;
+    }
+
+    const auto armed =
+        TryArmKnifePhase2ModelBindInterception(
+            binding,
+            selection,
+            0x15ull,
+            0x25ull,
+            false,
+            76561198086901534ull,
+            507);
+    result.armed = armed;
+    result.target_mode = g_hook_state.knife_phase2_model_bind_interception.target_mode;
+    result.render_entity_index = g_hook_state.knife_phase2_model_bind_interception.render_entity_index;
+    result.synthetic_render_proxy =
+        g_hook_state.knife_phase2_model_bind_interception.synthetic_render_proxy;
+
+    ClearKnifeModelResourceOverrideHook();
+    g_hook_state.knife_phase2_model_bind_interception = {};
+    return result;
 }
 
 std::wstring nskinzcs2::runtime::ProbeBuildKnifeCarrierRuntimeReasonTextForTests(

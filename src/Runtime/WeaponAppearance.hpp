@@ -92,6 +92,8 @@ struct WeaponAppearanceSnapshot
     int fallback_seed = 0;
     float fallback_wear = 0.0000001f;
     int fallback_stat_trak = 0;
+    std::uint32_t keychain_def_id = 0;
+    std::uint32_t keychain_seed = 0;
     std::uint16_t definition_index = 0;
     std::uint32_t owner_xuid_low = 0;
     std::uint32_t owner_xuid_high = 0;
@@ -107,6 +109,8 @@ struct WeaponAppearanceSnapshot
     bool has_item_id_low = false;
     bool has_account_id = false;
     bool has_quality = false;
+    bool has_keychain_def_id = false;
+    bool has_keychain_seed = false;
     bool has_econ_entity_initialized = false;
     bool has_item_view_initialized = false;
     bool has_custom_name = false;
@@ -131,7 +135,8 @@ struct WeaponAppearanceApplyResult
 ResolvedWeaponAppearanceBinding ResolveWeaponAppearanceBinding(const WeaponAppearanceBindingInputs& inputs) noexcept;
 WeaponAppearancePayload BuildWeaponAppearancePayload(
     const nskinzcs2::model::CosmeticProfile& profile,
-    std::uint32_t account_id);
+    std::uint32_t account_id,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr);
 bool WeaponAppearanceNeedsIndependentHudApply(
     bool hud_entity_present,
     int hud_entity_index,

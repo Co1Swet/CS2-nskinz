@@ -33,5 +33,13 @@ public:
     static const model::KnifeProfile* FindMatchingKnifeProfile(
         const model::ConfigDocument& document,
         std::uint64_t xuid);
+    static model::KeychainProfile* FindMatchingKeychainProfile(
+        model::ConfigDocument& document,
+        std::uint64_t xuid,
+        int base_item);
+    static const model::KeychainProfile* FindMatchingKeychainProfile(
+        const model::ConfigDocument& document,
+        std::uint64_t xuid,
+        int base_item);
 };
 }

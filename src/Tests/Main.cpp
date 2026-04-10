@@ -63,6 +63,30 @@ bool ContainsDefinitionIndex(
     return std::find(definition_indices.begin(), definition_indices.end(), definition_index) != definition_indices.end();
 }
 
+void ExpectContainsKeychainSlotZeroAttributes(
+    const std::vector<std::pair<std::uint16_t, float>>& attributes,
+    const float expected_keychain_id)
+{
+    Expect(ContainsRefreshAttribute(attributes, 299, expected_keychain_id), "keychain block should include id");
+    Expect(ContainsRefreshAttribute(attributes, 300, 0.0f), "keychain block should include offset x");
+    Expect(ContainsRefreshAttribute(attributes, 301, 0.0f), "keychain block should include offset y");
+    Expect(ContainsRefreshAttribute(attributes, 302, 0.0f), "keychain block should include offset z");
+    Expect(ContainsRefreshAttribute(attributes, 306, 0.0f), "keychain block should include seed");
+    Expect(ContainsRefreshAttribute(attributes, 314, 0.0f), "keychain block should include highlight");
+    Expect(ContainsRefreshAttribute(attributes, 321, 0.0f), "keychain block should include sticker");
+}
+
+void ExpectContainsKeychainSlotZeroDefinitionIndices(const std::vector<std::uint16_t>& definition_indices)
+{
+    Expect(ContainsDefinitionIndex(definition_indices, 299), "keychain block should include id");
+    Expect(ContainsDefinitionIndex(definition_indices, 300), "keychain block should include offset x");
+    Expect(ContainsDefinitionIndex(definition_indices, 301), "keychain block should include offset y");
+    Expect(ContainsDefinitionIndex(definition_indices, 302), "keychain block should include offset z");
+    Expect(ContainsDefinitionIndex(definition_indices, 306), "keychain block should include seed");
+    Expect(ContainsDefinitionIndex(definition_indices, 314), "keychain block should include highlight");
+    Expect(ContainsDefinitionIndex(definition_indices, 321), "keychain block should include sticker");
+}
+
 struct ExecutableBuffer
 {
     std::uint8_t* address = nullptr;
@@ -610,9 +634,11 @@ void TestConfigRoundTrip()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
+    Expect(loaded.version == 4, "config should round-trip version 4");
     Expect(loaded.profiles.size() == 1, "config should contain one profile");
     Expect(loaded.profiles[0].name == "AK test", "profile name should round-trip");
     Expect(loaded.profiles[0].stickers[0].kit_id == 3, "sticker should round-trip");
+    Expect(!loaded.keychain_profiles.empty(), "config load should repair missing keychain profiles");
     Expect(
         loaded.experimental_allow_hud_alias_synthetic_proxy_model_write,
         "experimental HUD proxy write toggle should round-trip");
@@ -641,6 +667,50 @@ void TestProfileMatching()
     const auto* match = nskinzcs2::ConfigStore::FindMatchingProfile(document, 10, 9);
     Expect(match != nullptr, "profile lookup should find matching profile");
     Expect(match->name == "AWP", "profile lookup should choose correct base item");
+}
+
+void TestKeychainConfigAndMatching()
+{
+    namespace fs = std::filesystem;
+    const auto temp_path = fs::temp_directory_path() / "nSkinzCS2.keychain.config.test.json";
+
+    nskinzcs2::model::ConfigDocument document;
+
+    nskinzcs2::model::KeychainProfile first;
+    first.name = "AK Charm Old";
+    first.enabled = true;
+    first.xuid = 10;
+    first.base_item = 7;
+    first.keychain_kit = 1001;
+    document.keychain_profiles.push_back(first);
+
+    nskinzcs2::model::KeychainProfile second = first;
+    second.name = "AK Charm New";
+    second.keychain_kit = 1002;
+    document.keychain_profiles.push_back(second);
+
+    nskinzcs2::model::KeychainProfile awp;
+    awp.name = "AWP Charm";
+    awp.enabled = true;
+    awp.xuid = 10;
+    awp.base_item = 9;
+    awp.keychain_kit = 2001;
+    document.keychain_profiles.push_back(awp);
+
+    Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "keychain config save should succeed");
+    const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
+
+    Expect(loaded.version == 4, "keychain config should round-trip version 4");
+    const auto* ak_match = nskinzcs2::ConfigStore::FindMatchingKeychainProfile(loaded, 10, 7);
+    Expect(ak_match != nullptr, "keychain profile lookup should find the configured weapon binding");
+    Expect(ak_match->name == "AK Charm New", "duplicate keychain bindings should keep the last entry");
+    Expect(ak_match->keychain_kit == 1002, "duplicate keychain bindings should keep the last kit id");
+
+    const auto* awp_match = nskinzcs2::ConfigStore::FindMatchingKeychainProfile(loaded, 10, 9);
+    Expect(awp_match != nullptr, "keychain profile lookup should distinguish different weapons");
+    Expect(awp_match->keychain_kit == 2001, "keychain lookup should preserve per-weapon bindings");
+
+    fs::remove(temp_path);
 }
 
 void TestGloveConfigAndMatching()
@@ -680,7 +750,7 @@ void TestGloveConfigAndMatching()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "glove config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 3, "glove config should round-trip version 3");
+    Expect(loaded.version == 4, "glove config should round-trip version 4");
     Expect(!loaded.glove_profiles.empty(), "glove config should contain glove profiles");
     Expect(loaded.glove_profiles[0].mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish, "glove mode should round-trip");
     Expect(loaded.glove_profiles[0].model_definition == 5030, "glove model should round-trip");
@@ -716,7 +786,7 @@ void TestKnifeProfileConfigMigration()
     }
 
     auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(loaded.version == 3, "legacy knife config should migrate to version 3");
+    Expect(loaded.version == 4, "legacy knife config should migrate to version 4");
     Expect(loaded.profiles.size() == 1, "legacy knife entries should be removed from weapon profiles");
     Expect(loaded.profiles[0].base_item == 7, "non-knife weapon entries should remain after migration");
 
@@ -745,6 +815,7 @@ void TestKnifeProfileConfigMigration()
     }
 
     loaded = nskinzcs2::ConfigStore::Load(temp_path);
+    Expect(loaded.version == 4, "explicit knife config should normalize to version 4");
     const auto* explicit_knife = nskinzcs2::ConfigStore::FindMatchingKnifeProfile(loaded, 20);
     Expect(explicit_knife != nullptr, "explicit knife profile should remain available");
     Expect(explicit_knife->name == "Explicit Knife", "explicit knife_profiles entry should beat legacy knife profiles");
@@ -818,6 +889,7 @@ void TestCatalogFallback()
     Expect(!catalog.base_items.empty(), "fallback catalog should contain base items");
     Expect(!catalog.weapon_paint_kits.empty(), "fallback catalog should contain paint kits");
     Expect(!catalog.glove_paint_compatibility.empty(), "fallback catalog should expose glove paint compatibility");
+    Expect(!catalog.keychain_kits.empty(), "fallback catalog should contain keychain entries");
     Expect(!catalog.runtime_populated, "fallback catalog should not claim runtime population");
     Expect(!catalog.warnings.empty(), "fallback catalog should surface warnings");
 
@@ -1083,6 +1155,10 @@ void TestCatalogFromGameText()
             "model_player" "models/weapons/v_rif_ak47.mdl"
             "model_world" "models/weapons/w_rif_ak47.mdl"
         }
+        "16"
+        {
+            "name" "weapon_m4a1"
+        }
     }
     "paint_kits"
     {
@@ -1106,6 +1182,15 @@ void TestCatalogFromGameText()
             "sticker_material" "crown/crown"
         }
     }
+    "keychain_definitions"
+    {
+        "101"
+        {
+            "name" "charm_diamond_dog"
+            "loc_name" "#Keychain_diamond_dog"
+            "pedestal_display_model" "weapons/keychains/diamond_dog/kc_diamond_dog.vmdl"
+        }
+    }
 }
 )kv";
 
@@ -1118,6 +1203,7 @@ void TestCatalogFromGameText()
         "PaintKit_Default" "Default"
         "PaintKit_Printstream" "Printstream"
         "StickerKit_crown" "Crown (Foil)"
+        "Keychain_diamond_dog" "Diamond Dog"
     }
 }
 )kv";
@@ -1126,6 +1212,7 @@ void TestCatalogFromGameText()
     Expect(catalog.has_value(), "catalog should parse from in-memory game text");
     Expect(catalog->runtime_populated, "text-backed catalog should mark itself populated");
     Expect(catalog->weapon_paint_kits.size() == 2, "text-backed catalog should expose full parsed paint kits");
+    Expect(catalog->keychain_kits.size() == 2, "text-backed catalog should expose parsed keychain kits");
 
     const auto printstream_it = std::find_if(
         catalog->weapon_paint_kits.begin(),
@@ -1136,6 +1223,36 @@ void TestCatalogFromGameText()
         });
     Expect(printstream_it != catalog->weapon_paint_kits.end(), "in-memory parse should preserve weapon paint kits");
     Expect(printstream_it->name == "Printstream", "in-memory parse should preserve localized paint kit names");
+
+    const auto keychain_it = std::find_if(
+        catalog->keychain_kits.begin(),
+        catalog->keychain_kits.end(),
+        [](const nskinzcs2::model::NamedId& item)
+        {
+            return item.id == 101;
+        });
+    Expect(keychain_it != catalog->keychain_kits.end(), "in-memory parse should preserve keychain kits");
+    Expect(keychain_it->name == "Diamond Dog", "in-memory parse should preserve localized keychain names");
+
+    const auto keychain_visual_it = catalog->keychain_visuals.find(101);
+    Expect(keychain_visual_it != catalog->keychain_visuals.end(), "in-memory parse should preserve keychain model mappings");
+    Expect(
+        keychain_visual_it->second.model_path == "weapons/keychains/diamond_dog/kc_diamond_dog.vmdl",
+        "in-memory parse should preserve keychain raw model paths");
+    Expect(
+        keychain_visual_it->second.resolved_model_resource_path ==
+            "weapons/keychains/diamond_dog/kc_diamond_dog.vmdl_c",
+        "in-memory parse should derive keychain compiled model paths");
+
+    const auto m4a4_it = std::find_if(
+        catalog->base_items.begin(),
+        catalog->base_items.end(),
+        [](const nskinzcs2::model::NamedId& item)
+        {
+            return item.id == 16;
+        });
+    Expect(m4a4_it != catalog->base_items.end(), "in-memory parse should preserve the M4A4 entry");
+    Expect(m4a4_it->name == "M4A4", "known base weapons should prefer canonical catalog names over ambiguous raw ids");
 }
 
 void TestCatalogFromRealGameFilesIfProvided()
@@ -1158,11 +1275,14 @@ void TestCatalogFromRealGameFilesIfProvided()
     Expect(catalog->runtime_populated, "real installed game catalog should be runtime populated");
     Expect(catalog->weapon_paint_kits.size() > 100, "real installed game files should provide a large weapon paint list");
     Expect(catalog->sticker_kits.size() > 100, "real installed game files should provide a large sticker list");
+    Expect(catalog->keychain_kits.size() > 1, "real installed game files should provide parsed keychain kits");
+    Expect(!catalog->keychain_visuals.empty(), "real installed game files should provide keychain model mappings");
     Expect(catalog->qualities.size() >= 5, "real installed game files should provide quality entries");
     std::cout
         << "real catalog counts: weapon paints=" << catalog->weapon_paint_kits.size()
         << ", glove paints=" << catalog->glove_paint_kits.size()
         << ", stickers=" << catalog->sticker_kits.size()
+        << ", keychains=" << catalog->keychain_kits.size()
         << ", qualities=" << catalog->qualities.size()
         << '\n';
 }
@@ -1235,6 +1355,7 @@ void TestKnifeRefreshCrashGuardPolicy()
     using nskinzcs2::runtime::KnifeRefreshHelperPolicyArmsOnRebuildReason;
     using nskinzcs2::runtime::ProbeKnifeRefreshAttachmentPromotionAllowedForTests;
     using nskinzcs2::runtime::ProbeKnifeRefreshGuardBindingRestoresOnAbandonForTests;
+    using nskinzcs2::runtime::ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests;
     using nskinzcs2::runtime::RuntimeRebuildReason;
     using nskinzcs2::runtime::ShouldAllowAttributeListVectorMutationForProfile;
     using nskinzcs2::runtime::ShouldAllowWeaponRefreshHelperDispatch;
@@ -1333,6 +1454,9 @@ void TestKnifeRefreshCrashGuardPolicy()
         Expect(
             !ProbeKnifeRefreshAttachmentPromotionAllowedForTests(knife_profile),
             "knife refresh helper attachments must restore immediately instead of promoting to runtime-owned");
+        Expect(
+            ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(knife_profile),
+            "knife promoted refresh helper attachments should restore on abandon-mode cleanup boundaries");
     }
 
     {
@@ -1347,6 +1471,16 @@ void TestKnifeRefreshCrashGuardPolicy()
         Expect(
             !ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile),
             "standard weapon refresh helper attachments should still restore immediately after helper dispatch");
+
+        nskinzcs2::model::KeychainProfile keychain_profile;
+        keychain_profile.base_item = weapon_profile.base_item;
+        keychain_profile.keychain_kit = 101;
+        Expect(
+            ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile, &keychain_profile),
+            "standard weapon keychain refresh helper attachments should promote to runtime-owned so the full keychain block survives cleanup");
+        Expect(
+            !ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(weapon_profile, &keychain_profile),
+            "standard weapon keychain promoted refresh helper attachments should not rewrite the original attribute vector during demo-seek cleanup");
     }
 
     Expect(
@@ -1754,6 +1888,72 @@ void TestKnifeAppearanceModule()
         providee_only_gate.resolved_model_definition == model_request.model_definition,
         "providee-only finish-only knife paths should still preserve the resolved target definition for the query swap path");
 
+    KnifeApplyGateInputs resource_swap_inputs = providee_only_inputs;
+    resource_swap_inputs.context.resource_query_bridge_ready = true;
+    resource_swap_inputs.context.resource_model_swap_ready = false;
+    resource_swap_inputs.context.resource_query_redirect_pairs = 2;
+    resource_swap_inputs.context.resource_query_redirect_hits = 0;
+    const auto resource_swap_gate = EvaluateKnifeApplyGate(resource_swap_inputs);
+    Expect(
+        resource_swap_gate.allow_finish_writes &&
+            !resource_swap_gate.allow_model_writes &&
+            !resource_swap_gate.allow_animation_remap &&
+            resource_swap_gate.degraded &&
+            resource_swap_gate.resolved_mode == KnifeSlotMode::FinishOnly,
+        "resource-query-backed knife swaps must stay on the finish-only path until the resource layer marks the bridge state as ready for model writes");
+    Expect(
+        resource_swap_gate.reason == KnifeApplyGateReason::MissingFirstPersonBinding,
+        "resource-query-backed knife swaps must not report the model path as ready when the bridge has not exposed a writable target handle, hit, or readback");
+    Expect(
+        resource_swap_gate.resolved_model_definition == model_request.model_definition,
+        "resource-query-backed knife swaps should preserve the resolved target definition");
+
+    auto resource_swap_handle_inputs = resource_swap_inputs;
+    resource_swap_handle_inputs.context.resource_query_target_handle_ready = true;
+    resource_swap_handle_inputs.context.resource_model_swap_ready = true;
+    const auto resource_swap_handle_gate = EvaluateKnifeApplyGate(resource_swap_handle_inputs);
+    Expect(
+        resource_swap_handle_gate.allow_finish_writes &&
+            resource_swap_handle_gate.allow_model_writes &&
+            !resource_swap_handle_gate.allow_animation_remap &&
+            resource_swap_handle_gate.degraded &&
+            resource_swap_handle_gate.resolved_mode == KnifeSlotMode::ModelAndFinish,
+        "resource-query-backed knife swaps should unlock model replacement once the bridge exposes a stable writable target handle");
+    Expect(
+        resource_swap_handle_gate.reason == KnifeApplyGateReason::ReadyForModelAndFinish,
+        "a stable bridge target handle should mark the resource-layer model path as ready");
+
+    auto resource_swap_hit_inputs = resource_swap_inputs;
+    resource_swap_hit_inputs.context.resource_model_swap_ready = true;
+    resource_swap_hit_inputs.context.resource_query_redirect_hits = 1;
+    const auto resource_swap_hit_gate = EvaluateKnifeApplyGate(resource_swap_hit_inputs);
+    Expect(
+        resource_swap_hit_gate.allow_finish_writes &&
+            resource_swap_hit_gate.allow_model_writes &&
+            !resource_swap_hit_gate.allow_animation_remap &&
+            resource_swap_hit_gate.degraded &&
+            resource_swap_hit_gate.resolved_mode == KnifeSlotMode::ModelAndFinish,
+        "resource-query-backed knife swaps should unlock model replacement after the hook records a real redirected resource hit");
+    Expect(
+        resource_swap_hit_gate.reason == KnifeApplyGateReason::ReadyForModelAndFinish,
+        "resource-query-backed knife swaps should report the resource-layer model path as ready after a real redirected resource hit");
+
+    auto resource_swap_readback_inputs = resource_swap_inputs;
+    resource_swap_readback_inputs.context.resource_model_swap_ready = true;
+    resource_swap_readback_inputs.context.resource_model_path_readback_changed = true;
+    resource_swap_readback_inputs.context.resource_world_model_matches_target = true;
+    const auto resource_swap_readback_gate = EvaluateKnifeApplyGate(resource_swap_readback_inputs);
+    Expect(
+        resource_swap_readback_gate.allow_finish_writes &&
+            resource_swap_readback_gate.allow_model_writes &&
+            !resource_swap_readback_gate.allow_animation_remap &&
+            resource_swap_readback_gate.degraded &&
+            resource_swap_readback_gate.resolved_mode == KnifeSlotMode::ModelAndFinish,
+        "resource-query-backed knife swaps should unlock model replacement after live model-path readback confirms the target model");
+    Expect(
+        resource_swap_readback_gate.reason == KnifeApplyGateReason::ReadyForModelAndFinish,
+        "live model-path readback confirmation should mark the resource-layer model path as ready");
+
     KnifeApplyGateInputs missing_watched_inputs = model_inputs;
     missing_watched_inputs.context.watched_target = false;
     const auto missing_watched_gate = EvaluateKnifeApplyGate(missing_watched_inputs);
@@ -1765,6 +1965,21 @@ void TestKnifeAppearanceModule()
     Expect(
         missing_watched_gate.reason == KnifeApplyGateReason::MissingWatchedKnife,
         "non-watched knife model paths should report the watched-player degrade reason");
+
+    KnifeApplyGateInputs missing_watched_resource_hit_inputs = resource_swap_hit_inputs;
+    missing_watched_resource_hit_inputs.context.watched_target = false;
+    const auto missing_watched_resource_hit_gate =
+        EvaluateKnifeApplyGate(missing_watched_resource_hit_inputs);
+    Expect(
+        missing_watched_resource_hit_gate.allow_finish_writes &&
+            missing_watched_resource_hit_gate.allow_model_writes &&
+            !missing_watched_resource_hit_gate.allow_animation_remap &&
+            missing_watched_resource_hit_gate.degraded &&
+            missing_watched_resource_hit_gate.resolved_mode == KnifeSlotMode::ModelAndFinish,
+        "resource-query-backed knife swaps should stay on the model path after a real redirected hit even when the watched target moved away");
+    Expect(
+        missing_watched_resource_hit_gate.reason == KnifeApplyGateReason::ReadyForModelAndFinish,
+        "resource-query-backed knife swaps should not degrade to MissingWatchedKnife after a real redirected hit");
 
     KnifeApplyGateInputs degraded_classifier_inputs = model_inputs;
     degraded_classifier_inputs.context.attack_classifier_ready = false;
@@ -1979,6 +2194,112 @@ void TestKnifeAppearanceModule()
             !verification.verified &&
                 verification.reason == KnifeRenderVerificationReason::WorldRenderModelMismatch,
             "world render model mismatches must force knife model+finish back to fail-closed");
+    }
+}
+
+void TestKnifePhase2WorldOnlyModule()
+{
+    using nskinzcs2::runtime::KnifePhase2ArmProbeInput;
+    using nskinzcs2::runtime::KnifePhase2TargetMode;
+    using nskinzcs2::runtime::KnifePhase2TargetSelectionProbeInput;
+    using nskinzcs2::runtime::KnifeViewmodelAbsenceAuditResult;
+    using nskinzcs2::runtime::KnifeWorldOnlyRenderVerificationProbeInput;
+    using nskinzcs2::runtime::ProbeEvaluateKnifeWorldOnlyRenderVerificationForTests;
+    using nskinzcs2::runtime::ProbeKnifePhase2ArmGateForTests;
+    using nskinzcs2::runtime::ProbeResolveKnifePhase2TargetSelectionForTests;
+
+    {
+        KnifePhase2TargetSelectionProbeInput input;
+        input.has_real_first_person_render_target = true;
+
+        Expect(
+            ProbeResolveKnifePhase2TargetSelectionForTests(input) ==
+                KnifePhase2TargetMode::FirstPersonRender,
+            "phase2 target selection must preserve a real non-synthetic first-person render target");
+    }
+
+    {
+        KnifePhase2TargetSelectionProbeInput input;
+        input.no_exposed_non_synthetic_render_owner = true;
+        input.viewmodel_absence_result = KnifeViewmodelAbsenceAuditResult::MissingHandle;
+        input.consumer_clusters = 1;
+        input.entity_bound_clusters = 1;
+        input.anonymous_clusters = 0;
+        input.single_consumer_is_entity_bound_world = true;
+        input.caller_matches_valid_hit = true;
+
+        Expect(
+            ProbeResolveKnifePhase2TargetSelectionForTests(input) ==
+                KnifePhase2TargetMode::WorldOnlyConsumer,
+            "missing-handle single-world-consumer evidence must arm the world-only phase2 target");
+    }
+
+    {
+        KnifePhase2TargetSelectionProbeInput input;
+        input.no_exposed_non_synthetic_render_owner = true;
+        input.viewmodel_absence_result = KnifeViewmodelAbsenceAuditResult::MissingHandle;
+        input.consumer_clusters = 2;
+        input.entity_bound_clusters = 1;
+        input.anonymous_clusters = 1;
+        input.single_consumer_is_entity_bound_world = false;
+        input.caller_matches_valid_hit = true;
+
+        Expect(
+            ProbeResolveKnifePhase2TargetSelectionForTests(input) ==
+                KnifePhase2TargetMode::None,
+            "any anonymous knife query consumer must block world-only phase2 arming");
+    }
+
+    {
+        KnifeWorldOnlyRenderVerificationProbeInput input;
+        input.world_render_state_resolved = true;
+        input.world_render_expected_model_resolved = true;
+        input.world_render_model_matches_target = true;
+        input.world_render_handle_matches_target_or_donor = true;
+        input.world_render_mesh_matches_target = true;
+        input.resource_hits = 14;
+        input.resource_readback = true;
+
+        Expect(
+            ProbeEvaluateKnifeWorldOnlyRenderVerificationForTests(input),
+            "world-only verification must pass only when world model, handle, mesh, hits and readback all align");
+
+        input.resource_hits = 0;
+        Expect(
+            !ProbeEvaluateKnifeWorldOnlyRenderVerificationForTests(input),
+            "world-only verification must fail once resource hits disappear");
+
+        input.resource_hits = 14;
+        input.resource_readback = false;
+        Expect(
+            !ProbeEvaluateKnifeWorldOnlyRenderVerificationForTests(input),
+            "world-only verification must fail without resource readback");
+
+        input.resource_readback = true;
+        input.world_render_handle_matches_target_or_donor = false;
+        Expect(
+            !ProbeEvaluateKnifeWorldOnlyRenderVerificationForTests(input),
+            "world-only verification must fail when the live world handle matches neither target nor donor");
+    }
+
+    {
+        KnifePhase2ArmProbeInput input;
+        input.target_mode = KnifePhase2TargetMode::WorldOnlyConsumer;
+        input.world_render_entity_index = 215;
+        input.first_person_render_entity_index = -73;
+        input.first_person_render_entity_synthetic = true;
+
+        const auto result = ProbeKnifePhase2ArmGateForTests(input);
+        Expect(result.armed, "world-only phase2 target should arm once the census path is confirmed");
+        Expect(
+            result.target_mode == KnifePhase2TargetMode::WorldOnlyConsumer,
+            "world-only phase2 arm must preserve the explicit target mode");
+        Expect(
+            result.render_entity_index == 215,
+            "world-only phase2 arm must bind the real world render entity instead of a synthetic first-person proxy");
+        Expect(
+            !result.synthetic_render_proxy,
+            "world-only phase2 arm must not mark the target as synthetic");
     }
 }
 
@@ -3129,6 +3450,19 @@ void TestBuildWeaponRefreshAttributes()
         const auto attributes = nskinzcs2::runtime::BuildWeaponRefreshAttributes(profile);
         Expect(attributes.empty(), "custom-name-only profiles should not force a weapon refresh attribute payload");
     }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        nskinzcs2::model::KeychainProfile keychain_profile;
+        keychain_profile.xuid = 10;
+        keychain_profile.base_item = 7;
+        keychain_profile.keychain_kit = 101;
+
+        const auto attributes = nskinzcs2::runtime::BuildWeaponRefreshAttributes(profile, &keychain_profile);
+        Expect(attributes.size() == 7, "keychain refresh should emit the full slot 0 attribute block");
+        ExpectContainsKeychainSlotZeroAttributes(attributes, 101.0f);
+    }
 }
 
 void TestBuildMissingWeaponAttributeDefinitionIndices()
@@ -3165,6 +3499,20 @@ void TestBuildMissingWeaponAttributeDefinitionIndices()
         Expect(ContainsDefinitionIndex(missing, 114), "missing attribute set should include sticker wear");
         Expect(ContainsDefinitionIndex(missing, 115), "missing attribute set should include sticker scale");
         Expect(ContainsDefinitionIndex(missing, 116), "missing attribute set should include sticker rotation");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        nskinzcs2::model::KeychainProfile keychain_profile;
+        keychain_profile.xuid = 10;
+        keychain_profile.base_item = 7;
+        keychain_profile.keychain_kit = 101;
+
+        const auto missing =
+            nskinzcs2::runtime::BuildMissingWeaponAttributeDefinitionIndices(profile, {}, &keychain_profile);
+        Expect(missing.size() == 7, "missing attribute set should include the full keychain slot 0 attribute block");
+        ExpectContainsKeychainSlotZeroDefinitionIndices(missing);
     }
 }
 
@@ -3419,6 +3767,20 @@ void TestWeaponAppearanceModule()
     }
 
     {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        nskinzcs2::model::KeychainProfile keychain_profile;
+        keychain_profile.xuid = 10;
+        keychain_profile.base_item = 7;
+        keychain_profile.keychain_kit = 101;
+
+        const auto payload = BuildWeaponAppearancePayload(profile, 123u, &keychain_profile);
+        Expect(payload.temporary_attributes.size() == 7, "payload should include the full keychain slot 0 attribute block");
+        ExpectContainsKeychainSlotZeroAttributes(payload.temporary_attributes, 101.0f);
+        Expect(!payload.needs_refresh, "keychain-only payload should stay off the refresh helper path");
+    }
+
+    {
         Expect(
             WeaponAppearanceNeedsIndependentHudApply(true, 600, true, false),
             "an independent HUD item view should request its own exact first-person apply");
@@ -3456,6 +3818,7 @@ int RunAllTests()
     {
         RunNamedTest("TestConfigRoundTrip", TestConfigRoundTrip);
         RunNamedTest("TestProfileMatching", TestProfileMatching);
+        RunNamedTest("TestKeychainConfigAndMatching", TestKeychainConfigAndMatching);
         RunNamedTest("TestGloveConfigAndMatching", TestGloveConfigAndMatching);
         RunNamedTest("TestKnifeProfileConfigMigration", TestKnifeProfileConfigMigration);
         RunNamedTest("TestCatalogFallback", TestCatalogFallback);
@@ -3471,6 +3834,7 @@ int RunAllTests()
         RunNamedTest("TestWatchedKnifeTargetResolutionFallback", TestWatchedKnifeTargetResolutionFallback);
         RunNamedTest("TestRuntimeGloveBindingChoice", TestRuntimeGloveBindingChoice);
     RunNamedTest("TestKnifeAppearanceModule", TestKnifeAppearanceModule);
+    RunNamedTest("TestKnifePhase2WorldOnlyModule", TestKnifePhase2WorldOnlyModule);
     RunNamedTest("TestKnifeExactWorldBindingModule", TestKnifeExactWorldBindingModule);
     RunNamedTest("TestKnifeHudAliasSyntheticProxyExperiment", TestKnifeHudAliasSyntheticProxyExperiment);
     RunNamedTest("TestKnifeCarrierDiscoveryReadOnlyDiscovery", TestKnifeCarrierDiscoveryReadOnlyDiscovery);

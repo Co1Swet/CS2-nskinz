@@ -145,11 +145,16 @@ KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) 
           inputs.context.real_viewmodel_handle_valid &&
           inputs.context.real_viewmodel_weapon_matches_active_weapon &&
           inputs.context.real_viewmodel_active_weapon_verified_knife));
+    const bool has_resource_query_model_swap_evidence =
+        inputs.context.resource_query_bridge_ready &&
+        inputs.context.resource_model_swap_ready &&
+        inputs.context.resource_query_redirect_pairs > 0;
     const bool has_first_person_binding_evidence =
         has_diagnostic_first_person_binding_evidence ||
         has_direct_render_diagnostic_evidence;
     const bool has_model_write_first_person_binding_evidence =
-        has_real_viewmodel_binding_evidence;
+        has_real_viewmodel_binding_evidence ||
+        has_resource_query_model_swap_evidence;
     const bool has_safe_finish_only_first_person_evidence =
         has_first_person_binding_evidence &&
         inputs.context.first_person_source_valid &&
@@ -216,7 +221,8 @@ KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) 
         return result;
     }
 
-    if (!inputs.context.watched_target)
+    if (!inputs.context.watched_target &&
+        !has_resource_query_model_swap_evidence)
     {
         result.reason = KnifeApplyGateReason::MissingWatchedKnife;
         return result;
@@ -252,15 +258,23 @@ KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) 
         return result;
     }
 
-    result.degraded = false;
     result.allow_model_writes = true;
     result.resolved_mode = KnifeSlotMode::ModelAndFinish;
-    if (!has_real_viewmodel_binding_evidence || !inputs.context.animation_hook_ready)
+    if (!has_real_viewmodel_binding_evidence)
     {
-        result.reason = KnifeApplyGateReason::MissingAnimationFields;
+        result.degraded = true;
+        result.reason = KnifeApplyGateReason::ReadyForModelAndFinish;
         return result;
     }
 
+    if (!inputs.context.animation_hook_ready)
+    {
+        result.degraded = true;
+        result.reason = KnifeApplyGateReason::ReadyForModelAndFinish;
+        return result;
+    }
+
+    result.degraded = false;
     result.animation_binding_ready = true;
     result.animation_requires_strict_verification = true;
     result.allow_animation_remap = true;

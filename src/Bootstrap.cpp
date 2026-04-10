@@ -1,4 +1,5 @@
 #include "Core/AppState.hpp"
+#include "Core/BuildConfig.hpp"
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
@@ -465,7 +466,8 @@ std::optional<ResolvedCatalogText> TryResolveGameDataText()
     {
         const auto content_root = probe / L"csgo";
         const auto items_game_path = content_root / L"scripts" / L"items" / L"items_game.txt";
-        const auto localization_path = content_root / L"resource" / L"csgo_english.txt";
+        const auto localization_path =
+            content_root / L"resource" / nskinzcs2::build::kCatalogLocalizationFileName;
         if (std::filesystem::exists(items_game_path) && std::filesystem::exists(localization_path))
         {
             const auto items_game_text = ReadFileText(items_game_path);
@@ -484,7 +486,10 @@ std::optional<ResolvedCatalogText> TryResolveGameDataText()
         if (std::filesystem::exists(directory_vpk_path))
         {
             const auto items_game_text = ReadTextFromVpk(directory_vpk_path, "scripts/items/items_game.txt");
-            const auto localization_text = ReadTextFromVpk(directory_vpk_path, "resource/csgo_english.txt");
+            const auto localization_text =
+                ReadTextFromVpk(
+                    directory_vpk_path,
+                    std::string(nskinzcs2::build::kCatalogLocalizationVpkPath));
             if (items_game_text.has_value() && localization_text.has_value())
             {
                 return ResolvedCatalogText {

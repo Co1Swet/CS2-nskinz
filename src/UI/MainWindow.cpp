@@ -2,6 +2,7 @@
 
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
+#include "UI/UiText.hpp"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -19,6 +20,7 @@
 #include <exception>
 #include <filesystem>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -40,12 +42,24 @@ using nskinzcs2::model::ConfigDocument;
 using nskinzcs2::model::CosmeticProfile;
 using nskinzcs2::model::GloveProfile;
 using nskinzcs2::model::GloveProfileMode;
+using nskinzcs2::model::KeychainProfile;
 using nskinzcs2::model::KnifeProfile;
 using nskinzcs2::model::KnifeProfileMode;
 using nskinzcs2::model::NamedId;
+using nskinzcs2::ui::UiTextId;
 
 constexpr wchar_t kWindowClassName[] = L"nSkinzCS2.ToolWindow";
 constexpr wchar_t kWindowTitle[] = L"nSkinzCS2";
+
+const char* Ui(const UiTextId id) noexcept
+{
+    return nskinzcs2::ui::Text(id);
+}
+
+const char* YesNoText(const bool value) noexcept
+{
+    return Ui(value ? UiTextId::Yes : UiTextId::No);
+}
 
 LONG LogStructuredThreadException(const wchar_t* thread_name, EXCEPTION_POINTERS* exception_info)
 {
@@ -177,6 +191,64 @@ bool HasLegacyGloveProfiles(const ConfigDocument& document)
         });
 }
 
+bool HasEnabledNonKeychainProfiles(const ConfigDocument& document)
+{
+    const auto has_enabled_weapon_profile =
+        std::any_of(
+            document.profiles.begin(),
+            document.profiles.end(),
+            [](const CosmeticProfile& profile)
+            {
+                return profile.enabled && profile.xuid != 0;
+            });
+    if (has_enabled_weapon_profile)
+    {
+        return true;
+    }
+
+    const auto has_enabled_knife_profile =
+        std::any_of(
+            document.knife_profiles.begin(),
+            document.knife_profiles.end(),
+            [](const KnifeProfile& profile)
+            {
+                return profile.enabled && profile.xuid != 0;
+            });
+    if (has_enabled_knife_profile)
+    {
+        return true;
+    }
+
+    return std::any_of(
+        document.glove_profiles.begin(),
+        document.glove_profiles.end(),
+        [](const GloveProfile& profile)
+        {
+            return profile.enabled && profile.xuid != 0;
+        });
+}
+
+bool HasEnabledKeychainProfiles(const ConfigDocument& document)
+{
+    return std::any_of(
+        document.keychain_profiles.begin(),
+        document.keychain_profiles.end(),
+        [](const KeychainProfile& profile)
+        {
+            return profile.enabled && profile.xuid != 0 && profile.keychain_kit > 0;
+        });
+}
+
+bool ShouldUseLightweightDemoKeychainRefresh(
+    const nskinzcs2::runtime::Status& status,
+    const ConfigDocument& document)
+{
+    return status.hook_installed &&
+        status.frame_callbacks_active &&
+        HasEnabledKeychainProfiles(document) &&
+        !HasEnabledNonKeychainProfiles(document);
+}
+
 int CompatibleGloveItemForPaint(const Catalog& catalog, const int paint_kit)
 {
     if (paint_kit == 0)
@@ -237,11 +309,11 @@ const char* GloveModeLabel(const GloveProfileMode mode)
     switch (mode)
     {
     case GloveProfileMode::FinishOnly:
-        return "Finish Only";
+        return Ui(UiTextId::FinishOnly);
     case GloveProfileMode::ModelAndFinish:
-        return "Model + Finish";
+        return Ui(UiTextId::ModelAndFinish);
     default:
-        return "Finish Only";
+        return Ui(UiTextId::FinishOnly);
     }
 }
 
@@ -263,11 +335,11 @@ const char* KnifeModeLabel(const KnifeProfileMode mode)
     switch (mode)
     {
     case KnifeProfileMode::FinishOnly:
-        return "Finish Only";
+        return Ui(UiTextId::FinishOnly);
     case KnifeProfileMode::ModelAndFinish:
-        return "Model + Finish";
+        return Ui(UiTextId::ModelAndFinish);
     default:
-        return "Finish Only";
+        return Ui(UiTextId::FinishOnly);
     }
 }
 
@@ -289,7 +361,7 @@ bool DrawKnifeModeCombo(KnifeProfileMode& mode)
     }
 
     bool changed = false;
-    if (ImGui::BeginCombo("Mode", KnifeModeLabel(mode)))
+    if (ImGui::BeginCombo(Ui(UiTextId::Mode), KnifeModeLabel(mode)))
     {
         for (int index = 0; index < static_cast<int>(kModes.size()); ++index)
         {
@@ -330,7 +402,7 @@ bool DrawKnifeModeCombo(KnifeProfileMode& mode)
     }
 
     bool changed = false;
-    if (ImGui::BeginCombo("Mode", GloveModeLabel(mode)))
+    if (ImGui::BeginCombo(Ui(UiTextId::Mode), GloveModeLabel(mode)))
     {
         for (int index = 0; index < static_cast<int>(kModes.size()); ++index)
         {
@@ -441,26 +513,98 @@ bool DrawKnifeModeCombo(KnifeProfileMode& mode)
         return true;
     }
 
+    bool TryValidateKeychainProfilesForApply(
+        const ConfigDocument& document,
+        const Catalog& catalog,
+        std::wstring& issue)
+    {
+        issue.clear();
+        for (const auto& profile : document.keychain_profiles)
+        {
+            if (!profile.enabled)
+            {
+                continue;
+            }
+
+            if (profile.xuid == 0)
+            {
+                issue = L"Keychain profile '" + std::wstring(profile.name.begin(), profile.name.end()) +
+                    L"' is invalid: enabled keychain slots require a non-zero XUID.";
+                return false;
+            }
+
+            if (!ContainsNamedId(catalog.base_items, profile.base_item) ||
+                IsKnifeBaseItem(profile.base_item) ||
+                IsGloveBaseItem(profile.base_item) ||
+                IsCatalogKnifeItem(catalog, profile.base_item) ||
+                IsCatalogGloveItem(catalog, profile.base_item))
+            {
+                issue = L"Keychain profile '" + std::wstring(profile.name.begin(), profile.name.end()) +
+                    L"' is invalid: keychains only support standard weapon definitions.";
+                return false;
+            }
+
+            if (profile.keychain_kit <= 0)
+            {
+                issue = L"Keychain profile '" + std::wstring(profile.name.begin(), profile.name.end()) +
+                    L"' is invalid: modify-only demo keychain slots require a non-zero keychain kit.";
+                return false;
+            }
+
+            if (!ContainsNamedId(catalog.keychain_kits, profile.keychain_kit))
+            {
+                issue = L"Keychain profile '" + std::wstring(profile.name.begin(), profile.name.end()) +
+                    L"' is invalid: selected keychain kit was not found in the catalog.";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
 const char* AvailabilityText(const nskinzcs2::runtime::Availability availability)
 {
     switch (availability)
     {
     case nskinzcs2::runtime::Availability::Unknown:
-        return "Unknown";
+        return Ui(UiTextId::AvailabilityUnknown);
     case nskinzcs2::runtime::Availability::MissingProcess:
-        return "Missing process";
+        return Ui(UiTextId::AvailabilityMissingProcess);
     case nskinzcs2::runtime::Availability::MissingHlae:
-        return "Missing HLAE";
+        return Ui(UiTextId::AvailabilityMissingHlae);
     case nskinzcs2::runtime::Availability::MissingInterfaces:
-        return "Missing interfaces";
+        return Ui(UiTextId::AvailabilityMissingInterfaces);
     case nskinzcs2::runtime::Availability::MissingHook:
-        return "Runtime idle (safe mode)";
+        return Ui(UiTextId::AvailabilityRuntimeIdle);
     case nskinzcs2::runtime::Availability::HookedPendingDemoGuard:
-        return "Hooked (runtime pending)";
+        return Ui(UiTextId::AvailabilityHookedPending);
     case nskinzcs2::runtime::Availability::Ready:
-        return "Ready";
+        return Ui(UiTextId::AvailabilityReady);
     default:
-        return "Unknown";
+        return Ui(UiTextId::AvailabilityUnknown);
+    }
+}
+
+const char* DemoKeychainStateText(const nskinzcs2::runtime::DemoKeychainState state)
+{
+    switch (state)
+    {
+    case nskinzcs2::runtime::DemoKeychainState::Idle:
+        return Ui(UiTextId::DemoKeychainIdle);
+    case nskinzcs2::runtime::DemoKeychainState::WaitingCooldown:
+        return Ui(UiTextId::DemoKeychainWaitingCooldown);
+    case nskinzcs2::runtime::DemoKeychainState::WaitingStableFrames:
+        return Ui(UiTextId::DemoKeychainWaitingStableFrames);
+    case nskinzcs2::runtime::DemoKeychainState::WaitingFactory:
+        return Ui(UiTextId::DemoKeychainWaitingFactory);
+    case nskinzcs2::runtime::DemoKeychainState::Applied:
+        return Ui(UiTextId::DemoKeychainApplied);
+    case nskinzcs2::runtime::DemoKeychainState::ClearPending:
+        return Ui(UiTextId::DemoKeychainClearPending);
+    case nskinzcs2::runtime::DemoKeychainState::Failed:
+        return Ui(UiTextId::DemoKeychainFailed);
+    default:
+        return Ui(UiTextId::DemoKeychainIdle);
     }
 }
 
@@ -531,7 +675,7 @@ bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, c
 
         ImGui::PushID(static_cast<int>(combo_id));
         ImGui::SetNextItemWidth(-FLT_MIN);
-        if (ImGui::InputTextWithHint("##search", "Search...", filter_buffer, sizeof(filter_buffer)))
+        if (ImGui::InputTextWithHint("##search", Ui(UiTextId::SearchHint), filter_buffer, sizeof(filter_buffer)))
         {
             filter = filter_buffer;
         }
@@ -552,7 +696,7 @@ bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, c
 
         if (visible_indices.empty())
         {
-            ImGui::TextDisabled("No matches");
+            ImGui::TextDisabled("%s", Ui(UiTextId::NoMatches));
         }
         else
         {
@@ -586,6 +730,28 @@ bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, c
     }
 
     return changed;
+}
+
+std::optional<std::filesystem::path> ResolveChineseUiFontPath()
+{
+    static constexpr std::array<const wchar_t*, 5> kCandidates {
+        L"C:\\Windows\\Fonts\\msyh.ttc",
+        L"C:\\Windows\\Fonts\\msyhl.ttc",
+        L"C:\\Windows\\Fonts\\msyhbd.ttc",
+        L"C:\\Windows\\Fonts\\simhei.ttf",
+        L"C:\\Windows\\Fonts\\simsun.ttc",
+    };
+
+    for (const auto* candidate : kCandidates)
+    {
+        const std::filesystem::path path(candidate);
+        if (std::filesystem::exists(path))
+        {
+            return path;
+        }
+    }
+
+    return std::nullopt;
 }
 
 std::string Narrow(const std::wstring& value)
@@ -713,6 +879,7 @@ private:
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
+        ConfigureFonts();
         ImGui::StyleColorsDark();
         ApplyStyle();
 
@@ -725,6 +892,46 @@ private:
         state_.SetWindowVisible(false);
         resources_created_ = true;
         return true;
+    }
+
+    void ConfigureFonts()
+    {
+        auto& io = ImGui::GetIO();
+        io.Fonts->AddFontDefault();
+
+        if (!nskinzcs2::build::kUiLanguageChinese)
+        {
+            return;
+        }
+
+        const auto font_path = ResolveChineseUiFontPath();
+        if (!font_path.has_value())
+        {
+            Logger::Warn(L"Chinese UI font was not found on this system; UI will fall back to the default ImGui font.");
+            return;
+        }
+
+        ImFontConfig config {};
+        config.OversampleH = 2;
+        config.OversampleV = 2;
+        config.PixelSnapH = false;
+
+        const auto utf8_path = font_path->string();
+        if (ImFont* font = io.Fonts->AddFontFromFileTTF(
+                utf8_path.c_str(),
+                18.0f,
+                &config,
+                io.Fonts->GetGlyphRangesChineseFull());
+            font != nullptr)
+        {
+            io.FontDefault = font;
+            Logger::Info(L"Chinese UI font loaded from " + font_path->wstring());
+        }
+        else
+        {
+            Logger::Warn(L"Chinese UI font load failed for " + font_path->wstring() +
+                L"; UI will fall back to the default ImGui font.");
+        }
     }
 
     void Cleanup()
@@ -961,9 +1168,9 @@ private:
             return;
         }
 
-        ImGui::TextUnformatted("nSkinz");
+        ImGui::TextUnformatted(Ui(UiTextId::AppTitle));
         ImGui::SameLine();
-        ImGui::TextDisabled("CS2 demo edition");
+        ImGui::TextDisabled("%s", Ui(UiTextId::AppSubtitle));
         ImGui::Separator();
 
         EnsureSelection();
@@ -971,15 +1178,17 @@ private:
         {
             ImGui::TextColored(
                 ImVec4(0.94f, 0.42f, 0.25f, 1.0f),
-                "Legacy glove entries remain in profiles and are ignored at runtime.");
+                "%s",
+                Ui(UiTextId::LegacyGloveWarningTitle));
             ImGui::TextWrapped(
-                "Move glove configs into Gloves, or delete old base_item=5028 entries from profiles.");
+                "%s",
+                Ui(UiTextId::LegacyGloveWarningBody));
             ImGui::Separator();
         }
 
         if (ImGui::BeginTabBar("EquipmentSlots"))
         {
-            if (ImGui::BeginTabItem("Weapons"))
+            if (ImGui::BeginTabItem(Ui(UiTextId::TabWeapons)))
             {
                 ImGui::Columns(2, nullptr, false);
                 DrawProfileList(catalog);
@@ -995,13 +1204,13 @@ private:
                 else
                 {
                     ImGui::Separator();
-                    ImGui::TextDisabled("Stickers are unavailable for this entry.");
+                    ImGui::TextDisabled("%s", Ui(UiTextId::StickersUnavailable));
                 }
 
                 ImGui::EndTabItem();
             }
 
-            if (ImGui::BeginTabItem("Knives"))
+            if (ImGui::BeginTabItem(Ui(UiTextId::TabKnives)))
             {
                 ImGui::Columns(2, nullptr, false);
                 DrawKnifeProfileList();
@@ -1011,12 +1220,22 @@ private:
                 ImGui::EndTabItem();
             }
 
-            if (ImGui::BeginTabItem("Gloves"))
+            if (ImGui::BeginTabItem(Ui(UiTextId::TabGloves)))
             {
                 ImGui::Columns(2, nullptr, false);
                 DrawGloveProfileList();
                 ImGui::NextColumn();
                 DrawGloveProfileEditor(catalog, status);
+                ImGui::Columns(1);
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem(Ui(UiTextId::TabKeychains)))
+            {
+                ImGui::Columns(2, nullptr, false);
+                DrawKeychainProfileList(catalog);
+                ImGui::NextColumn();
+                DrawKeychainProfileEditor(catalog);
                 ImGui::Columns(1);
                 ImGui::EndTabItem();
             }
@@ -1028,66 +1247,70 @@ private:
         DrawActions();
 
         ImGui::Separator();
-        ImGui::Text("Runtime: %s", AvailabilityText(status.availability));
-        ImGui::TextWrapped("Detail: %s", Narrow(status.detail).c_str());
-        ImGui::Text("Frame callbacks: %llu", static_cast<unsigned long long>(status.frame_callback_count));
+        ImGui::Text(Ui(UiTextId::RuntimeFormat), AvailabilityText(status.availability));
+        ImGui::TextWrapped(Ui(UiTextId::DetailFormat), Narrow(status.detail).c_str());
+        ImGui::Text(Ui(UiTextId::FrameCallbacksFormat), static_cast<unsigned long long>(status.frame_callback_count));
         if (status.last_frame_stage >= 0)
         {
-            ImGui::Text("Last stage: %d", status.last_frame_stage);
+            ImGui::Text(Ui(UiTextId::LastStageFormat), status.last_frame_stage);
         }
-        ImGui::Text("Demo: %s", status.demo_playing ? (status.demo_paused ? "Playing (paused)" : "Playing") : "Waiting");
+        ImGui::Text(
+            Ui(UiTextId::DemoFormat),
+            status.demo_playing
+                ? (status.demo_paused ? Ui(UiTextId::DemoPlayingPaused) : Ui(UiTextId::DemoPlaying))
+                : Ui(UiTextId::DemoWaiting));
         if (!status.level_name.empty())
         {
-            ImGui::Text("Level: %s", Narrow(status.level_name).c_str());
+            ImGui::Text(Ui(UiTextId::LevelFormat), Narrow(status.level_name).c_str());
         }
         if (status.demo_tick >= 0)
         {
-            ImGui::Text("Demo tick: %d", status.demo_tick);
+            ImGui::Text(Ui(UiTextId::DemoTickFormat), status.demo_tick);
         }
-        ImGui::Text("Schema: %s", status.schema_bound ? "Bound" : "Pending");
-        ImGui::Text("Entity system: %s", status.entity_system_bound ? "Bound" : "Pending");
         ImGui::Text(
-            "Entity factory: %s",
+            Ui(UiTextId::SchemaFormat),
+            status.schema_bound ? Ui(UiTextId::StateBound) : Ui(UiTextId::StatePending));
+        ImGui::Text(
+            Ui(UiTextId::EntitySystemFormat),
+            status.entity_system_bound ? Ui(UiTextId::StateBound) : Ui(UiTextId::StatePending));
+        ImGui::Text(
+            Ui(UiTextId::EntityFactoryFormat),
             !status.client_entity_factory_requested
-                ? "Idle"
-                : (status.client_entity_factory_resolved ? "Resolved" : "Unavailable"));
+                ? Ui(UiTextId::StateIdle)
+                : (status.client_entity_factory_resolved ? Ui(UiTextId::StateResolved) : Ui(UiTextId::StateUnavailable)));
         if (status.highest_entity_index >= 0)
         {
-            ImGui::Text("Highest entity: %d", status.highest_entity_index);
+            ImGui::Text(Ui(UiTextId::HighestEntityFormat), status.highest_entity_index);
         }
         if (status.watched_xuid != 0)
         {
-            ImGui::Text("Watched XUID (raw): %llu", static_cast<unsigned long long>(status.watched_xuid));
+            ImGui::Text(Ui(UiTextId::WatchedXuidFormat), static_cast<unsigned long long>(status.watched_xuid));
         }
-        if (status.probed_xuid != 0)
-        {
-            ImGui::Text("Probed XUID: %llu", static_cast<unsigned long long>(status.probed_xuid));
-        }
-        ImGui::Text("Profiles: enabled=%d", status.enabled_profile_count);
+        ImGui::Text(Ui(UiTextId::ProfilesEnabledFormat), status.enabled_profile_count);
         if (status.stable_wearable_bound ||
             status.runtime_created_wearable_bound ||
             status.glove_pawn_fallback_bound ||
             status.knife_viewmodel_sync_ready)
         {
             ImGui::Text(
-                "Bindings: stable glove=%s runtime glove=%s pawn glove=%s knife sync=%s",
-                status.stable_wearable_bound ? "yes" : "no",
-                status.runtime_created_wearable_bound ? "yes" : "no",
-                status.glove_pawn_fallback_bound ? "yes" : "no",
-                status.knife_viewmodel_sync_ready ? "yes" : "no");
+                Ui(UiTextId::BindingsFormat),
+                YesNoText(status.stable_wearable_bound),
+                YesNoText(status.runtime_created_wearable_bound),
+                YesNoText(status.glove_pawn_fallback_bound),
+                YesNoText(status.knife_viewmodel_sync_ready));
         }
         if (!status.knife_runtime_path.empty())
         {
-            ImGui::TextWrapped("Knife runtime path: %s", Narrow(status.knife_runtime_path).c_str());
+            ImGui::TextWrapped(Ui(UiTextId::KnifeRuntimePathFormat), Narrow(status.knife_runtime_path).c_str());
         }
         if (!status.knife_runtime_reason.empty())
         {
-            ImGui::TextWrapped("Knife runtime reason: %s", Narrow(status.knife_runtime_reason).c_str());
+            ImGui::TextWrapped(Ui(UiTextId::KnifeRuntimeReasonFormat), Narrow(status.knife_runtime_reason).c_str());
         }
         if (status.player_controller_count > 0 || status.player_pawn_count > 0 || status.preview_character_count > 0)
         {
             ImGui::Text(
-                "Players: controllers=%d pawns=%d previews=%d active=%d owned=%d matches=%d",
+                Ui(UiTextId::PlayersFormat),
                 status.player_controller_count,
                 status.player_pawn_count,
                 status.preview_character_count,
@@ -1095,19 +1318,19 @@ private:
                 status.owned_weapon_count,
                 status.matched_profile_count);
             ImGui::Text(
-                "Applied: weapons=%d gloves=%d",
+                Ui(UiTextId::AppliedFormat),
                 status.applied_weapon_count,
                 status.applied_glove_count);
         }
         if (!status.last_error.empty())
         {
-            ImGui::TextWrapped("Last error: %s", Narrow(status.last_error).c_str());
+            ImGui::TextWrapped(Ui(UiTextId::LastErrorFormat), Narrow(status.last_error).c_str());
         }
 
         if (!status.diagnostics.empty())
         {
             ImGui::Spacing();
-            ImGui::TextUnformatted("Runtime diagnostics:");
+            ImGui::TextUnformatted(Ui(UiTextId::RuntimeDiagnostics));
             for (const auto& line : status.diagnostics)
             {
                 ImGui::BulletText("%s", Narrow(line).c_str());
@@ -1117,7 +1340,7 @@ private:
         if (!catalog.warnings.empty())
         {
             ImGui::Spacing();
-            ImGui::TextUnformatted("Catalog warnings:");
+            ImGui::TextUnformatted(Ui(UiTextId::CatalogWarnings));
             for (const auto& warning : catalog.warnings)
             {
                 ImGui::BulletText("%s", warning.c_str());
@@ -1154,14 +1377,14 @@ private:
         ImGui::EndChild();
 
         const auto button_width = ImGui::GetContentRegionAvail().x;
-        if (ImGui::Button("Add", ImVec2(button_width * 0.48f, 28.0f)))
+        if (ImGui::Button(Ui(UiTextId::Add), ImVec2(button_width * 0.48f, 28.0f)))
         {
             profiles.push_back(CosmeticProfile {});
             selected_profile_ = static_cast<int>(profiles.size()) - 1;
             PushWorkingConfig();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Remove", ImVec2(button_width * 0.48f, 28.0f)) && profiles.size() > 1)
+        if (ImGui::Button(Ui(UiTextId::Remove), ImVec2(button_width * 0.48f, 28.0f)) && profiles.size() > 1)
         {
             profiles.erase(profiles.begin() + selected_profile_);
             selected_profile_ = std::clamp(selected_profile_, 0, static_cast<int>(profiles.size()) - 1);
@@ -1175,60 +1398,60 @@ private:
 
         char name_buffer[64] {};
         CopyToBuffer(profile.name, name_buffer, sizeof(name_buffer));
-        if (ImGui::InputText("Name", name_buffer, sizeof(name_buffer)))
+        if (ImGui::InputText(Ui(UiTextId::Name), name_buffer, sizeof(name_buffer)))
         {
             profile.name = name_buffer;
             PushWorkingConfig();
         }
 
         const auto visible_items = BuildVisibleWeaponItemList(catalog);
-        if (ComboById("Item", visible_items, profile.base_item, 8))
+        if (ComboById(Ui(UiTextId::Item), visible_items, profile.base_item, 8))
         {
             profile.override_item = 0;
             PushWorkingConfig();
         }
 
-        if (ImGui::Checkbox("Enabled", &profile.enabled))
+        if (ImGui::Checkbox(Ui(UiTextId::Enabled), &profile.enabled))
         {
             PushWorkingConfig();
         }
 
         char xuid_buffer[32] {};
         _ui64toa_s(profile.xuid, xuid_buffer, sizeof(xuid_buffer), 10);
-        if (ImGui::InputText("XUID", xuid_buffer, sizeof(xuid_buffer), ImGuiInputTextFlags_CharsDecimal))
+        if (ImGui::InputText(Ui(UiTextId::Xuid), xuid_buffer, sizeof(xuid_buffer), ImGuiInputTextFlags_CharsDecimal))
         {
             profile.xuid = std::strtoull(xuid_buffer, nullptr, 10);
             PushWorkingConfig();
         }
 
-        if (ImGui::InputInt("Seed", &profile.seed))
+        if (ImGui::InputInt(Ui(UiTextId::Seed), &profile.seed))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::InputInt("StatTrak", &profile.stat_trak))
+        if (ImGui::InputInt(Ui(UiTextId::StatTrak), &profile.stat_trak))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat("Wear", &profile.wear, 0.0000001f, 1.0f, "%.7f"))
+        if (ImGui::SliderFloat(Ui(UiTextId::Wear), &profile.wear, 0.0000001f, 1.0f, "%.7f"))
         {
             PushWorkingConfig();
         }
 
-        if (ComboById("Paint Kit", catalog.weapon_paint_kits, profile.paint_kit, 12))
+        if (ComboById(Ui(UiTextId::PaintKit), catalog.weapon_paint_kits, profile.paint_kit, 12))
         {
             PushWorkingConfig();
         }
 
-        if (ComboById("Quality", catalog.qualities, profile.quality, 8))
+        if (ComboById(Ui(UiTextId::Quality), catalog.qualities, profile.quality, 8))
         {
             PushWorkingConfig();
         }
 
         char custom_name_buffer[64] {};
         CopyToBuffer(profile.custom_name, custom_name_buffer, sizeof(custom_name_buffer));
-        if (ImGui::InputText("Name Tag", custom_name_buffer, sizeof(custom_name_buffer)))
+        if (ImGui::InputText(Ui(UiTextId::NameTag), custom_name_buffer, sizeof(custom_name_buffer)))
         {
             profile.custom_name = custom_name_buffer;
             PushWorkingConfig();
@@ -1252,14 +1475,14 @@ private:
         ImGui::EndChild();
 
         const auto button_width = ImGui::GetContentRegionAvail().x;
-        if (ImGui::Button("Add Knife", ImVec2(button_width * 0.48f, 28.0f)))
+        if (ImGui::Button(Ui(UiTextId::AddKnife), ImVec2(button_width * 0.48f, 28.0f)))
         {
             knife_profiles.push_back(KnifeProfile {});
             selected_knife_profile_ = static_cast<int>(knife_profiles.size()) - 1;
             PushWorkingConfig();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Remove Knife", ImVec2(button_width * 0.48f, 28.0f)) && knife_profiles.size() > 1)
+        if (ImGui::Button(Ui(UiTextId::RemoveKnife), ImVec2(button_width * 0.48f, 28.0f)) && knife_profiles.size() > 1)
         {
             knife_profiles.erase(knife_profiles.begin() + selected_knife_profile_);
             selected_knife_profile_ = std::clamp(selected_knife_profile_, 0, static_cast<int>(knife_profiles.size()) - 1);
@@ -1272,7 +1495,7 @@ private:
         auto& profile = CurrentKnifeProfile();
         std::vector<NamedId> knife_model_items;
         knife_model_items.reserve(catalog.knife_items.size() + 1);
-        knife_model_items.push_back(NamedId {0, "Select a knife model"});
+        knife_model_items.push_back(NamedId {0, Ui(UiTextId::SelectKnifeModel)});
         for (const auto& knife_item : catalog.knife_items)
         {
             if (IsSelectableKnifeModelDefinition(catalog, knife_item.id))
@@ -1293,105 +1516,77 @@ private:
 
         char name_buffer[64] {};
         CopyToBuffer(profile.name, name_buffer, sizeof(name_buffer));
-        if (ImGui::InputText("Name", name_buffer, sizeof(name_buffer)))
+        if (ImGui::InputText(Ui(UiTextId::Name), name_buffer, sizeof(name_buffer)))
         {
             profile.name = name_buffer;
             PushWorkingConfig();
         }
 
-        if (ImGui::Checkbox("Enabled", &profile.enabled))
+        if (ImGui::Checkbox(Ui(UiTextId::Enabled), &profile.enabled))
         {
             PushWorkingConfig();
         }
 
         char xuid_buffer[32] {};
         _ui64toa_s(profile.xuid, xuid_buffer, sizeof(xuid_buffer), 10);
-        if (ImGui::InputText("XUID", xuid_buffer, sizeof(xuid_buffer), ImGuiInputTextFlags_CharsDecimal))
+        if (ImGui::InputText(Ui(UiTextId::Xuid), xuid_buffer, sizeof(xuid_buffer), ImGuiInputTextFlags_CharsDecimal))
         {
             profile.xuid = std::strtoull(xuid_buffer, nullptr, 10);
             PushWorkingConfig();
         }
-        const auto preferred_probed_xuid = status.probed_xuid != 0 ? status.probed_xuid : status.watched_xuid;
-        if (preferred_probed_xuid != 0 && profile.xuid != preferred_probed_xuid)
-        {
-            ImGui::SameLine();
-            if (ImGui::Button("Use Probed XUID"))
-            {
-                profile.xuid = preferred_probed_xuid;
-                PushWorkingConfig();
-            }
-        }
-
-        const bool knife_profile_xuid_mismatch =
-            profile.enabled &&
-            profile.xuid != 0 &&
-            preferred_probed_xuid != 0 &&
-            profile.xuid != preferred_probed_xuid;
-
         if (DrawKnifeModeCombo(profile.mode))
         {
             PushWorkingConfig();
         }
 
-        if (ComboById("Knife Model", knife_model_items, profile.model_definition, 10))
+        if (ComboById(Ui(UiTextId::KnifeModel), knife_model_items, profile.model_definition, 10))
         {
             PushWorkingConfig();
         }
 
-        if (ComboById("Paint Kit", catalog.weapon_paint_kits, profile.paint_kit, 12))
+        if (ComboById(Ui(UiTextId::PaintKit), catalog.weapon_paint_kits, profile.paint_kit, 12))
         {
             PushWorkingConfig();
         }
 
-        if (ComboById("Quality", catalog.qualities, profile.quality, 8))
+        if (ComboById(Ui(UiTextId::Quality), catalog.qualities, profile.quality, 8))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::InputInt("Seed", &profile.seed))
+        if (ImGui::InputInt(Ui(UiTextId::Seed), &profile.seed))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::InputInt("StatTrak", &profile.stat_trak))
+        if (ImGui::InputInt(Ui(UiTextId::StatTrak), &profile.stat_trak))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat("Wear", &profile.wear, 0.0000001f, 1.0f, "%.7f"))
+        if (ImGui::SliderFloat(Ui(UiTextId::Wear), &profile.wear, 0.0000001f, 1.0f, "%.7f"))
         {
             PushWorkingConfig();
         }
 
         char custom_name_buffer[64] {};
         CopyToBuffer(profile.custom_name, custom_name_buffer, sizeof(custom_name_buffer));
-        if (ImGui::InputText("Name Tag", custom_name_buffer, sizeof(custom_name_buffer)))
+        if (ImGui::InputText(Ui(UiTextId::NameTag), custom_name_buffer, sizeof(custom_name_buffer)))
         {
             profile.custom_name = custom_name_buffer;
             PushWorkingConfig();
         }
 
-        if (knife_profile_xuid_mismatch)
+        if (missing_model_definition)
         {
-            ImGui::TextColored(
-                ImVec4(0.94f, 0.42f, 0.25f, 1.0f),
-                "Knife profile XUID does not match the probed watched player.");
-            ImGui::TextWrapped(
-                "Current XUID probe is %llu (weapon-owner corrected; raw watched probe %llu), but this knife slot targets %llu. The Use Probed XUID button now prefers the corrected weapon-owner XUID when available.",
-                static_cast<unsigned long long>(preferred_probed_xuid),
-                static_cast<unsigned long long>(status.watched_xuid),
-                static_cast<unsigned long long>(profile.xuid));
-        }
-        else if (missing_model_definition)
-        {
-            ImGui::TextWrapped(
-                "Model + Finish requires a real knife model definition.");
+            ImGui::TextWrapped("%s", Ui(UiTextId::KnifeModelRequired));
         }
         else if (runtime_model_swap_active)
         {
             ImGui::TextColored(
                 ImVec4(0.42f, 0.82f, 0.58f, 1.0f),
-                "Knife model swap active.");
+                "%s",
+                Ui(UiTextId::KnifeModelSwapActive));
             if (!status.knife_runtime_reason.empty())
             {
                 ImGui::TextWrapped("%s", Narrow(status.knife_runtime_reason).c_str());
@@ -1401,18 +1596,20 @@ private:
         {
             ImGui::TextColored(
                 ImVec4(0.94f, 0.68f, 0.25f, 1.0f),
-                "Knife model swap degraded.");
+                "%s",
+                Ui(UiTextId::KnifeModelSwapDegraded));
             ImGui::TextWrapped("%s", Narrow(status.knife_runtime_reason).c_str());
         }
         else if (runtime_finish_only_active || profile.mode == KnifeProfileMode::FinishOnly)
         {
             ImGui::TextColored(
                 ImVec4(0.42f, 0.82f, 0.58f, 1.0f),
-                "Knife finish-only runtime path active.");
+                "%s",
+                Ui(UiTextId::KnifeFinishOnlyRuntime));
             ImGui::TextWrapped(
                 model_and_finish_requested
-                    ? "Model+finish requested path swap, but runtime is currently using finish-only."
-                    : "Finish-only preserves the watched player's live knife model and only writes finish fields.");
+                    ? Ui(UiTextId::KnifeFinishOnlyFallback)
+                    : Ui(UiTextId::KnifeFinishOnlyDescription));
         }
         else if (!status.knife_runtime_path.empty())
         {
@@ -1437,14 +1634,14 @@ private:
         ImGui::EndChild();
 
         const auto button_width = ImGui::GetContentRegionAvail().x;
-        if (ImGui::Button("Add Glove", ImVec2(button_width * 0.48f, 28.0f)))
+        if (ImGui::Button(Ui(UiTextId::AddGlove), ImVec2(button_width * 0.48f, 28.0f)))
         {
             glove_profiles.push_back(GloveProfile {});
             selected_glove_profile_ = static_cast<int>(glove_profiles.size()) - 1;
             PushWorkingConfig();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Remove Glove", ImVec2(button_width * 0.48f, 28.0f)) && glove_profiles.size() > 1)
+        if (ImGui::Button(Ui(UiTextId::RemoveGlove), ImVec2(button_width * 0.48f, 28.0f)) && glove_profiles.size() > 1)
         {
             glove_profiles.erase(glove_profiles.begin() + selected_glove_profile_);
             selected_glove_profile_ = std::clamp(selected_glove_profile_, 0, static_cast<int>(glove_profiles.size()) - 1);
@@ -1458,20 +1655,20 @@ private:
 
         char name_buffer[64] {};
         CopyToBuffer(profile.name, name_buffer, sizeof(name_buffer));
-        if (ImGui::InputText("Name", name_buffer, sizeof(name_buffer)))
+        if (ImGui::InputText(Ui(UiTextId::Name), name_buffer, sizeof(name_buffer)))
         {
             profile.name = name_buffer;
             PushWorkingConfig();
         }
 
-        if (ImGui::Checkbox("Enabled", &profile.enabled))
+        if (ImGui::Checkbox(Ui(UiTextId::Enabled), &profile.enabled))
         {
             PushWorkingConfig();
         }
 
         char xuid_buffer[32] {};
         _ui64toa_s(profile.xuid, xuid_buffer, sizeof(xuid_buffer), 10);
-        if (ImGui::InputText("XUID", xuid_buffer, sizeof(xuid_buffer), ImGuiInputTextFlags_CharsDecimal))
+        if (ImGui::InputText(Ui(UiTextId::Xuid), xuid_buffer, sizeof(xuid_buffer), ImGuiInputTextFlags_CharsDecimal))
         {
             profile.xuid = std::strtoull(xuid_buffer, nullptr, 10);
             PushWorkingConfig();
@@ -1501,7 +1698,7 @@ private:
 
         if (profile.mode == GloveProfileMode::ModelAndFinish)
         {
-            if (ComboById("Glove Model", catalog.glove_items, profile.model_definition, 10))
+            if (ComboById(Ui(UiTextId::GloveModel), catalog.glove_items, profile.model_definition, 10))
             {
                 if (profile.model_definition != 0 &&
                     !IsCompatibleGlovePaint(catalog, profile.model_definition, profile.paint_kit))
@@ -1513,9 +1710,9 @@ private:
         }
         else
         {
-            ImGui::TextDisabled("Glove Model");
+            ImGui::TextDisabled("%s", Ui(UiTextId::GloveModel));
             ImGui::SameLine();
-            ImGui::TextUnformatted("Current live wearable model");
+            ImGui::TextUnformatted(Ui(UiTextId::CurrentLiveWearableModel));
         }
 
         const auto glove_item_id =
@@ -1523,7 +1720,7 @@ private:
                 ? profile.model_definition
                 : 0;
         const auto glove_paint_list = BuildVisibleGlovePaintList(catalog, glove_item_id);
-        if (ComboById("Paint Kit", glove_paint_list, profile.paint_kit, 12))
+        if (ComboById(Ui(UiTextId::PaintKit), glove_paint_list, profile.paint_kit, 12))
         {
             if (profile.mode == GloveProfileMode::ModelAndFinish && profile.paint_kit != 0)
             {
@@ -1536,17 +1733,17 @@ private:
             PushWorkingConfig();
         }
 
-        if (ComboById("Quality", catalog.qualities, profile.quality, 8))
+        if (ComboById(Ui(UiTextId::Quality), catalog.qualities, profile.quality, 8))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::InputInt("Seed", &profile.seed))
+        if (ImGui::InputInt(Ui(UiTextId::Seed), &profile.seed))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat("Wear", &profile.wear, 0.0000001f, 1.0f, "%.7f"))
+        if (ImGui::SliderFloat(Ui(UiTextId::Wear), &profile.wear, 0.0000001f, 1.0f, "%.7f"))
         {
             PushWorkingConfig();
         }
@@ -1555,45 +1752,142 @@ private:
         {
             ImGui::TextColored(
                 ImVec4(0.42f, 0.82f, 0.58f, 1.0f),
-                "Finish-only glove slot.");
+                "%s",
+                Ui(UiTextId::GloveFinishOnlyTitle));
             ImGui::TextWrapped(
-                "This mode binds to the player's live glove wearable and only updates paint, wear, seed and quality.");
+                "%s",
+                Ui(UiTextId::GloveFinishOnlyBody));
         }
         else if (profile.model_definition == 0)
         {
             ImGui::TextColored(
                 ImVec4(0.94f, 0.42f, 0.25f, 1.0f),
-                "Select a glove model.");
+                "%s",
+                Ui(UiTextId::GloveModelRequiredTitle));
             ImGui::TextWrapped(
-                "Model + Finish requires a real glove model definition before Update can apply the slot.");
+                "%s",
+                Ui(UiTextId::GloveModelRequiredBody));
         }
         else if (profile.paint_kit != 0 && !IsCompatibleGlovePaint(catalog, profile.model_definition, profile.paint_kit))
         {
             ImGui::TextColored(
                 ImVec4(0.94f, 0.42f, 0.25f, 1.0f),
-                "This glove paint kit does not match the selected glove type.");
+                "%s",
+                Ui(UiTextId::GlovePaintMismatch));
         }
 
         if (status.glove_pawn_fallback_bound)
         {
-            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.58f, 1.0f), "Resolved glove carrier: pawn render fallback");
+            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.58f, 1.0f), "%s", Ui(UiTextId::GloveCarrierPawnFallback));
         }
         else if (status.stable_wearable_bound)
         {
-            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.58f, 1.0f), "Resolved glove carrier: live wearable");
+            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.58f, 1.0f), "%s", Ui(UiTextId::GloveCarrierLiveWearable));
         }
         else if (status.runtime_created_wearable_bound)
         {
-            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.58f, 1.0f), "Resolved glove carrier: runtime-created wearable");
+            ImGui::TextColored(ImVec4(0.42f, 0.82f, 0.58f, 1.0f), "%s", Ui(UiTextId::GloveCarrierRuntimeWearable));
         }
         else if (profile.mode == GloveProfileMode::ModelAndFinish && !status.client_entity_factory_resolved)
         {
-            ImGui::TextColored(ImVec4(0.94f, 0.42f, 0.25f, 1.0f), "Unavailable: wearable client factory not resolved");
+            ImGui::TextColored(ImVec4(0.94f, 0.42f, 0.25f, 1.0f), "%s", Ui(UiTextId::GloveFactoryUnavailable));
         }
         else
         {
-            ImGui::TextColored(ImVec4(0.93f, 0.77f, 0.32f, 1.0f), "Glove slot waits for a real wearable bind.");
+            ImGui::TextColored(ImVec4(0.93f, 0.77f, 0.32f, 1.0f), "%s", Ui(UiTextId::GloveWaitingForBind));
         }
+    }
+
+    void DrawKeychainProfileList(const Catalog& catalog)
+    {
+        auto& keychain_profiles = working_config_.keychain_profiles;
+
+        ImGui::BeginChild("KeychainProfiles", ImVec2(0.0f, 260.0f), true);
+        for (int index = 0; index < static_cast<int>(keychain_profiles.size()); ++index)
+        {
+            std::string label = keychain_profiles[index].name;
+            label += " (";
+            label += LookupName(catalog.base_items, keychain_profiles[index].base_item);
+            label += ")";
+
+            ImGui::PushID(index + 15000);
+            if (ImGui::Selectable(label.c_str(), selected_keychain_profile_ == index))
+            {
+                selected_keychain_profile_ = index;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        const auto button_width = ImGui::GetContentRegionAvail().x;
+        if (ImGui::Button(Ui(UiTextId::AddKeychain), ImVec2(button_width * 0.48f, 28.0f)))
+        {
+            keychain_profiles.push_back(KeychainProfile {});
+            selected_keychain_profile_ = static_cast<int>(keychain_profiles.size()) - 1;
+            PushWorkingConfig();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(Ui(UiTextId::RemoveKeychain), ImVec2(button_width * 0.48f, 28.0f)) &&
+            keychain_profiles.size() > 1)
+        {
+            keychain_profiles.erase(keychain_profiles.begin() + selected_keychain_profile_);
+            selected_keychain_profile_ =
+                std::clamp(selected_keychain_profile_, 0, static_cast<int>(keychain_profiles.size()) - 1);
+            PushWorkingConfig();
+        }
+    }
+
+    void DrawKeychainProfileEditor(const Catalog& catalog)
+    {
+        auto& profile = CurrentKeychainProfile();
+
+        char name_buffer[64] {};
+        CopyToBuffer(profile.name, name_buffer, sizeof(name_buffer));
+        if (ImGui::InputText(Ui(UiTextId::Name), name_buffer, sizeof(name_buffer)))
+        {
+            profile.name = name_buffer;
+            PushWorkingConfig();
+        }
+
+        if (ImGui::Checkbox(Ui(UiTextId::Enabled), &profile.enabled))
+        {
+            PushWorkingConfig();
+        }
+
+        char xuid_buffer[32] {};
+        _ui64toa_s(profile.xuid, xuid_buffer, sizeof(xuid_buffer), 10);
+        if (ImGui::InputText(Ui(UiTextId::Xuid), xuid_buffer, sizeof(xuid_buffer), ImGuiInputTextFlags_CharsDecimal))
+        {
+            profile.xuid = std::strtoull(xuid_buffer, nullptr, 10);
+            PushWorkingConfig();
+        }
+
+        const auto visible_items = BuildVisibleWeaponItemList(catalog);
+        if (ComboById(Ui(UiTextId::Weapon), visible_items, profile.base_item, 8))
+        {
+            PushWorkingConfig();
+        }
+
+        auto keychain_items = catalog.keychain_kits;
+        if (keychain_items.empty())
+        {
+            keychain_items.push_back(NamedId {0, Ui(UiTextId::None)});
+        }
+        if (ComboById(Ui(UiTextId::Keychain), keychain_items, profile.keychain_kit, 12))
+        {
+            PushWorkingConfig();
+        }
+
+        if (profile.keychain_kit == 0)
+        {
+            ImGui::TextColored(
+                ImVec4(0.94f, 0.42f, 0.25f, 1.0f),
+                "%s",
+                Ui(UiTextId::KeychainClearDescription));
+        }
+
+        ImGui::Spacing();
+        ImGui::TextWrapped("%s", Ui(UiTextId::KeychainRuntimeDescription));
     }
 
     void DrawStickersEditor(
@@ -1625,22 +1919,22 @@ private:
         ImGui::NextColumn();
         selected_sticker = std::clamp(selected_sticker, 0, 4);
         auto& sticker = stickers[static_cast<std::size_t>(selected_sticker)];
-        if (ComboById("Sticker Kit", catalog.sticker_kits, sticker.kit_id, 10))
+        if (ComboById(Ui(UiTextId::StickerKit), catalog.sticker_kits, sticker.kit_id, 10))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat("Sticker Wear", &sticker.wear, 0.0000001f, 1.0f, "%.7f"))
+        if (ImGui::SliderFloat(Ui(UiTextId::StickerWear), &sticker.wear, 0.0000001f, 1.0f, "%.7f"))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat("Scale", &sticker.scale, 0.1f, 5.0f, "%.3f"))
+        if (ImGui::SliderFloat(Ui(UiTextId::Scale), &sticker.scale, 0.1f, 5.0f, "%.3f"))
         {
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat("Rotation", &sticker.rotation, 0.0f, 360.0f, "%.1f"))
+        if (ImGui::SliderFloat(Ui(UiTextId::Rotation), &sticker.rotation, 0.0f, 360.0f, "%.1f"))
         {
             PushWorkingConfig();
         }
@@ -1653,29 +1947,39 @@ private:
     {
         const float width = ImGui::GetContentRegionAvail().x / 3.0f;
         const auto catalog = state_.SnapshotCatalog();
-        if (ImGui::Button("Update", ImVec2(width - 4.0f, 30.0f)))
+        const auto runtime_status = state_.SnapshotStatus();
+        if (ImGui::Button(Ui(UiTextId::Update), ImVec2(width - 4.0f, 30.0f)))
         {
             std::wstring validation_issue;
             if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
-                !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue))
+                !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue) ||
+                !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue))
             {
                 Logger::Warn(L"UI rejected staged config update: " + validation_issue);
             }
             else
             {
                 state_.ReplaceConfig(working_config_);
-                state_.RequestManualRefresh();
+                if (ShouldUseLightweightDemoKeychainRefresh(runtime_status, working_config_))
+                {
+                    state_.RequestDemoKeychainRefresh();
+                }
+                else
+                {
+                    state_.RequestManualRefresh();
+                }
                 working_config_dirty_ = false;
                 Logger::Info(L"UI applied staged config via Update.");
             }
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("Save", ImVec2(width - 4.0f, 30.0f)))
+        if (ImGui::Button(Ui(UiTextId::Save), ImVec2(width - 4.0f, 30.0f)))
         {
             std::wstring validation_issue;
             if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
-                !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue))
+                !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue) ||
+                !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue))
             {
                 Logger::Warn(L"UI rejected config save: " + validation_issue);
             }
@@ -1687,7 +1991,7 @@ private:
         }
 
         ImGui::SameLine();
-        if (ImGui::Button("Load", ImVec2(width - 4.0f, 30.0f)))
+        if (ImGui::Button(Ui(UiTextId::Load), ImVec2(width - 4.0f, 30.0f)))
         {
             working_config_ = ConfigStore::Load(config_path_);
             EnsureSelection();
@@ -1699,11 +2003,12 @@ private:
         {
             ImGui::TextColored(
                 ImVec4(0.94f, 0.68f, 0.25f, 1.0f),
-                "Editor changes are staged only. Press Update to apply them to runtime.");
+                "%s",
+                Ui(UiTextId::EditorStagedOnly));
         }
         else
         {
-            ImGui::TextDisabled("Editor matches the last applied runtime config.");
+            ImGui::TextDisabled("%s", Ui(UiTextId::EditorMatchesRuntime));
         }
     }
 
@@ -1722,6 +2027,24 @@ private:
         if (working_config_.knife_profiles.empty())
         {
             working_config_.knife_profiles.push_back(KnifeProfile {});
+        }
+
+        if (working_config_.keychain_profiles.empty())
+        {
+            working_config_.keychain_profiles.push_back(KeychainProfile {});
+        }
+
+        const auto has_standard_weapon_profile =
+            std::any_of(
+                working_config_.profiles.begin(),
+                working_config_.profiles.end(),
+                [](const CosmeticProfile& profile)
+                {
+                    return !IsKnifeBaseItem(profile.base_item) && !IsGloveBaseItem(profile.base_item);
+                });
+        if (!has_standard_weapon_profile)
+        {
+            working_config_.profiles.push_back(CosmeticProfile {});
         }
 
         selected_profile_ = std::clamp(selected_profile_, 0, static_cast<int>(working_config_.profiles.size()) - 1);
@@ -1744,6 +2067,8 @@ private:
             std::clamp(selected_knife_profile_, 0, static_cast<int>(working_config_.knife_profiles.size()) - 1);
         selected_glove_profile_ =
             std::clamp(selected_glove_profile_, 0, static_cast<int>(working_config_.glove_profiles.size()) - 1);
+        selected_keychain_profile_ =
+            std::clamp(selected_keychain_profile_, 0, static_cast<int>(working_config_.keychain_profiles.size()) - 1);
         selected_weapon_sticker_ = std::clamp(selected_weapon_sticker_, 0, 4);
     }
 
@@ -1763,6 +2088,12 @@ private:
     {
         EnsureSelection();
         return working_config_.knife_profiles[static_cast<std::size_t>(selected_knife_profile_)];
+    }
+
+    KeychainProfile& CurrentKeychainProfile()
+    {
+        EnsureSelection();
+        return working_config_.keychain_profiles[static_cast<std::size_t>(selected_keychain_profile_)];
     }
 
     void PushWorkingConfig()
@@ -1792,7 +2123,7 @@ private:
                 return value.id == id;
             });
 
-        return iterator == values.end() ? std::string("Unknown") : iterator->name;
+        return iterator == values.end() ? std::string(Ui(UiTextId::LookupUnknown)) : iterator->name;
     }
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
@@ -1856,6 +2187,7 @@ private:
     int selected_profile_ = 0;
     int selected_knife_profile_ = 0;
     int selected_glove_profile_ = 0;
+    int selected_keychain_profile_ = 0;
     int selected_weapon_sticker_ = 0;
     bool last_insert_state_ = false;
     bool imgui_initialized_ = false;

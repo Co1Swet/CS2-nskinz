@@ -1,4 +1,5 @@
 #include "Cs2/Catalog.hpp"
+#include "Core/BuildConfig.hpp"
 
 #include <algorithm>
 #include <array>
@@ -159,6 +160,13 @@ void FinalizeVisualInfo(VisualInfo& visual)
         !visual.resolved_view_model_resource_path.empty();
 }
 
+void FinalizeKeychainVisualInfo(nskinzcs2::model::KeychainVisualInfo& visual)
+{
+    visual.model_path = NormalizeCatalogModelPath(std::move(visual.model_path));
+    visual.resolved_model_resource_path =
+        BuildCatalogModelResourcePath(visual.model_path);
+}
+
 constexpr std::array<IdNameSeed, 36> kBaseItems = {
     IdNameSeed {42, "Knife"},
     IdNameSeed {5028, "Glove"},
@@ -274,7 +282,13 @@ constexpr std::array<PaintCompatibilitySeed, 6> kGlovePaintCompatibilitySeeds = 
 }};
 
 constexpr std::array<IdNameSeed, 8> kStickerKits = {
-    IdNameSeed {0, "None"},
+    IdNameSeed {0,
+#ifdef NSKINZCS2_UI_LANG_ZH_CN
+        "\xE6\x97\xA0"
+#else
+        "None"
+#endif
+    },
     IdNameSeed {3, "Crown (Foil)"},
     IdNameSeed {4, "Howling Dawn"},
     IdNameSeed {188, "Ninjas in Pyjamas (Holo) Cologne 2014"},
@@ -296,6 +310,16 @@ constexpr std::array<IdNameSeed, 11> kQualities = {
     IdNameSeed {9, "Strange"},
     IdNameSeed {10, "Completed"},
     IdNameSeed {12, "Tournament"},
+};
+
+constexpr std::array<IdNameSeed, 1> kKeychainKits = {
+    IdNameSeed {0,
+#ifdef NSKINZCS2_UI_LANG_ZH_CN
+        "\xE6\x97\xA0"
+#else
+        "None"
+#endif
+    },
 };
 
 constexpr std::array<VisualSeed, 31> kVisualSeeds = {{
@@ -1410,14 +1434,53 @@ bool IsSupportedBaseWeaponId(const int id)
         });
 }
 
+template <std::size_t N>
+std::string_view FindSeedNameById(const std::array<IdNameSeed, N>& seeds, const int id) noexcept
+{
+    const auto it = std::find_if(
+        seeds.begin(),
+        seeds.end(),
+        [id](const IdNameSeed& seed)
+        {
+            return seed.id == id;
+        });
+    return it == seeds.end() ? std::string_view {} : std::string_view {it->name};
+}
+
+std::string ResolveKnownCatalogItemDisplayName(const int id)
+{
+    if (const auto base_name = FindSeedNameById(kBaseItems, id); !base_name.empty())
+    {
+        return std::string {base_name};
+    }
+
+    if (const auto knife_name = FindSeedNameById(kKnifeItems, id); !knife_name.empty())
+    {
+        return std::string {knife_name};
+    }
+
+    if (const auto glove_name = FindSeedNameById(kGloveItems, id); !glove_name.empty())
+    {
+        return std::string {glove_name};
+    }
+
+    return {};
+}
+
 std::string ResolveItemDisplayName(
+    const int id,
     const FlatSectionEntry& item,
     const std::unordered_map<std::string, std::string>& localization)
 {
-    auto item_name = FindFlatValue(item, "item_name");
-    if (!item_name.empty())
+    if (const auto localized_name = TryResolveLocalizedText(FindFlatValue(item, "item_name"), localization);
+        !localized_name.empty())
     {
-        return ResolveLocalizedText(item_name, localization);
+        return localized_name;
+    }
+
+    if (const auto known_name = ResolveKnownCatalogItemDisplayName(id); !known_name.empty())
+    {
+        return known_name;
     }
 
     const auto raw_name = FindFlatValue(item, "name");
@@ -1425,13 +1488,19 @@ std::string ResolveItemDisplayName(
 }
 
 std::string ResolveItemDisplayName(
+    const int id,
     const KeyValueNode& item,
     const std::unordered_map<std::string, std::string>& localization)
 {
-    auto item_name = item.FindValue("item_name");
-    if (!item_name.empty())
+    if (auto localized_name = TryResolveLocalizedText(item.FindValue("item_name"), localization);
+        !localized_name.empty())
     {
-        return ResolveLocalizedText(item_name, localization);
+        return localized_name;
+    }
+
+    if (const auto known_name = ResolveKnownCatalogItemDisplayName(id); !known_name.empty())
+    {
+        return known_name;
     }
 
     auto raw_name = item.FindValue("name");
@@ -1502,9 +1571,10 @@ nskinzcs2::model::Catalog nskinzcs2::CatalogBuilder::BuildFallbackCatalog()
     catalog.glove_paint_kits = CopyArray(kGlovePaintKits);
     for (const auto& seed : kGlovePaintCompatibilitySeeds)
     {
-        catalog.glove_paint_compatibility.emplace(seed.paint_kit_id, seed.glove_item_id);
+    catalog.glove_paint_compatibility.emplace(seed.paint_kit_id, seed.glove_item_id);
     }
     catalog.sticker_kits = CopyArray(kStickerKits);
+    catalog.keychain_kits = CopyArray(kKeychainKits);
     catalog.qualities = CopyArray(kQualities);
     catalog.runtime_populated = false;
     catalog.warnings.push_back("Using built-in fallback catalog until live CS2 schema reflection is bound.");
@@ -1556,11 +1626,12 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
     const auto qualities_section_text = ExtractNamedSectionText(items_game_text, "qualities");
     const auto paint_kits_section_texts = ExtractNamedSectionTexts(items_game_text, "paint_kits");
     const auto sticker_kits_section_texts = ExtractNamedSectionTexts(items_game_text, "sticker_kits");
+    const auto keychain_definitions_section_texts =
+        ExtractNamedSectionTexts(items_game_text, "keychain_definitions");
     const auto tokens_section_text = ExtractNamedSectionText(localization_text, "Tokens");
     if (!items_section_text.has_value() ||
         !qualities_section_text.has_value() ||
         paint_kits_section_texts.empty() ||
-        sticker_kits_section_texts.empty() ||
         !tokens_section_text.has_value())
     {
         return std::nullopt;
@@ -1575,6 +1646,8 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
     const auto qualities_section = ParseFlatSectionEntries(*qualities_section_text);
     const auto paint_kits_section = MergeFlatSectionEntries(paint_kits_section_texts);
     const auto sticker_kits_section = MergeFlatSectionEntries(sticker_kits_section_texts);
+    const auto keychain_definitions_section =
+        MergeFlatSectionEntries(keychain_definitions_section_texts);
     const auto localization = BuildLocalizationMap(ParseLocalizationTokensSection(*tokens_section_text));
 
     std::unordered_map<int, std::string> base_item_names;
@@ -1584,6 +1657,7 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
     std::unordered_map<int, NamedId> glove_paint_kits;
     std::unordered_map<int, int> glove_paint_compatibility;
     std::unordered_map<int, NamedId> sticker_kits;
+    std::unordered_map<int, NamedId> keychain_kits;
     std::unordered_map<int, NamedId> qualities;
     glove_paint_compatibility.emplace(0, 0);
 
@@ -1599,7 +1673,7 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
         const auto raw_name = FindFlatValue(item, "name");
         const auto item_slot = FindFlatValue(item, "item_slot");
         const auto item_class = FindFlatValue(item, "item_class");
-        const auto display_name = ResolveItemDisplayName(item, localization);
+        const auto display_name = ResolveItemDisplayName(id, item, localization);
 
         const auto is_glove =
             prefab == "hands" ||
@@ -1737,7 +1811,9 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
     }
     catalog.glove_paint_compatibility = std::move(glove_paint_compatibility);
 
-    sticker_kits.emplace(0, NamedId {0, "None"});
+    sticker_kits.emplace(
+        0,
+        NamedId {0, nskinzcs2::build::kUiLanguageChinese ? "\xE6\x97\xA0" : "None"});
     for (const auto& [sticker_kit_key, sticker_kit] : sticker_kits_section)
     {
         int id = 0;
@@ -1783,7 +1859,58 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
         SortNamedIds(catalog.sticker_kits);
     }
 
-    if (catalog.weapon_paint_kits.empty() || catalog.sticker_kits.empty())
+    keychain_kits.emplace(
+        0,
+        NamedId {0, nskinzcs2::build::kUiLanguageChinese ? "\xE6\x97\xA0" : "None"});
+    for (const auto& [keychain_key, keychain_definition] : keychain_definitions_section)
+    {
+        int id = 0;
+        if (!TryParseInt(keychain_key, id))
+        {
+            continue;
+        }
+
+        if (id == 0)
+        {
+            continue;
+        }
+
+        const auto pedestal_display_model = FindFlatValue(keychain_definition, "pedestal_display_model");
+        if (!pedestal_display_model.empty())
+        {
+            auto& visual = catalog.keychain_visuals[id];
+            visual.model_path = std::string(pedestal_display_model);
+            FinalizeKeychainVisualInfo(visual);
+        }
+
+        auto name = ResolveLocalizedText(FindFlatValue(keychain_definition, "loc_name"), localization);
+        if (name.empty())
+        {
+            name = HumanizeIdentifier(FindFlatValue(keychain_definition, "name"));
+        }
+
+        if (name.empty())
+        {
+            continue;
+        }
+
+        keychain_kits[id] = NamedId {id, std::move(name)};
+    }
+
+    if (!keychain_kits.empty())
+    {
+        catalog.keychain_kits.clear();
+        catalog.keychain_kits.reserve(keychain_kits.size());
+        for (const auto& [id, keychain] : keychain_kits)
+        {
+            catalog.keychain_kits.push_back(keychain);
+        }
+        SortNamedIds(catalog.keychain_kits);
+    }
+
+    if (catalog.weapon_paint_kits.empty() ||
+        catalog.sticker_kits.empty() ||
+        catalog.keychain_kits.empty())
     {
         catalog.warnings.push_back("Local CS2 game files were parsed, but some catalog lists stayed empty.");
     }

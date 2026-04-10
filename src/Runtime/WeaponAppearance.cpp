@@ -15,6 +15,13 @@ constexpr std::uint16_t kAttributeStickerStride = 4;
 constexpr std::uint16_t kAttributeStickerWear = 1;
 constexpr std::uint16_t kAttributeStickerScale = 2;
 constexpr std::uint16_t kAttributeStickerRotation = 3;
+constexpr std::uint16_t kAttributeKeychainId = 299;
+constexpr std::uint16_t kAttributeKeychainOffsetX = 300;
+constexpr std::uint16_t kAttributeKeychainOffsetY = 301;
+constexpr std::uint16_t kAttributeKeychainOffsetZ = 302;
+constexpr std::uint16_t kAttributeKeychainSeed = 306;
+constexpr std::uint16_t kAttributeKeychainHighlight = 314;
+constexpr std::uint16_t kAttributeKeychainSticker = 321;
 constexpr float kDefaultWear = 0.0000001f;
 
 bool StickerNeedsAttributes(const nskinzcs2::model::StickerProfile& sticker) noexcept
@@ -23,6 +30,37 @@ bool StickerNeedsAttributes(const nskinzcs2::model::StickerProfile& sticker) noe
         std::fabs(sticker.wear - kDefaultWear) > 0.0000001f ||
         std::fabs(sticker.scale - 1.0f) > 0.0001f ||
         std::fabs(sticker.rotation) > 0.0001f;
+}
+
+void AppendKeychainSlotZeroAttributes(
+    std::vector<std::pair<std::uint16_t, float>>& attributes,
+    const nskinzcs2::model::KeychainProfile& keychain_profile)
+{
+    const auto keychain_id = static_cast<float>(std::max(0, keychain_profile.keychain_kit));
+    attributes.emplace_back(kAttributeKeychainId, keychain_id);
+    attributes.emplace_back(kAttributeKeychainOffsetX, 0.0f);
+    attributes.emplace_back(kAttributeKeychainOffsetY, 0.0f);
+    attributes.emplace_back(kAttributeKeychainOffsetZ, 0.0f);
+    attributes.emplace_back(kAttributeKeychainSeed, 0.0f);
+    attributes.emplace_back(kAttributeKeychainHighlight, 0.0f);
+    attributes.emplace_back(kAttributeKeychainSticker, 0.0f);
+}
+
+bool IsKeychainAttributeDefinitionIndex(const std::uint16_t definition_index) noexcept
+{
+    switch (definition_index)
+    {
+    case kAttributeKeychainId:
+    case kAttributeKeychainOffsetX:
+    case kAttributeKeychainOffsetY:
+    case kAttributeKeychainOffsetZ:
+    case kAttributeKeychainSeed:
+    case kAttributeKeychainHighlight:
+    case kAttributeKeychainSticker:
+        return true;
+    default:
+        return false;
+    }
 }
 }
 
@@ -68,7 +106,8 @@ nskinzcs2::runtime::ResolvedWeaponAppearanceBinding nskinzcs2::runtime::ResolveW
 
 nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppearancePayload(
     const nskinzcs2::model::CosmeticProfile& profile,
-    const std::uint32_t account_id)
+    const std::uint32_t account_id,
+    const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     WeaponAppearancePayload payload {};
     payload.fallback_paint_kit = profile.paint_kit;
@@ -116,7 +155,19 @@ nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppea
         payload.temporary_attributes.emplace_back(static_cast<std::uint16_t>(base + kAttributeStickerRotation), sticker.rotation);
     }
 
-    payload.needs_refresh = !payload.temporary_attributes.empty();
+    if (keychain_profile != nullptr)
+    {
+        AppendKeychainSlotZeroAttributes(payload.temporary_attributes, *keychain_profile);
+    }
+
+    payload.needs_refresh =
+        std::any_of(
+            payload.temporary_attributes.begin(),
+            payload.temporary_attributes.end(),
+            [](const auto& attribute)
+            {
+                return !IsKeychainAttributeDefinitionIndex(attribute.first);
+            });
     return payload;
 }
 
@@ -157,10 +208,15 @@ std::wstring nskinzcs2::runtime::DescribeWeaponAppearanceBinding(const ResolvedW
 std::wstring nskinzcs2::runtime::DescribeWeaponAppearancePayload(const WeaponAppearancePayload& payload)
 {
     std::size_t sticker_attribute_count = 0;
+    std::size_t keychain_attribute_count = 0;
     for (const auto& [definition_index, value] : payload.temporary_attributes)
     {
         static_cast<void>(value);
-        if (definition_index >= kAttributeStickerKitBase)
+        if (IsKeychainAttributeDefinitionIndex(definition_index))
+        {
+            ++keychain_attribute_count;
+        }
+        else if (definition_index >= kAttributeStickerKitBase)
         {
             ++sticker_attribute_count;
         }
@@ -171,7 +227,7 @@ std::wstring nskinzcs2::runtime::DescribeWeaponAppearancePayload(const WeaponApp
         buffer,
         _countof(buffer),
         _TRUNCATE,
-        L"paint=%d, seed=%d, wear=%g, stattrak=%d, quality=%d, account_id=%u, temporary_attribute_count=%zu, sticker_attribute_count=%zu, custom_name=%d, needs_refresh=%d",
+        L"paint=%d, seed=%d, wear=%g, stattrak=%d, quality=%d, account_id=%u, temporary_attribute_count=%zu, sticker_attribute_count=%zu, keychain_attribute_count=%zu, custom_name=%d, needs_refresh=%d",
         payload.fallback_paint_kit,
         payload.fallback_seed,
         payload.fallback_wear,
@@ -180,6 +236,7 @@ std::wstring nskinzcs2::runtime::DescribeWeaponAppearancePayload(const WeaponApp
         payload.account_id,
         payload.temporary_attributes.size(),
         sticker_attribute_count,
+        keychain_attribute_count,
         payload.writes_custom_name ? 1 : 0,
         payload.needs_refresh ? 1 : 0);
     return buffer;

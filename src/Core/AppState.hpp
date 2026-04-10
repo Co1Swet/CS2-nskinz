@@ -76,12 +76,28 @@ struct GloveProfile
     float wear = 0.0000001f;
 };
 
+struct KeychainProfile
+{
+    std::string name = "Default Keychain";
+    bool enabled = false;
+    std::uint64_t xuid = 0;
+    int base_item = 7;
+    int keychain_kit = 0;
+};
+
+struct DemoMirvPlayerEntry
+{
+    std::uint64_t xuid = 0;
+    std::string label;
+};
+
 struct ConfigDocument
 {
-    int version = 3;
+    int version = 4;
     std::vector<CosmeticProfile> profiles;
     std::vector<KnifeProfile> knife_profiles;
     std::vector<GloveProfile> glove_profiles;
+    std::vector<KeychainProfile> keychain_profiles;
     bool experimental_allow_hud_alias_synthetic_proxy_model_write = false;
 };
 
@@ -104,6 +120,12 @@ struct VisualInfo
     bool is_glove = false;
 };
 
+struct KeychainVisualInfo
+{
+    std::string model_path;
+    std::string resolved_model_resource_path;
+};
+
 struct Catalog
 {
     std::vector<NamedId> base_items;
@@ -113,8 +135,10 @@ struct Catalog
     std::vector<NamedId> glove_paint_kits;
     std::unordered_map<int, int> glove_paint_compatibility;
     std::vector<NamedId> sticker_kits;
+    std::vector<NamedId> keychain_kits;
     std::vector<NamedId> qualities;
     std::unordered_map<int, VisualInfo> visuals;
+    std::unordered_map<int, KeychainVisualInfo> keychain_visuals;
     bool runtime_populated = false;
     std::vector<std::string> warnings;
 };
@@ -154,10 +178,22 @@ enum class WeaponSkinRefreshTarget
     PreviewItemView,
 };
 
+enum class DemoKeychainState
+{
+    Idle,
+    WaitingCooldown,
+    WaitingStableFrames,
+    WaitingFactory,
+    Applied,
+    ClearPending,
+    Failed,
+};
+
 struct Status
 {
     Availability availability = Availability::Unknown;
     WeaponSkinRefreshState weapon_skin_refresh_state = WeaponSkinRefreshState::Disabled;
+    DemoKeychainState demo_keychain_state = DemoKeychainState::Idle;
     bool process_detected = false;
     bool hlae_detected = false;
     bool interfaces_resolved = false;
@@ -168,6 +204,8 @@ struct Status
     bool runtime_catalog_populated = false;
     bool hook_installed = false;
     bool frame_callbacks_active = false;
+    bool demo_console_capture_ready = false;
+    bool demo_console_query_inflight = false;
     bool schema_bound = false;
     bool entity_system_bound = false;
     bool client_entity_factory_requested = false;
@@ -181,11 +219,20 @@ struct Status
     bool glove_pawn_fallback_bound = false;
     bool knife_viewmodel_sync_ready = false;
     bool runtime_rebuilding = false;
+    bool demo_keychain_create_disabled = false;
     std::uint64_t frame_callback_count = 0;
     std::uint64_t watched_xuid = 0;
     std::uint64_t probed_xuid = 0;
+    std::uint64_t demo_keychain_owner_xuid = 0;
+    std::uint64_t demo_keychain_authoritative_xuid = 0;
     int last_frame_stage = -1;
     int demo_tick = -1;
+    int demo_keychain_weapon_entity_index = -1;
+    int demo_keychain_base_item = 0;
+    int demo_keychain_module_entity_index = -1;
+    int demo_keychain_live_def_id = 0;
+    int demo_keychain_stable_frame_count = 0;
+    int demo_console_player_count = 0;
     int highest_entity_index = -1;
     int player_controller_count = 0;
     int player_pawn_count = 0;
@@ -204,6 +251,10 @@ struct Status
     std::wstring last_error;
     std::wstring detail;
     std::wstring rebuild_reason;
+    std::wstring demo_keychain_profile_name;
+    std::wstring demo_keychain_issue;
+    std::wstring demo_console_detail;
+    std::wstring demo_console_issue;
     std::vector<std::wstring> diagnostics;
 };
 }
@@ -225,6 +276,12 @@ public:
     {
         std::scoped_lock lock(mutex_);
         return catalog_;
+    }
+
+    std::vector<model::DemoMirvPlayerEntry> SnapshotDemoMirvPlayers() const
+    {
+        std::scoped_lock lock(mutex_);
+        return demo_mirv_players_;
     }
 
     runtime::Status SnapshotStatus() const
@@ -250,6 +307,32 @@ public:
     {
         std::scoped_lock lock(mutex_);
         status_ = std::move(status);
+    }
+
+    void ReplaceDemoMirvPlayers(std::vector<model::DemoMirvPlayerEntry> entries)
+    {
+        std::scoped_lock lock(mutex_);
+        demo_mirv_players_ = std::move(entries);
+    }
+
+    void RequestDemoConsolePlayerRefresh() noexcept
+    {
+        demo_console_player_refresh_requested_.store(true);
+    }
+
+    bool ConsumeDemoConsolePlayerRefreshRequest() noexcept
+    {
+        return demo_console_player_refresh_requested_.exchange(false);
+    }
+
+    void RequestDemoKeychainRefresh() noexcept
+    {
+        demo_keychain_refresh_requested_.store(true);
+    }
+
+    bool ConsumeDemoKeychainRefreshRequest() noexcept
+    {
+        return demo_keychain_refresh_requested_.exchange(false);
     }
 
     std::uint64_t ConfigRevision() const noexcept
@@ -292,7 +375,10 @@ private:
     model::ConfigDocument config_;
     model::Catalog catalog_;
     runtime::Status status_;
+    std::vector<model::DemoMirvPlayerEntry> demo_mirv_players_;
     std::atomic<std::uint64_t> config_revision_ {0};
+    std::atomic_bool demo_console_player_refresh_requested_ {false};
+    std::atomic_bool demo_keychain_refresh_requested_ {false};
     std::atomic_bool manual_refresh_requested_ {false};
     std::atomic_bool window_visible_ {false};
     std::atomic_bool shutdown_requested_ {false};

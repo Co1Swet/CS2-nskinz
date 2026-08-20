@@ -81,7 +81,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -98,18 +98,15 @@
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <PrecompiledHeader />
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>powershell -NoProfile -ExecutionPolicy Bypass -Command "&amp; { New-Item -ItemType Directory -Force '$(ProjectDir)..\build' | Out-Null; Copy-Item -LiteralPath '$(TargetPath)' -Destination '$(ProjectDir)..\build\$(TargetFileName)' -Force }"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseZhCn|x64'">
     <ClCompile>
@@ -125,18 +122,15 @@
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <PrecompiledHeader />
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;NSKINZCS2_UI_LANG_ZH_CN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;NSKINZCS2_UI_LANG_ZH_CN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
-    <PostBuildEvent>
-      <Command>powershell -NoProfile -ExecutionPolicy Bypass -Command "&amp; { New-Item -ItemType Directory -Force '$(ProjectDir)..\build' | Out-Null; Copy-Item -LiteralPath '$(TargetPath)' -Destination '$(ProjectDir)..\build\$(TargetFileName)' -Force }"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="src\Core\AppState.hpp" />
@@ -144,6 +138,7 @@
     <ClInclude Include="src\Core\Config.hpp" />
     <ClInclude Include="src\Core\Log.hpp" />
     <ClInclude Include="src\Cs2\Catalog.hpp" />
+    <ClInclude Include="src\Cs2\Compatibility.hpp" />
     <ClInclude Include="src\Cs2\GlobalResourceSwapper.hpp" />
     <ClInclude Include="src\Cs2\Runtime.hpp" />
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
@@ -165,6 +160,7 @@
     <ClCompile Include="src\Core\Config.cpp" />
     <ClCompile Include="src\Core\Log.cpp" />
     <ClCompile Include="src\Cs2\Catalog.cpp" />
+    <ClCompile Include="src\Cs2\Compatibility.cpp" />
     <ClCompile Include="src\Cs2\GlobalResourceSwapper.cpp" />
     <ClCompile Include="src\Cs2\Runtime.cpp" />
     <ClCompile Include="src\dllmain.cpp" />
@@ -188,4 +184,3 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
-

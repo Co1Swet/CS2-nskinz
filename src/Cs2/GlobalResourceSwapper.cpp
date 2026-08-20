@@ -32,7 +32,9 @@ constexpr std::size_t kInvalidSlot = static_cast<std::size_t>(-1);
 constexpr std::size_t kSlotBegin = 8;
 constexpr std::size_t kSlotEndInclusive = 48;
 constexpr std::size_t kMachineByteCount = 32;
-constexpr std::uint64_t kEngine2PrimaryCallerOffset = 0x2B8Cull;
+// Historical diagnostic hint only. Live resource-query provenance is the
+// compatibility gate because this RVA changes between CS2 builds.
+constexpr std::uint64_t kLegacyEngine2PrimaryCallerOffset = 0x2B8Cull;
 constexpr std::uint32_t kEngine2PrimaryDispatchSlotOffset = 0x40u;
 constexpr std::uint32_t kEngine2WrapperDispatchSlotOffset = 0x2B8u;
 constexpr std::size_t kEngine2ProbeStubStackSize = 0x108;
@@ -608,6 +610,7 @@ constexpr const wchar_t* kRadarModules[] = {
     L"resourcesystem.dll",
     L"AfxHookSource2Rs.dll",
     L"AfxHookSourceRs.dll",
+    L"AfxHookSource2.nskinz-test.dll",
     L"AfxHookSource2.dll",
     L"AfxHookSource.dll",
     L"client.dll",
@@ -8088,8 +8091,9 @@ void TryActivateDeferredEngine2UpstreamCallerProbe() noexcept
 void TryInstallEngine2PrimaryCallerProbe(const CallerInfo& info) noexcept
 {
     if (info.caller_base == nullptr ||
-        info.caller_offset != kEngine2PrimaryCallerOffset ||
-        !ModuleNameEquals(info.caller_owner, L"engine2.dll"))
+        info.caller_offset == 0 ||
+        !ModuleNameEquals(info.caller_owner, L"engine2.dll") ||
+        !IsExecutableAddress(info.caller_base))
     {
         return;
     }
@@ -8105,12 +8109,13 @@ void TryInstallEngine2PrimaryCallerProbe(const CallerInfo& info) noexcept
         return;
     }
 
-    if (!IsExecutableAddress(info.caller_base))
+    if (info.caller_offset != kLegacyEngine2PrimaryCallerOffset)
     {
-        nskinzcs2::Logger::Warn(
-            std::wstring(L"GlobalResourceSwapper engine2 caller probe skipped: live caller is not executable, target=") +
-            FormatPointer(info.caller_base));
-        return;
+        wchar_t offset_text[32] {};
+        swprintf_s(offset_text, L"0x%llX", static_cast<unsigned long long>(info.caller_offset));
+        nskinzcs2::Logger::Info(
+            std::wstring(L"GlobalResourceSwapper learned current engine2 primary caller from live resource-query provenance: offset=") +
+            offset_text + L" (legacy hint was 0x2B8C)." );
     }
 
     LogTargetBytes(L"GlobalResourceSwapper engine2 primary caller live target", info.caller_base);

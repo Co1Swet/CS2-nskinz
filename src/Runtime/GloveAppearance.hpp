@@ -2,6 +2,7 @@
 
 #include "Core/AppState.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -123,6 +124,7 @@ struct GloveCompatibilityInputs
     bool carrier_valid = false;
     bool render_binding_valid = false;
     bool allow_render_binding_after_apply = false;
+    bool guarded_first_person_model_rebind_verified = false;
     bool live_glove_model_state_resolved = false;
     bool first_person_arms_model_state_resolved = false;
     bool live_glove_model_handle_resolved = false;
@@ -157,6 +159,7 @@ enum class GloveRenderVerificationReason
 struct GloveRenderVerificationInputs
 {
     GloveSlotMode mode = GloveSlotMode::None;
+    bool pawn_econ_gloves_reapply_path = false;
     bool carrier_field_readback_matched = false;
     bool reapply_triggered = false;
     bool has_first_person_render = false;
@@ -196,6 +199,24 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     bool stable_wearable_available,
     bool pawn_glove_available) noexcept;
 GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::GloveProfile& profile) noexcept;
+// Returns an already matching slot or the first existing invalid slot. It
+// never selects an append position because CS2 owns capacity/allocator state.
+int SelectReusableWearableHandleSlot(
+    const std::uint32_t* handles,
+    std::size_t handle_count,
+    std::uint32_t requested_handle) noexcept;
+// The formal CS2 model binder is only valid for a real Wearable with a verified
+// scene-node/model-state context and no live model handle. It is never a Pawn
+// or synthetic-render fallback. The opaque CSkeletonInstance +0xA0 state is
+// not an "empty render instance" flag; CS2's formal entry supports both of its
+// branches.
+bool ShouldInitializeWearableModel(
+    GloveSlotMode mode,
+    bool real_wearable,
+    int wearable_entity_index,
+    bool target_model_known,
+    std::uint64_t live_model_handle,
+    bool formal_bind_context_verified) noexcept;
 GloveCompatibilityResult EvaluateGloveCompatibility(const GloveCompatibilityInputs& inputs) noexcept;
 const wchar_t* GloveCompatibilityReasonText(GloveCompatibilityReason reason) noexcept;
 GloveRenderVerificationResult EvaluateGloveRenderVerification(const GloveRenderVerificationInputs& inputs) noexcept;

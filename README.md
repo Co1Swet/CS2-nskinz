@@ -25,25 +25,27 @@ Largest first-party translation units:
 
 ## Current Feature Scope
 
-Implemented:
+This release currently supports only:
 
 - Dedicated Win32 + D3D11 + Dear ImGui tool window
 - Versioned JSON config load/save
-- XUID-targeted weapon cosmetic profiles
-- Separate knife and glove profile pipelines
+- XUID-targeted regular weapon skin replacement during demo playback
+- Glove model and glove skin replacement for the watched demo player
 - Runtime environment detection for CS2, HLAE, interfaces, schema binding, entity-system binding, and hook install state
-- Catalog parsing from installed CS2 files for weapons, gloves, paint kits, stickers, qualities, and visual metadata
-- Demo-time cosmetic writes for regular weapons
-- Knife finish-only support plus guarded `model_and_finish` paths
-- Glove finish-only support plus wearable-backed `model_and_finish` paths
+- Catalog parsing from installed CS2 files for weapons, gloves, paint kits, qualities, and visual metadata
+- Guarded rebinding after demo tick seeks and watched-player changes
 - Validation and regression-style native tests for config parsing, catalog parsing, duplicate detection, helper logic, and runtime decision probes
 
-Still incomplete or intentionally limited:
+Not available in the current release:
 
-- Knife type rebuild edge cases and broader animation remap coverage
-- Preview glove writes
+- Knife skin replacement
+- Knife model replacement
+- Keychain/charm replacement
+- Sticker replacement
 - Agent replacement
 - Fully live item-schema walking instead of preferring installed game data
+
+Knife, keychain/charm, and sticker-related code or configuration fields may still be present for ongoing development, but they are not release-supported and should be treated as non-functional.
 
 ## Build Requirements
 
@@ -53,6 +55,17 @@ Still incomplete or intentionally limited:
 - Direct3D 11 development libraries
 - A local CS2 installation for runtime use and catalog-backed behavior checks
 - HLAE if you want to load the DLL with `mirv_loadlibrary`
+
+## Verified Compatibility
+
+This snapshot is verified against:
+
+- CS2 Client/Server build `2000885`, patch `1.41.7.6`, Source revision `10924896` (August 19, 2026)
+- HLAE `2.191.1` / AfxHookSource2 `0.40.1`
+- `Source2Client002`, `ResourceSystem013`, and `VFileSystem017`
+- `Source2Client002::FrameStageNotify` vtable slot 36, with executable-target and module-owner validation
+
+The DLL logs the installed CS2 identity, PE timestamps/sizes, required signature match counts, HLAE module version, resolved interface names, and final hook target. Required signatures must resolve exactly once; ambiguous or missing bindings fail closed.
 
 ## Build And Test
 
@@ -74,10 +87,18 @@ Outputs:
 - `run-tests.cmd`
   Runs `build/Release/nSkinzCS2.Tests.exe` and prints the captured logs.
 
+To include a read-only compatibility scan of an installed game:
+
+```text
+run-build-and-tests.cmd --cs2-root "E:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive"
+```
+
+The scripts keep all outputs and logs under `build/Release`. The build wrapper also normalizes duplicate case-insensitive environment keys that can otherwise prevent MSBuild from starting `CL.exe` in automation hosts.
+
 ## Runtime Usage
 
 1. Build `nSkinzCS2.dll` for `x64`.
-2. Start a CS2 session that is compatible with your HLAE workflow.
+2. Start CS2 through HLAE 2.191.1 with `-insecure`. Do not use this DLL on VAC or online servers.
 3. Load the DLL:
 
 ```text
@@ -86,14 +107,18 @@ mirv_loadlibrary "C:\Path\To\nSkinzCS2.dll"
 
 4. Press `Insert` to show or hide the tool window.
 5. Open a CS2 demo.
-6. Configure weapon, knife, and glove profiles.
+6. Configure regular weapon skin and glove profiles. Knife, keychain/charm, and sticker replacement is not available in this release.
 7. Press `Update` to request a runtime refresh.
+
+Runtime diagnostics are written beside the loaded DLL as `nSkinzCS2.log`.
 
 Behavior notes:
 
 - Weapon profiles are keyed by watched-player XUID and base item definition.
-- Knife profiles support `finish_only` and guarded `model_and_finish`.
-- Glove profiles support `finish_only` and wearable-backed `model_and_finish`.
+- Glove profiles support glove model and finish replacement through the watched pawn's current `m_EconGloves` item view on the verified compatibility baseline.
+- Knife skins/models, keychains/charms, and stickers are not functional in this release, even if related UI or configuration fields are visible.
+- Unsupported live layouts are rejected with a diagnostic instead of writing through an uncertain binding.
+- Demo pause/resume, tick seeks, watched-player switches, and repeated Update requests trigger guarded runtime rebinding.
 - Legacy glove entries under `profiles` with `base_item = 5028` are ignored at runtime; use `glove_profiles`.
 
 ## Repository Layout

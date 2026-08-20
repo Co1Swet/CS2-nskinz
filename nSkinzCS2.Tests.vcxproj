@@ -61,7 +61,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>user32.lib;advapi32.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;advapi32.lib;psapi.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -84,13 +84,14 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>user32.lib;advapi32.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;advapi32.lib;psapi.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="src\Core\AppState.hpp" />
     <ClInclude Include="src\Core\Config.hpp" />
     <ClInclude Include="src\Cs2\Catalog.hpp" />
+    <ClInclude Include="src\Cs2\Compatibility.hpp" />
     <ClInclude Include="src\Cs2\GlobalResourceSwapper.hpp" />
     <ClInclude Include="src\Cs2\Runtime.hpp" />
     <ClInclude Include="src\Core\Log.hpp" />
@@ -105,6 +106,7 @@
     <ClCompile Include="src\Core\Config.cpp" />
     <ClCompile Include="src\Core\Log.cpp" />
     <ClCompile Include="src\Cs2\Catalog.cpp" />
+    <ClCompile Include="src\Cs2\Compatibility.cpp" />
     <ClCompile Include="src\Cs2\GlobalResourceSwapper.cpp" />
     <ClCompile Include="src\Cs2\Runtime.cpp" />
     <ClCompile Include="src\Runtime\GloveAppearance.cpp" />
@@ -121,4 +123,3 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
-

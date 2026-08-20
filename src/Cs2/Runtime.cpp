@@ -1,4 +1,5 @@
 #include "Cs2/Runtime.hpp"
+#include "Cs2/Compatibility.hpp"
 #include "Cs2/GlobalResourceSwapper.hpp"
 
 #include "Core/Config.hpp"
@@ -39,6 +40,8 @@ namespace
 {
 using CreateInterfaceFn = void* (*)(const char* name, int* return_code);
 constexpr const char* kWearableClientClassName = "CEconWearable";
+constexpr const char* kWearableSchemaClassName = "C_EconWearable";
+constexpr const char* kWearableEntityFactoryClassName = "wearable_item";
 constexpr const wchar_t* kWearableClientClassNameWide = L"CEconWearable";
 constexpr const char* kKeychainClientClassName = "C_KeychainModule";
 constexpr const wchar_t* kKeychainClientClassNameWide = L"C_KeychainModule";
@@ -68,9 +71,29 @@ struct WearableClientClassLayout
 struct WearableClientClassFactoryBinding
 {
     std::uint8_t* client_class = nullptr;
+    std::uint8_t* schema_reflection_descriptor = nullptr;
     void* create_fn = nullptr;
     void* raw_create_fn = nullptr;
+    void* class_provider = nullptr;
+    void* class_chain_head = nullptr;
+    void* next_client_class = nullptr;
+    void* descriptor_guard = nullptr;
+    std::uint32_t primary_class_identity = 0;
+    std::uint32_t adjacent_class_identity = 0;
+    void** entity_system_storage = nullptr;
+    void* entity_system = nullptr;
+    void* class_lookup_fn = nullptr;
+    void* formal_create_fn = nullptr;
+    void* entity_class_metadata = nullptr;
+    void* schema_class_info = nullptr;
+    void* schema_allocator_fn = nullptr;
+    void* schema_reflection_allocator_fn = nullptr;
+    void* schema_constructor_fn = nullptr;
+    void* schema_primary_vtable = nullptr;
+    std::uint32_t schema_class_size = 0;
     const char* network_name = nullptr;
+    const char* schema_internal_name = nullptr;
+    const char* create_class_name = nullptr;
     std::wstring create_fn_module_name;
     std::wstring create_fn_resolution;
     std::wstring resolution_method;
@@ -143,6 +166,7 @@ struct WearableClientClassFieldProbe
 {
     std::uint8_t* client_class = nullptr;
     void* raw_create_target = nullptr;
+    void* next_client_class = nullptr;
     const char* network_name = nullptr;
     std::size_t create_offset = 0;
     std::size_t name_offset = 0;
@@ -1674,7 +1698,7 @@ std::vector<int> ParsePattern(const char* pattern)
     return bytes;
 }
 
-std::uint8_t* FindPattern(const ModuleSpan& span, const char* pattern)
+std::uint8_t* FindUniquePattern(const ModuleSpan& span, const char* pattern)
 {
     const auto bytes = ParsePattern(pattern);
     if (bytes.empty() || span.base == nullptr || span.size < bytes.size())
@@ -1682,6 +1706,8 @@ std::uint8_t* FindPattern(const ModuleSpan& span, const char* pattern)
         return nullptr;
     }
 
+    std::uint8_t* only_match = nullptr;
+    std::size_t match_count = 0;
     for (std::size_t offset = 0; offset + bytes.size() <= span.size; ++offset)
     {
         bool matched = true;
@@ -1693,14 +1719,16 @@ std::uint8_t* FindPattern(const ModuleSpan& span, const char* pattern)
                 break;
             }
         }
-
         if (matched)
         {
-            return span.base + offset;
+            only_match = span.base + offset;
+            if (++match_count > 1)
+            {
+                return nullptr;
+            }
         }
     }
-
-    return nullptr;
+    return match_count == 1 ? only_match : nullptr;
 }
 
 template <typename T>
@@ -1718,6 +1746,38 @@ bool SafeReadValue(const void* address, T& out)
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
+        return false;
+    }
+}
+
+bool SafeIncrementResourceBindingRefCount(
+    const std::uint64_t binding,
+    LONG& before,
+    LONG& after) noexcept
+{
+    before = 0;
+    after = 0;
+    if (binding == 0)
+    {
+        return false;
+    }
+
+    auto* const counter = reinterpret_cast<volatile LONG*>(
+        static_cast<std::uintptr_t>(binding) + 0x20u);
+    if (!SafeReadValue(const_cast<const LONG*>(counter), before) ||
+        before < 0 || before >= 0x3FFFFFFF)
+    {
+        return false;
+    }
+
+    __try
+    {
+        after = InterlockedIncrement(counter);
+        return after == before + 1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        after = 0;
         return false;
     }
 }
@@ -2429,6 +2489,26 @@ bool SafeInvokeFunctionPointer(void* address, Result& out, Args... args)
     }
 }
 
+template <typename... Args>
+bool SafeInvokeVoidFunctionPointer(void* address, Args... args)
+{
+    if (address == nullptr)
+    {
+        return false;
+    }
+
+    using Method = void(__fastcall*)(Args...);
+    __try
+    {
+        reinterpret_cast<Method>(address)(args...);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 template <typename T>
 bool SafeWriteProtectedValue(void* address, const T& value)
 {
@@ -2491,6 +2571,96 @@ bool IsExecutablePointer(const void* pointer)
     case PAGE_EXECUTE_WRITECOPY:
         return true;
     default:
+        return false;
+    }
+}
+
+using Tier0MemAllocFn = void* (__fastcall*)(std::size_t);
+using Tier0MemFreeFn = void (__fastcall*)(void*);
+
+struct Tier0AllocatorBindings
+{
+    HMODULE module = nullptr;
+    Tier0MemAllocFn alloc = nullptr;
+    Tier0MemFreeFn free = nullptr;
+
+    bool IsReady() const noexcept
+    {
+        return module != nullptr && alloc != nullptr && free != nullptr;
+    }
+};
+
+bool TryResolveTier0Allocator(Tier0AllocatorBindings& bindings) noexcept
+{
+    bindings = {};
+    auto* module = GetModuleHandleW(L"tier0.dll");
+    if (module == nullptr)
+    {
+        return false;
+    }
+
+    auto* alloc = reinterpret_cast<Tier0MemAllocFn>(GetProcAddress(module, "MemAlloc_AllocFunc"));
+    auto* free = reinterpret_cast<Tier0MemFreeFn>(GetProcAddress(module, "MemAlloc_FreeFunc"));
+    if (alloc == nullptr || free == nullptr ||
+        !IsExecutablePointer(reinterpret_cast<const void*>(alloc)) ||
+        !IsExecutablePointer(reinterpret_cast<const void*>(free)) ||
+        GetModuleFromAddress(reinterpret_cast<const void*>(alloc)) != module ||
+        GetModuleFromAddress(reinterpret_cast<const void*>(free)) != module)
+    {
+        return false;
+    }
+
+    bindings.module = module;
+    bindings.alloc = alloc;
+    bindings.free = free;
+    return true;
+}
+
+bool TryAllocateTier0Memory(const std::size_t byte_count, void*& allocation) noexcept
+{
+    allocation = nullptr;
+    if (byte_count == 0 || byte_count > 4096)
+    {
+        return false;
+    }
+
+    Tier0AllocatorBindings bindings {};
+    if (!TryResolveTier0Allocator(bindings))
+    {
+        return false;
+    }
+
+    __try
+    {
+        allocation = bindings.alloc(byte_count);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        allocation = nullptr;
+    }
+    return allocation != nullptr && IsReadablePointer(allocation);
+}
+
+bool TryFreeTier0Memory(void* allocation) noexcept
+{
+    if (allocation == nullptr)
+    {
+        return true;
+    }
+
+    Tier0AllocatorBindings bindings {};
+    if (!TryResolveTier0Allocator(bindings))
+    {
+        return false;
+    }
+
+    __try
+    {
+        bindings.free(allocation);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
         return false;
     }
 }
@@ -2630,10 +2800,20 @@ bool TryResolveContainingFunctionStart(const void* pointer, void*& function_star
     return TryResolveContainingFunctionStartByByteScan(pointer, function_start);
 }
 
+HMODULE GetHlaeSource2Module() noexcept
+{
+    if (const auto official = GetModuleHandleW(L"AfxHookSource2.dll"))
+    {
+        return official;
+    }
+    return GetModuleHandleW(L"AfxHookSource2.nskinz-test.dll");
+}
+
 bool IsTrustedFrameHookModuleName(const std::wstring& module_name)
 {
     return _wcsicmp(module_name.c_str(), L"client.dll") == 0 ||
         _wcsicmp(module_name.c_str(), L"AfxHookSource2.dll") == 0 ||
+        _wcsicmp(module_name.c_str(), L"AfxHookSource2.nskinz-test.dll") == 0 ||
         _wcsicmp(module_name.c_str(), L"AfxHookSource.dll") == 0;
 }
 
@@ -2716,7 +2896,7 @@ bool TryGetValidatedInterfaceVtableEntry(
         owning_module,
         direct_module,
         body_module,
-        GetModuleHandleW(L"AfxHookSource2.dll"),
+        GetHlaeSource2Module(),
         GetModuleHandleW(L"AfxHookSource.dll"),
     };
 
@@ -2897,7 +3077,7 @@ std::vector<ModuleSpan> BuildTrustedClientClassModuleSpans(HMODULE client_module
     {
         append_module(anchor_module);
     }
-    append_module(GetModuleHandleW(L"AfxHookSource2.dll"));
+    append_module(GetHlaeSource2Module());
     append_module(GetModuleHandleW(L"AfxHookSource.dll"));
     return spans;
 }
@@ -3013,7 +3193,7 @@ bool TryValidateTrustedCreateFunctionPointer(
     std::array<HMODULE, 5> candidate_modules {
         client_module,
         GetModuleFromAddress(pointer),
-        GetModuleHandleW(L"AfxHookSource2.dll"),
+        GetHlaeSource2Module(),
         GetModuleHandleW(L"AfxHookSource.dll"),
     };
 
@@ -3459,6 +3639,27 @@ bool WearableClientClassBindingsMatch(
     return left.create_fn == right.create_fn &&
         left.raw_create_fn == right.raw_create_fn &&
         left.client_class == right.client_class &&
+        left.schema_reflection_descriptor == right.schema_reflection_descriptor &&
+        left.class_provider == right.class_provider &&
+        left.class_chain_head == right.class_chain_head &&
+        left.next_client_class == right.next_client_class &&
+        left.descriptor_guard == right.descriptor_guard &&
+        left.primary_class_identity == right.primary_class_identity &&
+        left.adjacent_class_identity == right.adjacent_class_identity &&
+        left.entity_system_storage == right.entity_system_storage &&
+        left.entity_system == right.entity_system &&
+        left.class_lookup_fn == right.class_lookup_fn &&
+        left.formal_create_fn == right.formal_create_fn &&
+        left.entity_class_metadata == right.entity_class_metadata &&
+        left.schema_class_info == right.schema_class_info &&
+        left.schema_allocator_fn == right.schema_allocator_fn &&
+        left.schema_reflection_allocator_fn == right.schema_reflection_allocator_fn &&
+        left.schema_constructor_fn == right.schema_constructor_fn &&
+        left.schema_primary_vtable == right.schema_primary_vtable &&
+        left.schema_class_size == right.schema_class_size &&
+        left.network_name == right.network_name &&
+        left.schema_internal_name == right.schema_internal_name &&
+        left.create_class_name == right.create_class_name &&
         left.create_fn_offset == right.create_fn_offset &&
         left.name_offset == right.name_offset &&
         left.next_offset == right.next_offset;
@@ -5803,6 +6004,7 @@ bool TryInferWearableClientClassNodeFields(
 
     probe.client_class = node;
     probe.raw_create_target = raw_create_target;
+    probe.next_client_class = next;
     probe.network_name = network_name;
     probe.create_offset = create_offset;
     probe.name_offset = name_offset;
@@ -5943,6 +6145,7 @@ bool TryResolveWearableClientClassBindingCandidate(
     binding.client_class = probe.client_class;
     binding.create_fn = resolved_create_fn;
     binding.raw_create_fn = probe.raw_create_target;
+    binding.next_client_class = probe.next_client_class;
     binding.network_name = probe.network_name;
     binding.create_fn_module_name = create_module_name;
     binding.create_fn_resolution = create_resolution_kind;
@@ -6221,6 +6424,7 @@ bool TryResolveWearableClientClassFactoryByInferredLayout(
             binding.client_class = current;
             binding.create_fn = resolved_create_fn;
             binding.raw_create_fn = create_fn;
+            binding.next_client_class = next;
             binding.network_name = network_name;
             binding.create_fn_module_name = create_module_name;
             binding.create_fn_resolution = create_resolution_kind;
@@ -7139,6 +7343,7 @@ bool TryResolveWearableClientClassFactoryForLayout(
             binding.client_class = current;
             binding.create_fn = resolved_create_fn;
             binding.raw_create_fn = create_fn;
+            binding.next_client_class = next;
             binding.network_name = network_name;
             binding.create_fn_module_name = create_module_name;
             binding.create_fn_resolution = create_resolution_kind;
@@ -7214,20 +7419,66 @@ std::vector<std::uint8_t*> FindPointerReferencesInModule(
 
     const auto target_value = reinterpret_cast<std::uintptr_t>(target);
     std::unordered_set<std::uintptr_t> seen;
-    for (std::size_t index = 0; index + sizeof(void*) <= module.size && matches.size() < max_results; index += alignof(void*))
-    {
-        std::uintptr_t value = 0;
-        if (!SafeReadValue(module.base + index, value) || value != target_value)
+    const auto module_begin = reinterpret_cast<std::uintptr_t>(module.base);
+    const auto module_end = module_begin + module.size;
+    const auto scan_readable_regions =
+        [&](const std::size_t width, const std::size_t alignment, const auto& visitor)
         {
-            continue;
-        }
+            auto cursor = module_begin;
+            while (cursor < module_end && matches.size() < max_results)
+            {
+                MEMORY_BASIC_INFORMATION memory_info {};
+                if (VirtualQuery(
+                        reinterpret_cast<const void*>(cursor),
+                        &memory_info,
+                        sizeof(memory_info)) != sizeof(memory_info) ||
+                    memory_info.RegionSize == 0)
+                {
+                    break;
+                }
 
-        auto* match = module.base + index;
-        if (seen.insert(reinterpret_cast<std::uintptr_t>(match)).second)
+                const auto region_begin = std::max(
+                    cursor,
+                    reinterpret_cast<std::uintptr_t>(memory_info.BaseAddress));
+                const auto raw_region_end =
+                    reinterpret_cast<std::uintptr_t>(memory_info.BaseAddress) + memory_info.RegionSize;
+                const auto region_end = std::min(module_end, raw_region_end);
+                const auto protection = memory_info.Protect & 0xFFu;
+                const bool readable =
+                    memory_info.State == MEM_COMMIT &&
+                    (memory_info.Protect & PAGE_GUARD) == 0 &&
+                    protection != PAGE_NOACCESS;
+                if (readable && region_end >= region_begin + width)
+                {
+                    const auto relative = region_begin - module_begin;
+                    auto aligned = module_begin +
+                        ((relative + alignment - 1) / alignment) * alignment;
+                    for (; aligned + width <= region_end && matches.size() < max_results; aligned += alignment)
+                    {
+                        visitor(aligned);
+                    }
+                }
+
+                if (raw_region_end <= cursor)
+                {
+                    break;
+                }
+                cursor = raw_region_end;
+            }
+        };
+
+    scan_readable_regions(
+        sizeof(void*),
+        alignof(void*),
+        [&](const std::uintptr_t address)
         {
-            matches.push_back(match);
-        }
-    }
+            std::uintptr_t value = 0;
+            std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+            if (value == target_value && seen.insert(address).second)
+            {
+                matches.push_back(reinterpret_cast<std::uint8_t*>(address));
+            }
+        });
 
     const auto target_module = GetModuleFromAddress(target);
     const auto target_module_span = GetModuleSpan(target_module);
@@ -7241,22 +7492,18 @@ std::vector<std::uint8_t*> FindPointerReferencesInModule(
         if (target_offset <= std::numeric_limits<std::uint32_t>::max())
         {
             const auto target_rva = static_cast<std::uint32_t>(target_offset);
-            for (std::size_t index = 0;
-                 index + sizeof(std::uint32_t) <= module.size && matches.size() < max_results;
-                 index += sizeof(std::uint32_t))
-            {
-                std::uint32_t value = 0;
-                if (!SafeReadValue(module.base + index, value) || value != target_rva)
+            scan_readable_regions(
+                sizeof(std::uint32_t),
+                alignof(std::uint32_t),
+                [&](const std::uintptr_t address)
                 {
-                    continue;
-                }
-
-                auto* match = module.base + index;
-                if (seen.insert(reinterpret_cast<std::uintptr_t>(match)).second)
-                {
-                    matches.push_back(match);
-                }
-            }
+                    std::uint32_t value = 0;
+                    std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+                    if (value == target_rva && seen.insert(address).second)
+                    {
+                        matches.push_back(reinterpret_cast<std::uint8_t*>(address));
+                    }
+                });
         }
     }
 
@@ -7666,6 +7913,286 @@ bool TryResolveWearableClientClassFactoryByDataFirstNodeInference(
     return false;
 }
 
+bool TryValidateWearableClientClassDescriptorAtFrameRenderPass(
+    HMODULE client_module,
+    std::uint8_t* descriptor,
+    const char* expected_network_name,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    constexpr std::size_t kSchemaAllocatorPointerBeforeDescriptor = 0x10;
+    constexpr std::size_t kPrimaryClassIdentityOffset = 0x00;
+    constexpr std::size_t kSchemaInternalNameOffset = 0x08;
+    constexpr std::size_t kNetworkNameOffset = 0x10;
+    constexpr std::size_t kAdjacentClassIdentityOffset = 0x20;
+    constexpr std::size_t kDescriptorGuardOffset = 0x28;
+    constexpr std::uint32_t kNetworkedClassIdentityBit = 0x80000000u;
+    constexpr std::uint32_t kClassIdentityMask = 0x7FFFFFFFu;
+
+    binding = {};
+    issue.clear();
+
+    const auto module = GetModuleSpan(client_module);
+    if (!module.has_value() || descriptor == nullptr ||
+        reinterpret_cast<std::uintptr_t>(descriptor) <
+            reinterpret_cast<std::uintptr_t>(module->base) + kSchemaAllocatorPointerBeforeDescriptor ||
+        !PointerInModule(*module, descriptor - kSchemaAllocatorPointerBeforeDescriptor) ||
+        !PointerInModule(*module, descriptor) ||
+        !PointerInModule(*module, descriptor + kDescriptorGuardOffset + sizeof(void*) - 1))
+    {
+        issue = L"The CEconWearable descriptor is outside the readable client.dll image.";
+        return false;
+    }
+
+    std::uint32_t primary_identity = 0;
+    void* schema_allocator = nullptr;
+    const char* schema_internal_name = nullptr;
+    const char* network_name = nullptr;
+    std::uint32_t adjacent_identity = 0;
+    void* descriptor_guard = nullptr;
+    if (!SafeReadValue(
+            descriptor - kSchemaAllocatorPointerBeforeDescriptor,
+            schema_allocator) ||
+        !SafeReadValue(descriptor + kPrimaryClassIdentityOffset, primary_identity) ||
+        !SafeReadValue(descriptor + kSchemaInternalNameOffset, schema_internal_name) ||
+        !SafeReadValue(descriptor + kNetworkNameOffset, network_name) ||
+        !SafeReadValue(descriptor + kAdjacentClassIdentityOffset, adjacent_identity) ||
+        !SafeReadValue(descriptor + kDescriptorGuardOffset, descriptor_guard))
+    {
+        issue = L"The CEconWearable descriptor fields were not readable.";
+        return false;
+    }
+
+    std::string safe_internal_name;
+    std::string safe_network_name;
+    if (schema_internal_name == nullptr ||
+        !TryReadClientClassName(schema_internal_name, safe_internal_name) ||
+        safe_internal_name != kWearableSchemaClassName)
+    {
+        issue = L"The descriptor internal-name pointer did not identify C_EconWearable.";
+        return false;
+    }
+
+    if (network_name == nullptr ||
+        (expected_network_name != nullptr && network_name != expected_network_name) ||
+        !TryReadClientClassName(network_name, safe_network_name) ||
+        safe_network_name != kWearableClientClassName)
+    {
+        issue = L"The descriptor network-name pointer did not identify CEconWearable.";
+        return false;
+    }
+
+    const auto primary_value = primary_identity & kClassIdentityMask;
+    const auto adjacent_value = adjacent_identity & kClassIdentityMask;
+    if ((primary_identity & kNetworkedClassIdentityBit) == 0 ||
+        (adjacent_identity & kNetworkedClassIdentityBit) == 0 ||
+        adjacent_value == kClassIdentityMask ||
+        adjacent_value + 1u != primary_value)
+    {
+        issue = L"The CEconWearable descriptor class-ID pair was not the expected adjacent networked identity.";
+        return false;
+    }
+
+    if (descriptor_guard == nullptr ||
+        !PointerInModule(*module, descriptor_guard) ||
+        !IsReadablePointer(descriptor_guard))
+    {
+        issue = L"The CEconWearable descriptor metadata guard was not readable inside client.dll.";
+        return false;
+    }
+
+    if (schema_allocator == nullptr ||
+        !PointerInModule(*module, schema_allocator) ||
+        !IsExecutablePointer(schema_allocator) ||
+        GetModuleFromAddress(schema_allocator) != client_module)
+    {
+        issue = L"The CEconWearable Schema reflection allocator was not executable inside client.dll.";
+        return false;
+    }
+
+    binding.client_class = descriptor;
+    binding.schema_reflection_descriptor = descriptor;
+    // This is a Schema allocation/destruction dispatcher, not the historical
+    // ClientClass (entityIndex, serial) callback.  Keep it as identity
+    // evidence only; never expose it through create_fn/raw_create_fn.
+    binding.schema_reflection_allocator_fn = schema_allocator;
+    binding.class_chain_head = nullptr;
+    binding.next_client_class = nullptr;
+    binding.descriptor_guard = descriptor_guard;
+    binding.primary_class_identity = primary_identity;
+    binding.adjacent_class_identity = adjacent_identity;
+    binding.network_name = network_name;
+    binding.schema_internal_name = schema_internal_name;
+    binding.create_fn_module_name = L"client.dll";
+    binding.create_fn_resolution = L"Schema reflection allocator identity (non-callable as entity factory)";
+    binding.resolution_method = L"FRAME_RENDER_PASS(schema_reflection_descriptor)";
+    binding.create_fn_offset = 0;
+    binding.name_offset = kNetworkNameOffset;
+    binding.next_offset = 0;
+    binding.chain_length = 1;
+    return true;
+}
+
+bool TryResolveWearableClientClassFactoryByKnownLayoutAtFrameRenderPass(
+    HMODULE client_module,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    const auto module = GetModuleSpan(client_module);
+    if (!module.has_value())
+    {
+        issue = L"client.dll module span is unavailable for the known CEconWearable layout check.";
+        return false;
+    }
+
+    // Current builds expose CEconWearable in a Schema reflection descriptor
+    // table rather than the fd26f92 linked client-class chain. Restrict
+    // discovery to the unique name/reference pair in client.dll and validate
+    // the internal name, neighboring IDs, metadata guard and Schema allocator
+    // as one identity tuple. The allocator has a different ABI and is never
+    // treated as an entity create callback.
+    const std::vector<ModuleSpan> trusted_modules {*module};
+    const auto names = FindAsciiStringOccurrencesInModules(
+        trusted_modules,
+        kWearableClientClassName,
+        8);
+    WearableClientClassFactoryBinding unique_binding {};
+    std::size_t valid_binding_count = 0;
+    std::wstring first_issue;
+    for (const auto* name_address : names)
+    {
+        const auto references = FindPointerReferencesInModules(
+            trusted_modules,
+            name_address,
+            32);
+        for (auto* reference : references)
+        {
+            const auto reference_address = reinterpret_cast<std::uintptr_t>(reference);
+            if (reference_address < kWearableClientClassLayout.name_offset)
+            {
+                continue;
+            }
+
+            auto* node = reference - kWearableClientClassLayout.name_offset;
+            WearableClientClassFactoryBinding candidate {};
+            std::wstring candidate_issue;
+            if (!TryValidateWearableClientClassDescriptorAtFrameRenderPass(
+                    client_module,
+                    node,
+                    name_address,
+                    candidate,
+                    candidate_issue))
+            {
+                if (first_issue.empty() && !candidate_issue.empty())
+                {
+                    first_issue = std::move(candidate_issue);
+                }
+                continue;
+            }
+
+            ++valid_binding_count;
+            if (valid_binding_count == 1)
+            {
+                unique_binding = std::move(candidate);
+            }
+        }
+    }
+
+    if (valid_binding_count == 1)
+    {
+        binding = std::move(unique_binding);
+        return true;
+    }
+
+    if (valid_binding_count > 1)
+    {
+        issue = L"Multiple CEconWearable descriptor-table entries validated in client.dll; refusing an ambiguous factory.";
+        return false;
+    }
+
+    issue = L"The current CEconWearable Schema descriptor layout (allocator-0x10,class_id+0x00,internal_name+0x08,network_name+0x10,adjacent_id+0x20,metadata+0x28) did not validate in client.dll.";
+    if (!first_issue.empty())
+    {
+        issue += L" First rejection: " + first_issue;
+    }
+    return false;
+}
+
+bool TryRevalidateWearableClientClassFactoryAtFrameRenderPass(
+    HMODULE client_module,
+    void* provider_anchor,
+    const WearableClientClassFactoryBinding& expected,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+    const auto is_descriptor_table =
+        expected.resolution_method == L"FRAME_RENDER_PASS(descriptor_table)";
+    if (client_module == nullptr ||
+        provider_anchor == nullptr ||
+        expected.client_class == nullptr ||
+        expected.network_name == nullptr ||
+        (!is_descriptor_table && expected.next_client_class == nullptr) ||
+        (is_descriptor_table && expected.descriptor_guard == nullptr) ||
+        expected.create_fn == nullptr)
+    {
+        issue = L"The pending CEconWearable validation tuple is incomplete.";
+        return false;
+    }
+
+    std::wstring candidate_issue;
+    bool validated = false;
+    if (is_descriptor_table)
+    {
+        validated = TryValidateWearableClientClassDescriptorAtFrameRenderPass(
+            client_module,
+            expected.client_class,
+            expected.network_name,
+            binding,
+            candidate_issue);
+    }
+    else
+    {
+        const auto trusted_modules = BuildTrustedClientClassModuleSpans(
+            client_module,
+            expected.client_class);
+        validated = TryResolveWearableClientClassBindingCandidate(
+            client_module,
+            trusted_modules,
+            expected.client_class,
+            expected.network_name,
+            expected.create_fn_offset,
+            expected.name_offset,
+            expected.next_offset,
+            binding,
+            &candidate_issue);
+    }
+    if (!validated)
+    {
+        issue = L"The pending CEconWearable node no longer validates.";
+        if (!candidate_issue.empty())
+        {
+            issue += L" " + candidate_issue;
+        }
+        return false;
+    }
+
+    binding.class_provider = provider_anchor;
+    binding.class_chain_head = nullptr;
+    binding.resolution_method = expected.resolution_method;
+    if (!WearableClientClassBindingsMatch(expected, binding))
+    {
+        issue = L"The CEconWearable provider/descriptor/create identity tuple changed during direct revalidation.";
+        binding = {};
+        return false;
+    }
+    return true;
+}
+
 bool TryResolveWearableClientClassFactoryByGetAllClasses(
     void* source2_client_interface,
     void* source2_client_callback_instance,
@@ -7741,6 +8268,8 @@ bool TryResolveWearableClientClassFactoryByGetAllClasses(
                 inferred_binding,
                 inferred_issue))
         {
+            inferred_binding.class_provider = provider_resolution.instance;
+            inferred_binding.class_chain_head = client_class_chain_head;
             binding = inferred_binding;
             return true;
         }
@@ -7763,6 +8292,8 @@ bool TryResolveWearableClientClassFactoryByGetAllClasses(
                     candidate_binding,
                     layout_issue))
             {
+                candidate_binding.class_provider = provider_resolution.instance;
+                candidate_binding.class_chain_head = client_class_chain_head;
                 binding = candidate_binding;
                 return true;
             }
@@ -7800,6 +8331,571 @@ bool TryResolveWearableClientClassFactoryByGetAllClasses(
         issue = L"GetAllClasses: " + get_all_classes_issue;
     }
     return false;
+}
+
+bool TryResolveRelativeCallTarget(
+    std::uint8_t* instruction,
+    void*& target) noexcept
+{
+    target = nullptr;
+    if (instruction == nullptr)
+    {
+        return false;
+    }
+
+    std::uint8_t opcode = 0;
+    std::int32_t displacement = 0;
+    if (!SafeReadValue(instruction, opcode) ||
+        opcode != 0xE8 ||
+        !SafeReadValue(instruction + 1, displacement))
+    {
+        return false;
+    }
+
+    target = instruction + 5 + displacement;
+    return target != nullptr;
+}
+
+bool TryInvokeClientEntityClassLookup(
+    void* lookup_function,
+    void* entity_system,
+    const char* class_name,
+    void*& class_descriptor) noexcept
+{
+    class_descriptor = nullptr;
+    if (lookup_function == nullptr || entity_system == nullptr || class_name == nullptr)
+    {
+        return false;
+    }
+
+    // The third parameter is an optional CUtlString out-parameter.  The
+    // verified implementation substitutes its own zero-initialized local when
+    // it is null and releases that local before returning.
+    using FindClassByNameFn = void* (__fastcall*)(void*, const char*, void*);
+    __try
+    {
+        class_descriptor =
+            reinterpret_cast<FindClassByNameFn>(lookup_function)(entity_system, class_name, nullptr);
+        return class_descriptor != nullptr;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        class_descriptor = nullptr;
+        return false;
+    }
+}
+
+bool TryResolveWearableClientEntitySystemFactory(
+    HMODULE client_module,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    const auto module = GetModuleSpan(client_module);
+    const auto text_span = GetTextSectionSpan(client_module);
+    if (!module.has_value() || !text_span.has_value())
+    {
+        issue = L"client.dll module/text span is unavailable.";
+        return false;
+    }
+
+    auto* factory_callsite = FindUniquePattern(
+        *text_span,
+        nskinzcs2::compatibility::kWearableEntityFactoryCallsitePattern);
+    auto* create_by_name = FindUniquePattern(
+        *text_span,
+        nskinzcs2::compatibility::kWearableEntityCreateByNamePattern);
+    auto* formal_create = FindUniquePattern(
+        *text_span,
+        nskinzcs2::compatibility::kWearableEntityFormalCreatePattern);
+    auto* class_lookup = FindUniquePattern(
+        *text_span,
+        nskinzcs2::compatibility::kWearableEntityClassLookupPattern);
+    if (factory_callsite == nullptr ||
+        create_by_name == nullptr ||
+        formal_create == nullptr ||
+        class_lookup == nullptr)
+    {
+        issue =
+            L"The verified CGameEntitySystem callsite/create-by-name/formal-create/class-lookup signature set was not uniquely resolved.";
+        return false;
+    }
+
+    void* callsite_create_target = nullptr;
+    void* wrapper_lookup_target = nullptr;
+    void* wrapper_formal_create_target = nullptr;
+    if (!TryResolveRelativeCallTarget(factory_callsite + 0x25, callsite_create_target) ||
+        !TryResolveRelativeCallTarget(create_by_name + 0x35, wrapper_lookup_target) ||
+        !TryResolveRelativeCallTarget(create_by_name + 0xF6, wrapper_formal_create_target) ||
+        callsite_create_target != create_by_name ||
+        wrapper_lookup_target != class_lookup ||
+        wrapper_formal_create_target != formal_create)
+    {
+        issue =
+            L"The verified wearable factory signatures did not cross-reference the same client entity creation chain.";
+        return false;
+    }
+
+    const auto entity_system_displacement =
+        *reinterpret_cast<const std::int32_t*>(factory_callsite + 3);
+    auto** entity_system_storage = reinterpret_cast<void**>(
+        factory_callsite + 7 + entity_system_displacement);
+    void* entity_system = nullptr;
+    if (!PointerInModule(*module, entity_system_storage) ||
+        !SafeReadValue(entity_system_storage, entity_system) ||
+        entity_system == nullptr ||
+        !IsReadablePointer(entity_system))
+    {
+        issue = L"The verified client entity-system global has not published a readable provider yet.";
+        return false;
+    }
+
+    const std::array<void*, 3> executable_targets {{
+        create_by_name,
+        formal_create,
+        class_lookup,
+    }};
+    for (const auto target : executable_targets)
+    {
+        if (!PointerInModule(*module, target) ||
+            !IsExecutablePointer(target) ||
+            GetModuleFromAddress(target) != client_module)
+        {
+            issue = L"A verified client entity factory target failed module/executable-memory validation.";
+            return false;
+        }
+    }
+
+    void* class_descriptor = nullptr;
+    const char* resolved_create_class_name = nullptr;
+    constexpr std::array<const char*, 3> kWearableClassLookupNames {{
+        kWearableEntityFactoryClassName,
+        kWearableSchemaClassName,
+        kWearableClientClassName,
+    }};
+    for (const auto* candidate_name : kWearableClassLookupNames)
+    {
+        void* candidate_descriptor = nullptr;
+        if (TryInvokeClientEntityClassLookup(
+                class_lookup,
+                entity_system,
+                candidate_name,
+                candidate_descriptor) &&
+            candidate_descriptor != nullptr &&
+            IsReadablePointer(candidate_descriptor) &&
+            PointerInModule(*module, candidate_descriptor))
+        {
+            class_descriptor = candidate_descriptor;
+            resolved_create_class_name = candidate_name;
+            break;
+        }
+    }
+
+    if (class_descriptor == nullptr || resolved_create_class_name == nullptr)
+    {
+        issue = L"CGameEntitySystem could not resolve the wearable_item/C_EconWearable/CEconWearable class descriptor.";
+        return false;
+    }
+
+    void* entity_class_metadata = nullptr;
+    void* schema_class_info = nullptr;
+    const char* schema_class_name = nullptr;
+    std::uint32_t schema_class_size = 0;
+    void* schema_allocator = nullptr;
+    auto* const descriptor_bytes = static_cast<std::uint8_t*>(class_descriptor);
+    if (!SafeReadValue(descriptor_bytes + 0x58, entity_class_metadata) ||
+        entity_class_metadata == nullptr ||
+        !IsReadablePointer(entity_class_metadata) ||
+        !PointerInModule(*module, entity_class_metadata))
+    {
+        issue = L"The wearable class descriptor did not expose readable entity-class metadata at +0x58.";
+        return false;
+    }
+
+    // Current CS2 stores an entity registration wrapper at descriptor+0x58:
+    //   +0x00 entity factory key ("wearable_item")
+    //   +0x08 Schema class name ("C_EconWearable")
+    //   +0x28 Schema class info
+    // Older builds exposed the Schema class info directly at +0x58, so retain
+    // that layout as a verified compatibility fallback.
+    schema_class_info = entity_class_metadata;
+    const char* registered_entity_name = nullptr;
+    const char* registered_schema_name = nullptr;
+    void* wrapped_schema_class_info = nullptr;
+    std::string registered_entity_name_value;
+    std::string registered_schema_name_value;
+    auto* const metadata_bytes = static_cast<std::uint8_t*>(entity_class_metadata);
+    if (SafeReadValue(metadata_bytes + 0x00, registered_entity_name) &&
+        SafeReadValue(metadata_bytes + 0x08, registered_schema_name) &&
+        SafeReadValue(metadata_bytes + 0x28, wrapped_schema_class_info) &&
+        SafeReadCString(registered_entity_name, registered_entity_name_value, 128) &&
+        SafeReadCString(registered_schema_name, registered_schema_name_value, 128) &&
+        registered_entity_name_value == resolved_create_class_name &&
+        registered_schema_name_value == kWearableSchemaClassName &&
+        wrapped_schema_class_info != nullptr &&
+        IsReadablePointer(wrapped_schema_class_info) &&
+        PointerInModule(*module, wrapped_schema_class_info))
+    {
+        schema_class_info = wrapped_schema_class_info;
+    }
+
+    auto* const schema_bytes = static_cast<std::uint8_t*>(schema_class_info);
+    if (!SafeReadValue(schema_bytes + 0x08, schema_class_name) ||
+        !SafeReadValue(schema_bytes + 0x20, schema_class_size) ||
+        !SafeReadValue(schema_bytes + 0x68, schema_allocator))
+    {
+        issue = L"The CEconWearable Schema metadata layout could not be read.";
+        return false;
+    }
+
+    std::string schema_class_name_value;
+    constexpr std::uint32_t kExpectedWearableSchemaClassSize = 0x16F8;
+    if (!SafeReadCString(schema_class_name, schema_class_name_value, 128) ||
+        schema_class_name_value != "C_EconWearable" ||
+        schema_class_size != kExpectedWearableSchemaClassSize ||
+        schema_allocator == nullptr ||
+        !PointerInModule(*module, schema_allocator) ||
+        !IsExecutablePointer(schema_allocator) ||
+        GetModuleFromAddress(schema_allocator) != client_module)
+    {
+        std::wstringstream stream;
+        stream << L"The resolved CEconWearable descriptor failed Schema identity validation"
+            << L" (name="
+            << (!schema_class_name_value.empty() ? NarrowToWide(schema_class_name_value) : L"<unreadable>")
+            << L", size=0x" << std::hex << std::uppercase << schema_class_size
+            << L", allocator=" << FormatPointer(schema_allocator)
+            << std::dec << std::nouppercase << L").";
+        issue = stream.str();
+        return false;
+    }
+
+    binding.client_class = static_cast<std::uint8_t*>(class_descriptor);
+    binding.create_fn = create_by_name;
+    binding.raw_create_fn = create_by_name;
+    binding.entity_system_storage = entity_system_storage;
+    binding.entity_system = entity_system;
+    binding.class_lookup_fn = class_lookup;
+    binding.formal_create_fn = formal_create;
+    binding.entity_class_metadata = entity_class_metadata;
+    binding.schema_class_info = schema_class_info;
+    binding.schema_allocator_fn = schema_allocator;
+    binding.schema_class_size = schema_class_size;
+    binding.network_name = kWearableClientClassName;
+    binding.create_class_name = resolved_create_class_name;
+    binding.create_fn_module_name = L"client.dll";
+    binding.create_fn_resolution = L"direct formal client entity factory";
+    binding.resolution_method = L"CGameEntitySystem::CreateEntityByName";
+    binding.chain_length = 1;
+    return true;
+}
+
+struct WearableAllocatorCodeIdentity
+{
+    std::uint32_t allocation_size = 0;
+    void* constructor_fn = nullptr;
+    void* primary_vtable = nullptr;
+};
+
+bool TryExtractWearableAllocatorCodeIdentity(
+    HMODULE client_module,
+    void* allocator,
+    WearableAllocatorCodeIdentity& identity,
+    std::wstring& issue)
+{
+    constexpr std::size_t kProbeBytes = 0x180;
+    constexpr std::uint32_t kExpectedAllocationSize = 0x16F8;
+    identity = {};
+    issue.clear();
+
+    const auto module = GetModuleSpan(client_module);
+    auto* const code = static_cast<std::uint8_t*>(allocator);
+    if (!module.has_value() || code == nullptr ||
+        !PointerInModule(*module, code) ||
+        !PointerInModule(*module, code + kProbeBytes - 1) ||
+        !IsExecutablePointer(code) ||
+        GetModuleFromAddress(code) != client_module)
+    {
+        issue = L"The wearable allocator probe target is not executable inside client.dll.";
+        return false;
+    }
+
+    bool allocation_size_seen = false;
+    std::vector<WearableAllocatorCodeIdentity> constructor_candidates;
+    for (std::size_t offset = 0; offset + 12 <= kProbeBytes; ++offset)
+    {
+        std::uint8_t opcode = 0;
+        if (!SafeReadValue(code + offset, opcode))
+        {
+            issue = L"The wearable allocator code window became unreadable.";
+            return false;
+        }
+
+        if (opcode == 0xB9)
+        {
+            std::uint32_t immediate = 0;
+            if (SafeReadValue(code + offset + 1, immediate) &&
+                immediate == kExpectedAllocationSize)
+            {
+                allocation_size_seen = true;
+            }
+        }
+
+        if (opcode != 0xE8)
+        {
+            continue;
+        }
+
+        std::uint8_t lea0 = 0;
+        std::uint8_t lea1 = 0;
+        std::uint8_t lea2 = 0;
+        if (!SafeReadValue(code + offset + 5, lea0) ||
+            !SafeReadValue(code + offset + 6, lea1) ||
+            !SafeReadValue(code + offset + 7, lea2) ||
+            lea0 != 0x48 || lea1 != 0x8D || lea2 != 0x05)
+        {
+            continue;
+        }
+
+        void* constructor = nullptr;
+        std::int32_t vtable_displacement = 0;
+        if (!TryResolveRelativeCallTarget(code + offset, constructor) ||
+            !SafeReadValue(code + offset + 8, vtable_displacement))
+        {
+            continue;
+        }
+
+        auto* const primary_vtable = code + offset + 12 + vtable_displacement;
+        void* first_virtual_method = nullptr;
+        if (constructor == nullptr ||
+            !PointerInModule(*module, constructor) ||
+            !IsExecutablePointer(constructor) ||
+            GetModuleFromAddress(constructor) != client_module ||
+            !PointerInModule(*module, primary_vtable) ||
+            !SafeReadValue(primary_vtable, first_virtual_method) ||
+            first_virtual_method == nullptr ||
+            !PointerInModule(*module, first_virtual_method) ||
+            !IsExecutablePointer(first_virtual_method))
+        {
+            continue;
+        }
+
+        constructor_candidates.push_back({
+            kExpectedAllocationSize,
+            constructor,
+            primary_vtable,
+        });
+    }
+
+    if (!allocation_size_seen || constructor_candidates.size() != 1)
+    {
+        std::wstringstream stream;
+        stream << L"The wearable allocator did not expose one unique 0x"
+            << std::hex << std::uppercase << kExpectedAllocationSize
+            << std::dec << std::nouppercase
+            << L" allocation/constructor/vtable identity (size_marker="
+            << (allocation_size_seen ? 1 : 0)
+            << L", candidates=" << constructor_candidates.size() << L").";
+        issue = stream.str();
+        return false;
+    }
+
+    identity = constructor_candidates.front();
+    return true;
+}
+
+bool TryResolveWearableEntityFactoryWithSchemaEvidenceAtFrameRenderPass(
+    HMODULE client_module,
+    void* provider_anchor,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    if (client_module == nullptr || provider_anchor == nullptr)
+    {
+        issue = L"client.dll or the Source2Client provider-generation anchor is unavailable.";
+        return false;
+    }
+
+    WearableClientClassFactoryBinding schema_evidence {};
+    std::wstring schema_issue;
+    if (!TryResolveWearableClientClassFactoryByKnownLayoutAtFrameRenderPass(
+            client_module,
+            schema_evidence,
+            schema_issue))
+    {
+        issue = L"Schema descriptor: " + schema_issue;
+        return false;
+    }
+
+    WearableClientClassFactoryBinding entity_factory {};
+    std::wstring entity_issue;
+    if (!TryResolveWearableClientEntitySystemFactory(
+            client_module,
+            entity_factory,
+            entity_issue))
+    {
+        issue = L"CGameEntitySystem: " + entity_issue;
+        return false;
+    }
+
+    WearableAllocatorCodeIdentity reflection_identity {};
+    WearableAllocatorCodeIdentity entity_identity {};
+    std::wstring reflection_identity_issue;
+    std::wstring entity_identity_issue;
+    if (!TryExtractWearableAllocatorCodeIdentity(
+            client_module,
+            schema_evidence.schema_reflection_allocator_fn,
+            reflection_identity,
+            reflection_identity_issue) ||
+        !TryExtractWearableAllocatorCodeIdentity(
+            client_module,
+            entity_factory.schema_allocator_fn,
+            entity_identity,
+            entity_identity_issue))
+    {
+        issue = L"Allocator identity: reflection=" +
+            (reflection_identity_issue.empty() ? L"ok" : reflection_identity_issue) +
+            L" | entity_factory=" +
+            (entity_identity_issue.empty() ? L"ok" : entity_identity_issue);
+        return false;
+    }
+
+    // The current build deliberately publishes different reflection and
+    // entity-registration dispatchers. They are the same C_EconWearable only
+    // when both allocate the Schema size, call the same constructor and
+    // install the same primary vtable. Neither dispatcher is invoked here.
+    if (reflection_identity.allocation_size != entity_identity.allocation_size ||
+        reflection_identity.constructor_fn != entity_identity.constructor_fn ||
+        reflection_identity.primary_vtable != entity_identity.primary_vtable)
+    {
+        std::wstringstream stream;
+        stream << L"The CEconWearable reflection and entity allocators did not converge on one code identity"
+            << L" (reflection_allocator="
+            << FormatPointer(schema_evidence.schema_reflection_allocator_fn)
+            << L", entity_allocator=" << FormatPointer(entity_factory.schema_allocator_fn)
+            << L", reflection_ctor=" << FormatPointer(reflection_identity.constructor_fn)
+            << L", entity_ctor=" << FormatPointer(entity_identity.constructor_fn)
+            << L", reflection_vtable=" << FormatPointer(reflection_identity.primary_vtable)
+            << L", entity_vtable=" << FormatPointer(entity_identity.primary_vtable)
+            << L").";
+        issue = stream.str();
+        return false;
+    }
+
+    entity_factory.class_provider = provider_anchor;
+    entity_factory.schema_reflection_descriptor =
+        schema_evidence.schema_reflection_descriptor;
+    entity_factory.descriptor_guard = schema_evidence.descriptor_guard;
+    entity_factory.primary_class_identity = schema_evidence.primary_class_identity;
+    entity_factory.adjacent_class_identity = schema_evidence.adjacent_class_identity;
+    entity_factory.network_name = schema_evidence.network_name;
+    entity_factory.schema_internal_name = schema_evidence.schema_internal_name;
+    entity_factory.schema_reflection_allocator_fn =
+        schema_evidence.schema_reflection_allocator_fn;
+    entity_factory.schema_constructor_fn = reflection_identity.constructor_fn;
+    entity_factory.schema_primary_vtable = reflection_identity.primary_vtable;
+    entity_factory.create_fn_resolution =
+        L"direct formal client entity factory + unique Schema reflection identity";
+    binding = std::move(entity_factory);
+    return true;
+}
+
+bool TryResolveWearableClientClassFactoryWithSchemaEvidenceAtFrameRenderPass(
+    void* source2_client_interface,
+    void* source2_client_callback_instance,
+    HMODULE client_module,
+    WearableClientClassFactoryBinding& binding,
+    std::wstring& issue)
+{
+    binding = {};
+    issue.clear();
+
+    if (client_module == nullptr ||
+        (source2_client_interface == nullptr && source2_client_callback_instance == nullptr))
+    {
+        issue = L"client.dll or the Source2Client provider-generation anchor is unavailable.";
+        return false;
+    }
+
+    // The fd26f92 path creates network client entities through the
+    // ClientClass (entity index, serial) callback.  CreateEntityByName creates
+    // a registered C_EconWearable in current builds, but it does not publish
+    // the client-network model source required by the first-person glove
+    // renderer.  Resolve the real GetAllClasses chain on the game thread and
+    // use Schema only as independent class/vtable identity evidence.
+    WearableClientClassFactoryBinding client_class_factory {};
+    std::wstring client_class_issue;
+    if (!TryResolveWearableClientClassFactoryByGetAllClasses(
+            source2_client_interface,
+            source2_client_callback_instance,
+            client_module,
+            client_class_factory,
+            client_class_issue))
+    {
+        issue = L"GetAllClasses: " + client_class_issue;
+        return false;
+    }
+
+    WearableClientClassFactoryBinding schema_evidence {};
+    std::wstring schema_issue;
+    if (!TryResolveWearableClientClassFactoryByKnownLayoutAtFrameRenderPass(
+            client_module,
+            schema_evidence,
+            schema_issue))
+    {
+        issue = L"Schema descriptor: " + schema_issue;
+        return false;
+    }
+
+    WearableAllocatorCodeIdentity reflection_identity {};
+    std::wstring reflection_identity_issue;
+    if (!TryExtractWearableAllocatorCodeIdentity(
+            client_module,
+            schema_evidence.schema_reflection_allocator_fn,
+            reflection_identity,
+            reflection_identity_issue))
+    {
+        issue = L"Schema allocator identity: " + reflection_identity_issue;
+        return false;
+    }
+
+    std::string client_class_name;
+    std::string schema_network_name;
+    if (client_class_factory.client_class == nullptr ||
+        client_class_factory.class_provider == nullptr ||
+        client_class_factory.class_chain_head == nullptr ||
+        client_class_factory.next_client_class == nullptr ||
+        client_class_factory.create_fn == nullptr ||
+        client_class_factory.raw_create_fn == nullptr ||
+        client_class_factory.network_name == nullptr ||
+        !TryReadClientClassName(client_class_factory.network_name, client_class_name) ||
+        client_class_name != kWearableClientClassName ||
+        schema_evidence.network_name == nullptr ||
+        !TryReadClientClassName(schema_evidence.network_name, schema_network_name) ||
+        schema_network_name != client_class_name)
+    {
+        issue = L"The GetAllClasses CEconWearable node did not agree with the unique Schema class identity.";
+        return false;
+    }
+
+    client_class_factory.schema_reflection_descriptor =
+        schema_evidence.schema_reflection_descriptor;
+    client_class_factory.descriptor_guard = schema_evidence.descriptor_guard;
+    client_class_factory.primary_class_identity = schema_evidence.primary_class_identity;
+    client_class_factory.adjacent_class_identity = schema_evidence.adjacent_class_identity;
+    client_class_factory.schema_internal_name = schema_evidence.schema_internal_name;
+    client_class_factory.schema_reflection_allocator_fn =
+        schema_evidence.schema_reflection_allocator_fn;
+    client_class_factory.schema_constructor_fn = reflection_identity.constructor_fn;
+    client_class_factory.schema_primary_vtable = reflection_identity.primary_vtable;
+    client_class_factory.create_fn_resolution +=
+        L" + unique Schema reflection identity";
+    binding = std::move(client_class_factory);
+    return true;
 }
 
 bool TryResolveWearableClientClassFactoryByFallbackScans(
@@ -8733,8 +9829,8 @@ bool TryResolveKeychainClientClassFactory(
     return false;
 }
 
-constexpr int kCs2FrameRenderPass = 11;
-constexpr int kCs2FrameStartStage = 0;
+constexpr int kCs2FrameRenderPass = nskinzcs2::compatibility::kFrameRenderPassStage;
+constexpr int kCs2FrameStartStage = nskinzcs2::compatibility::kFrameStartStage;
 constexpr int kMaxEntityIndex = 0x7FFE;
 constexpr std::uint32_t kInvalidEntityHandle = 0xFFFFFFFFu;
 
@@ -8956,6 +10052,12 @@ struct CanonicalWeaponCarrierBinding
 
 struct ClientSchemaOffsets;
 
+using NetworkVectorOperationFn = std::uintptr_t (__fastcall*)(
+    std::uint32_t operation,
+    void* vector,
+    std::int32_t index,
+    std::int32_t count);
+
 bool IsKnownDefinitionIndex(const int definition_index, const std::unordered_set<int>& known_definition_indices);
 std::vector<std::uint32_t> CollectWeaponServiceWeaponHandles(void* weapon_services, const ClientSchemaOffsets& offsets);
 
@@ -8985,15 +10087,33 @@ bool TryResolveHudWeaponRenderEntity(
 
 struct RuntimeEntityManager
 {
+    struct WearableHandleBuffer
+    {
+        void* pawn_entity = nullptr;
+        void* vector_address = nullptr;
+        std::uint8_t* original_data = nullptr;
+        std::uint64_t original_size = 0;
+        std::uint8_t* installed_data = nullptr;
+        std::uint64_t installed_size = 0;
+        void* in_place_slot = nullptr;
+        std::uint32_t original_handle = kInvalidEntityHandle;
+        std::uint32_t installed_handle = kInvalidEntityHandle;
+        bool installed_data_uses_tier0_allocator = false;
+        bool appended_with_engine_operation = false;
+        std::size_t appended_index = 0;
+        NetworkVectorOperationFn vector_operation = nullptr;
+    };
+
     std::unordered_map<std::uint64_t, RuntimePlayerBinding> players_by_xuid;
     std::unordered_set<std::uint64_t> logged_profile_diagnostics;
     std::unordered_map<std::uintptr_t, RuntimeOwnedAttributeBuffer> runtime_owned_attribute_buffers;
-    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> runtime_wearable_handle_buffers;
+    std::unordered_map<std::uint64_t, WearableHandleBuffer> runtime_wearable_handle_buffers;
     int highest_live_entity_index = -1;
     int last_demo_tick = -1;
     bool last_demo_paused = false;
     void* last_entity_list = nullptr;
     std::uint64_t last_watched_xuid = 0;
+    std::uint32_t watched_xuid_missing_confirmations = 0;
     std::wstring last_rebuild_reason;
     RuntimeFeatureAvailability client_entity_factory = RuntimeFeatureAvailability::Unknown;
     RuntimeFeatureAvailability knife_animation_hook = RuntimeFeatureAvailability::Unknown;
@@ -9688,7 +10808,6 @@ constexpr std::uint32_t kResourceHandleQueryMissTelemetrySampleWriting = 1;
 constexpr std::uint32_t kResourceHandleQueryMissTelemetrySampleReady = 2;
 constexpr std::size_t kResourceHandleQueryMissTelemetryPreviewCapacity = 160;
 constexpr std::uint64_t kResourceHandleQueryResultSampleNoDataEntryThreshold = 8;
-constexpr std::uintptr_t kResourceHandleQueryPrimaryCallerEngine2Offset = 0x235E5Cull;
 constexpr std::uint64_t kMinUserModePointer = 0x10000ull;
 constexpr std::array<std::size_t, 13> kResourceHandleQueryUpstreamProbeOffsets {{
     0x00,
@@ -10391,11 +11510,13 @@ public:
     void* vfptr = nullptr;
     const char* name = nullptr;
     const char* module_name = nullptr;
+    const char* name2 = nullptr;
     std::uint32_t size = 0;
     std::uint16_t field_count = 0;
-    std::uint16_t pad0 = 0;
-    std::uint16_t static_size = 0;
-    std::uint16_t metadata_size = 0;
+    std::uint16_t static_field_count = 0;
+    std::uint16_t static_metadata_count = 0;
+    std::uint8_t alignment = 0;
+    std::uint8_t has_base_class = 0;
     std::uint32_t pad1 = 0;
     Field* fields = nullptr;
 };
@@ -10437,6 +11558,16 @@ public:
 };
 }
 
+static_assert(offsetof(schema::Class, size) == 0x20);
+static_assert(offsetof(schema::Class, field_count) == 0x24);
+static_assert(offsetof(schema::Class, static_metadata_count) == 0x28);
+static_assert(offsetof(schema::Class, alignment) == 0x2A);
+static_assert(offsetof(schema::Class, fields) == 0x30);
+static_assert(offsetof(schema::TypeScope, declared_class_count) == 0x470);
+static_assert(offsetof(schema::TypeScope, declared_classes) == 0x478);
+static_assert(offsetof(schema::System, scope_count) == 0x190);
+static_assert(offsetof(schema::System, scopes) == 0x198);
+
 struct ClientSchemaOffsets
 {
     std::ptrdiff_t controller_steam_id = 0;
@@ -10444,6 +11575,9 @@ struct ClientSchemaOffsets
     std::ptrdiff_t pawn_controller = 0;
     std::ptrdiff_t pawn_hud_model_arms = 0;
     std::ptrdiff_t combat_character_my_wearables = 0;
+    NetworkVectorOperationFn combat_character_my_wearables_operation = nullptr;
+    std::size_t combat_character_my_wearables_element_size = 0;
+    std::size_t combat_character_my_wearables_storage_size = 0;
     std::ptrdiff_t controller_observer_services = 0;
     std::ptrdiff_t controller_observer_target = 0;
     std::ptrdiff_t controller_observer_mode = 0;
@@ -10508,6 +11642,9 @@ struct ClientSchemaOffsets
     std::ptrdiff_t item_view_custom_name = 0;
     std::ptrdiff_t item_view_custom_name_override = 0;
     std::ptrdiff_t attribute_list_attributes = 0;
+    NetworkVectorOperationFn attribute_list_attributes_operation = nullptr;
+    std::size_t attribute_list_attributes_element_size = 0;
+    std::size_t attribute_list_attributes_schema_tail_span = 0;
     std::ptrdiff_t econ_item_attribute_definition_index = 0;
     std::ptrdiff_t econ_item_attribute_value = 0;
     std::ptrdiff_t econ_item_attribute_initial_value = 0;
@@ -10603,6 +11740,9 @@ struct RuntimeOwnedAttributeListBinding
     NetworkVectorView original {};
     NetworkVectorView installed {};
     void* allocated_block = nullptr;
+    void* in_place_address = nullptr;
+    std::vector<std::uint8_t> in_place_original_bytes;
+    std::vector<std::uint8_t> in_place_installed_bytes;
     bool restore_custom_material_original = false;
     bool restore_custom_material_written = false;
     bool restore_on_abandon = false;
@@ -10643,6 +11783,9 @@ struct TemporaryAttributeListAttachment
     RefreshAttributeVector original {};
     void* allocated_block = nullptr;
     std::size_t allocated_size = 0;
+    void* in_place_address = nullptr;
+    std::vector<std::uint8_t> in_place_original_bytes;
+    std::vector<std::uint8_t> in_place_installed_bytes;
     bool restore_custom_material_original = false;
     bool restore_custom_material_written = false;
     bool replaced_existing_vector = false;
@@ -10848,6 +11991,11 @@ struct HookState
     std::atomic_bool entity_system_ready {false};
     std::atomic_bool client_entity_factory_requested {false};
     std::atomic_bool client_entity_factory_ready {false};
+    // A post-create validation failure means CS2 accepted the formal factory
+    // call but the returned object did not satisfy the current entity-layout
+    // contract.  Do not let map/demo rebuilds clear that evidence and invoke
+    // the allocator repeatedly in the same process.
+    std::atomic_bool wearable_factory_post_create_poisoned {false};
     std::atomic_bool viewmodel_factory_discovery_ran {false};
     std::atomic_bool viewmodel_factory_observed {false};
     std::atomic_bool knife_animation_hook_ready {false};
@@ -10914,6 +12062,20 @@ struct HookState
     std::unordered_map<void*, std::uint64_t> runtime_owned_attribute_release_frames;
     std::mutex runtime_keychain_module_mutex;
     std::unordered_set<int> runtime_created_keychain_module_entity_indices;
+    // Runtime-created glove provenance is tied to both the engine handle and
+    // the exact entity pointer. Build 2000885 aggressively reuses slot 512 and
+    // its serial, so a handle-only cache can mistake a later stock/network
+    // entity for one created by this DLL.
+    std::mutex runtime_glove_provenance_mutex;
+    std::unordered_map<std::uint32_t, std::pair<std::uint64_t, void*>> runtime_glove_provenance_by_handle;
+    // At most one formal CEconWearable create call is allowed per XUID and
+    // Source2Client provider generation. Demo seeks and watched-player rebuilds
+    // must reuse that entity or fail closed instead of producing orphan chains.
+    std::unordered_map<std::uint64_t, std::uint64_t> runtime_glove_create_generation_by_xuid;
+    std::unordered_set<std::uint64_t> attempted_wearable_definition_refresh_signatures;
+    std::unordered_set<std::uint64_t> attempted_wearable_set_model_signatures;
+    std::unordered_set<std::uint64_t> rejected_wearable_model_bind_signatures;
+    std::unordered_map<std::uint64_t, std::uint64_t> wearable_model_bind_retry_not_before;
     std::mutex demo_keychain_controller_mutex;
     DemoKeychainControllerState demo_keychain_controller;
     std::unordered_map<void*, TrackedWeaponAppearanceRestorePoint> tracked_weapon_restore_points;
@@ -10937,6 +12099,11 @@ struct HookState
     RuntimeFeatureAvailability cached_wearable_factory_availability = RuntimeFeatureAvailability::Unknown;
     WearableClientClassFactoryBinding cached_wearable_factory_binding;
     std::wstring cached_wearable_factory_issue;
+    std::uint64_t pending_wearable_factory_generation = 0;
+    WearableClientClassFactoryBinding pending_wearable_factory_binding;
+    std::uint32_t pending_wearable_factory_confirmations = 0;
+    std::uint32_t pending_wearable_factory_failures = 0;
+    std::wstring pending_wearable_factory_issue;
     RuntimeFeatureAvailability cached_keychain_factory_availability = RuntimeFeatureAvailability::Unknown;
     WearableClientClassFactoryBinding cached_keychain_factory_binding;
     std::wstring cached_keychain_factory_issue;
@@ -11289,6 +12456,7 @@ void TryUpdateConsolePlayerCapture(const std::uint64_t now, const bool demo_play
 
 extern thread_local bool g_knife_model_path_swap_query_hook_reentry;
 extern thread_local bool g_knife_model_path_swap_force_demo_result_sampling;
+thread_local bool g_glove_resource_query_frame_render_pass_active = false;
 constexpr std::uint64_t kDemoPassiveMonitorPromotionEntryThreshold = 64;
 std::size_t CountKnifeModelPathSwapQueryHookRedirectPairs(
     const KnifeModelPathSwapQueryHookTarget& hook_target) noexcept;
@@ -11652,6 +12820,11 @@ void ClearCachedWearableFactoryResolution(const bool preserve_available) noexcep
         g_hook_state.cached_wearable_factory_availability = RuntimeFeatureAvailability::Unknown;
         g_hook_state.cached_wearable_factory_binding = {};
         g_hook_state.cached_wearable_factory_issue.clear();
+        g_hook_state.pending_wearable_factory_generation = 0;
+        g_hook_state.pending_wearable_factory_binding = {};
+        g_hook_state.pending_wearable_factory_confirmations = 0;
+        g_hook_state.pending_wearable_factory_failures = 0;
+        g_hook_state.pending_wearable_factory_issue.clear();
     }
 
     if (!preserve_keychain)
@@ -12541,7 +13714,19 @@ bool ShouldRunKnifeModelPathSwapQueryRuntime() noexcept
         return false;
     }
 
-    return HasConfiguredKnifeModelSwapRequest(g_hook_state.app_state->SnapshotConfig());
+    const auto config = g_hook_state.app_state->SnapshotConfig();
+    const auto has_glove_model_swap_request =
+        std::any_of(
+            config.glove_profiles.begin(),
+            config.glove_profiles.end(),
+            [](const nskinzcs2::model::GloveProfile& profile)
+            {
+                return profile.enabled &&
+                    profile.xuid != 0 &&
+                    profile.mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish &&
+                    profile.model_definition != 0;
+            });
+    return HasConfiguredKnifeModelSwapRequest(config) || has_glove_model_swap_request;
 }
 
 bool ShouldRetainPublishedKnifeModelPathSwapBridgeLocked() noexcept
@@ -12770,8 +13955,24 @@ RuntimeFeatureAvailability SnapshotOrResolveCachedKeychainFactoryResolution(
     return RuntimeFeatureAvailability::Unavailable;
 }
 
-void ResolveWearableFactoryCacheIfNeeded(const nskinzcs2::model::ConfigDocument& config)
+void AdvanceWearableFactoryCacheAtFrameRenderPass()
 {
+    if (!g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        g_hook_state.app_state == nullptr)
+    {
+        return;
+    }
+
+    if (g_hook_state.wearable_factory_post_create_poisoned.load(std::memory_order_acquire))
+    {
+        StoreCachedWearableFactoryResolution(
+            RuntimeFeatureAvailability::Unavailable,
+            {},
+            L"wearable_factory_unavailable: client-class creation is disabled for this process after post-create entity validation failed.");
+        return;
+    }
+
+    const auto config = g_hook_state.app_state->SnapshotConfig();
     if (!ConfigRequestsRuntimeWearableFactory(config))
     {
         return;
@@ -12791,65 +13992,165 @@ void ResolveWearableFactoryCacheIfNeeded(const nskinzcs2::model::ConfigDocument&
     }
 
     const auto providers = SnapshotSource2ClientProviders();
-    if (providers.callback_instance == nullptr)
-    {
-        return;
-    }
+    const auto provider_generation = providers.generation;
+    void* const provider_anchor = providers.callback_instance != nullptr
+        ? providers.callback_instance
+        : providers.interface_instance;
 
-    std::wstringstream begin_stream;
-    begin_stream << L"Runtime worker: resolving CEconWearable client class factory via data-first background scan"
-        << L" (generation=" << providers.generation
-        << L", callback=" << FormatPointer(providers.callback_instance)
-        << L", interface=" << FormatPointer(providers.interface_instance)
-        << L").";
-    nskinzcs2::Logger::Info(begin_stream.str());
+    WearableClientClassFactoryBinding pending_binding {};
+    bool has_pending_binding = false;
+    {
+        std::scoped_lock lock(g_hook_state.wearable_factory_cache_mutex);
+        has_pending_binding =
+            g_hook_state.pending_wearable_factory_generation == provider_generation &&
+            g_hook_state.pending_wearable_factory_confirmations > 0;
+        if (has_pending_binding)
+        {
+            pending_binding = g_hook_state.pending_wearable_factory_binding;
+        }
+    }
 
     WearableClientClassFactoryBinding binding {};
     std::wstring issue;
-    if (TryResolveWearableClientClassFactory(
-            providers.interface_instance,
-            providers.callback_instance,
-            client_module,
-            binding,
-            issue))
+    bool resolved = false;
+    if (provider_anchor == nullptr)
     {
-        if (!StoreCachedWearableFactoryResolutionIfCurrent(
-                providers.generation,
-                RuntimeFeatureAvailability::Available,
-                binding,
-                {}))
+        issue = L"Source2Client provider pointers are unavailable for game-thread wearable factory discovery.";
+    }
+    else
+    {
+        resolved = TryResolveWearableEntityFactoryWithSchemaEvidenceAtFrameRenderPass(
+            client_module,
+            provider_anchor,
+            binding,
+            issue);
+        if (resolved && has_pending_binding &&
+            !WearableClientClassBindingsMatch(pending_binding, binding))
         {
-            nskinzcs2::Logger::Info(
-                L"Runtime worker discarded stale CEconWearable factory success after Source2Client provider generation advanced.");
+            binding = {};
+            issue = L"The formal CGameEntitySystem/Schema wearable factory identity tuple changed between FRAME_RENDER_PASS observations.";
+            resolved = false;
+        }
+    }
+
+    bool candidate_matches_previous = false;
+    std::uint32_t candidate_confirmations = 0;
+    std::uint32_t failure_confirmations = 0;
+    bool publish_available = false;
+    bool publish_unavailable = false;
+    {
+        std::scoped_lock lock(g_hook_state.wearable_factory_cache_mutex);
+        if (g_hook_state.source2_client_provider_generation.load() != provider_generation ||
+            g_hook_state.cached_wearable_factory_availability != RuntimeFeatureAvailability::Unknown)
+        {
             return;
         }
 
+        if (g_hook_state.pending_wearable_factory_generation != provider_generation)
+        {
+            g_hook_state.pending_wearable_factory_generation = provider_generation;
+            g_hook_state.pending_wearable_factory_binding = {};
+            g_hook_state.pending_wearable_factory_confirmations = 0;
+            g_hook_state.pending_wearable_factory_failures = 0;
+            g_hook_state.pending_wearable_factory_issue.clear();
+        }
+
+        candidate_matches_previous =
+            resolved &&
+            g_hook_state.pending_wearable_factory_confirmations > 0 &&
+            WearableClientClassBindingsMatch(
+                binding,
+                g_hook_state.pending_wearable_factory_binding);
+        const auto confirmation = nskinzcs2::runtime::EvaluateWearableFactoryConfirmation({
+            resolved,
+            candidate_matches_previous,
+            g_hook_state.pending_wearable_factory_confirmations,
+            g_hook_state.pending_wearable_factory_failures,
+        });
+
+        candidate_confirmations = confirmation.candidate_confirmations;
+        failure_confirmations = confirmation.failure_confirmations;
+        publish_available = confirmation.publish_available;
+        publish_unavailable = confirmation.publish_unavailable;
+        g_hook_state.pending_wearable_factory_confirmations = candidate_confirmations;
+        g_hook_state.pending_wearable_factory_failures = failure_confirmations;
+        g_hook_state.pending_wearable_factory_issue = issue;
+
+        if (resolved)
+        {
+            g_hook_state.pending_wearable_factory_binding = binding;
+        }
+        else
+        {
+            g_hook_state.pending_wearable_factory_binding = {};
+        }
+
+        if (publish_available)
+        {
+            g_hook_state.cached_wearable_factory_availability = RuntimeFeatureAvailability::Available;
+            g_hook_state.cached_wearable_factory_binding = binding;
+            g_hook_state.cached_wearable_factory_issue.clear();
+        }
+        else if (publish_unavailable)
+        {
+            g_hook_state.cached_wearable_factory_availability = RuntimeFeatureAvailability::Unavailable;
+            g_hook_state.cached_wearable_factory_binding = {};
+            g_hook_state.cached_wearable_factory_issue = issue.empty()
+                ? L"wearable_factory_unavailable: formal entity factory validation failed on two consecutive FRAME_RENDER_PASS observations."
+                : L"wearable_factory_unavailable: " + issue;
+        }
+    }
+
+    if (resolved)
+    {
         std::wstringstream stream;
-        stream << L"Runtime worker resolved CEconWearable client class factory via "
-            << (!binding.resolution_method.empty() ? binding.resolution_method : L"fallback")
-            << L" at " << FormatPointer(binding.create_fn)
+        stream << L"FRAME_RENDER_PASS CEconWearable formal entity factory validation "
+            << candidate_confirmations << L"/2"
+            << L": generation=" << provider_generation
+            << L", provider_anchor=" << FormatPointer(binding.class_provider)
+            << L", schema_descriptor=" << FormatPointer(binding.schema_reflection_descriptor)
+            << L", reflection_allocator=" << FormatPointer(binding.schema_reflection_allocator_fn)
+            << L", schema_constructor=" << FormatPointer(binding.schema_constructor_fn)
+            << L", schema_vtable=" << FormatPointer(binding.schema_primary_vtable)
+            << L", descriptor_guard=" << FormatPointer(binding.descriptor_guard)
+            << L", class_ids=0x" << std::hex << std::uppercase
+            << binding.primary_class_identity << L"/0x"
+            << binding.adjacent_class_identity << std::dec << std::nouppercase
+            << L", chain_head=" << FormatPointer(binding.class_chain_head)
+            << L", class_node=" << FormatPointer(binding.client_class)
+            << L", next_node=" << FormatPointer(binding.next_client_class)
+            << L", method=" << binding.resolution_method
+            << L", create=" << FormatPointer(binding.create_fn)
             << L" (raw=" << FormatPointer(binding.raw_create_fn)
             << L", module="
             << (!binding.create_fn_module_name.empty() ? binding.create_fn_module_name : L"<unknown>")
-            << L").";
+            << L", resolution=" << binding.create_fn_resolution
+            << L", cached=" << (publish_available ? 1 : 0) << L").";
         nskinzcs2::Logger::Info(stream.str());
         return;
     }
 
-    if (!StoreCachedWearableFactoryResolutionIfCurrent(
-            providers.generation,
-            RuntimeFeatureAvailability::Unavailable,
-            {},
-            issue))
-    {
-        nskinzcs2::Logger::Info(
-            L"Runtime worker discarded stale CEconWearable factory failure after Source2Client provider generation advanced.");
-        return;
-    }
+    std::wstringstream stream;
+    stream << L"FRAME_RENDER_PASS CEconWearable formal entity factory validation failed "
+        << failure_confirmations << L"/2; no callable address was cached"
+        << L": generation=" << provider_generation
+        << L", fail_closed=" << (publish_unavailable ? 1 : 0)
+        << L", issue=" << (issue.empty() ? L"CEconWearable formal entity factory did not resolve uniquely" : issue) << L".";
+    nskinzcs2::Logger::Warn(stream.str());
+}
 
-    if (!issue.empty())
+bool TryAdvanceWearableFactoryCacheAtFrameRenderPassGuarded()
+{
+    __try
     {
-        nskinzcs2::Logger::Warn(L"Runtime worker CEconWearable resolution unresolved: " + issue);
+        AdvanceWearableFactoryCacheAtFrameRenderPass();
+        return true;
+    }
+    __except (LogStructuredThreadException(
+        L"FRAME_RENDER_PASS CEconWearable formal entity factory validation",
+        GetExceptionInformation()))
+    {
+        return false;
     }
 }
 
@@ -12907,7 +14208,11 @@ void AppendWeaponAppearanceTelemetry(std::vector<std::wstring>& diagnostics)
     }
 }
 
-bool CollectSchemaFieldsUnsafe(schema::System* system, SchemaFieldMap& fields, SchemaSizeMap& sizes)
+bool CollectSchemaFieldsUnsafe(
+    schema::System* system,
+    SchemaFieldMap& fields,
+    SchemaSizeMap& sizes,
+    ClientSchemaOffsets& offsets)
 {
     if (system == nullptr)
     {
@@ -12942,7 +14247,12 @@ bool CollectSchemaFieldsUnsafe(schema::System* system, SchemaFieldMap& fields, S
             }
 
             auto& type_fields = fields[type->name];
-            sizes[type->name] = static_cast<std::size_t>(type->static_size != 0 ? type->static_size : type->size);
+            // CSchemaClassInfo::m_nSize remains the instance size at +0x20.
+            // The 16-bit value at +0x28 is the static-metadata count, not an
+            // alternate size. Current CS2 reports 0xFF there for
+            // CEconItemAttribute; treating it as a stride corrupts the next
+            // element and disables the safe material-refresh path.
+            sizes[type->name] = static_cast<std::size_t>(type->size);
             for (std::uint16_t field_index = 0; field_index < type->field_count; ++field_index)
             {
                 const auto& field = type->fields[field_index];
@@ -12952,6 +14262,61 @@ bool CollectSchemaFieldsUnsafe(schema::System* system, SchemaFieldMap& fields, S
                 }
 
                 type_fields[field.name] = static_cast<std::ptrdiff_t>(field.offset);
+
+                if (std::strcmp(type->name, "C_BaseCombatCharacter") == 0 &&
+                    std::strcmp(field.name, "m_hMyWearables") == 0)
+                {
+                    const char* field_type_name = nullptr;
+                    void* vector_operation = nullptr;
+                    std::uint64_t element_size = 0;
+                    if (SafeReadField(field.type, 0x8, field_type_name) &&
+                        IsReadableAscii(field_type_name) &&
+                        std::strcmp(
+                            field_type_name,
+                            "C_NetworkUtlVectorBase< CHandle< C_EconWearable > >") == 0 &&
+                        SafeReadField(field.type, 0x38, vector_operation) &&
+                        SafeReadField(field.type, 0x40, element_size) &&
+                        element_size == sizeof(std::uint32_t))
+                    {
+                        const auto client_span = GetModuleSpan(GetModuleHandleW(L"client.dll"));
+                        if (client_span.has_value() &&
+                            PointerInModule(*client_span, vector_operation) &&
+                            IsExecutablePointer(vector_operation))
+                        {
+                            offsets.combat_character_my_wearables_operation =
+                                reinterpret_cast<NetworkVectorOperationFn>(vector_operation);
+                            offsets.combat_character_my_wearables_element_size =
+                                static_cast<std::size_t>(element_size);
+                        }
+                    }
+                }
+
+                if (std::strcmp(type->name, "CAttributeList") == 0 &&
+                    std::strcmp(field.name, "m_Attributes") == 0)
+                {
+                    const char* field_type_name = nullptr;
+                    void* vector_operation = nullptr;
+                    std::uint64_t element_size = 0;
+                    std::string vector_type_name;
+                    if (SafeReadField(field.type, 0x8, field_type_name) &&
+                        IsReadableAscii(field_type_name) &&
+                        SafeReadCString(field_type_name, vector_type_name, 256) &&
+                        vector_type_name.find("CEconItemAttribute") != std::string::npos &&
+                        SafeReadField(field.type, 0x38, vector_operation) &&
+                        SafeReadField(field.type, 0x40, element_size))
+                    {
+                        const auto client_span = GetModuleSpan(GetModuleHandleW(L"client.dll"));
+                        if (client_span.has_value() &&
+                            PointerInModule(*client_span, vector_operation) &&
+                            IsExecutablePointer(vector_operation))
+                        {
+                            offsets.attribute_list_attributes_operation =
+                                reinterpret_cast<NetworkVectorOperationFn>(vector_operation);
+                            offsets.attribute_list_attributes_element_size =
+                                static_cast<std::size_t>(element_size);
+                        }
+                    }
+                }
             }
         }
     }
@@ -12959,11 +14324,15 @@ bool CollectSchemaFieldsUnsafe(schema::System* system, SchemaFieldMap& fields, S
     return true;
 }
 
-bool TryCollectSchemaFields(schema::System* schema_system, SchemaFieldMap& class_fields, SchemaSizeMap& class_sizes)
+bool TryCollectSchemaFields(
+    schema::System* schema_system,
+    SchemaFieldMap& class_fields,
+    SchemaSizeMap& class_sizes,
+    ClientSchemaOffsets& offsets)
 {
     __try
     {
-        return CollectSchemaFieldsUnsafe(schema_system, class_fields, class_sizes);
+        return CollectSchemaFieldsUnsafe(schema_system, class_fields, class_sizes, offsets);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -12980,7 +14349,7 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
 
     SchemaFieldMap class_fields;
     SchemaSizeMap class_sizes;
-    if (!TryCollectSchemaFields(schema_system, class_fields, class_sizes))
+    if (!TryCollectSchemaFields(schema_system, class_fields, class_sizes, offsets))
     {
         return false;
     }
@@ -13058,6 +14427,47 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
         offsets.combat_character_my_wearables,
         {"C_BaseCombatCharacter", "C_BasePlayerPawn", "C_CSPlayerPawn"},
         "m_hMyWearables");
+    if (const auto class_it = class_fields.find("C_BaseCombatCharacter");
+        class_it != class_fields.end())
+    {
+        const auto wearables_it = class_it->second.find("m_hMyWearables");
+        const auto next_field_it = class_it->second.find("m_leftFootAttachment");
+        if (wearables_it != class_it->second.end() &&
+            next_field_it != class_it->second.end() &&
+            next_field_it->second > wearables_it->second)
+        {
+            offsets.combat_character_my_wearables_storage_size =
+                static_cast<std::size_t>(next_field_it->second - wearables_it->second);
+        }
+    }
+    if (offsets.combat_character_my_wearables_storage_size != 0x18)
+    {
+        offsets.combat_character_my_wearables_operation = nullptr;
+        offsets.combat_character_my_wearables_element_size = 0;
+    }
+    if (const auto class_it = class_fields.find("CAttributeList");
+        class_it != class_fields.end())
+    {
+        const auto attributes_it = class_it->second.find("m_Attributes");
+        const auto class_size_it = class_sizes.find("CAttributeList");
+        if (attributes_it != class_it->second.end() &&
+            class_size_it != class_sizes.end() &&
+            class_size_it->second > static_cast<std::size_t>(attributes_it->second))
+        {
+            auto storage_end = class_size_it->second;
+            for (const auto& [field_name, field_offset] : class_it->second)
+            {
+                static_cast<void>(field_name);
+                if (field_offset > attributes_it->second &&
+                    static_cast<std::size_t>(field_offset) < storage_end)
+                {
+                    storage_end = static_cast<std::size_t>(field_offset);
+                }
+            }
+            offsets.attribute_list_attributes_schema_tail_span =
+                storage_end - static_cast<std::size_t>(attributes_it->second);
+        }
+    }
     lookup_any(
         offsets.pawn_observer_services,
         {"C_BasePlayerPawn", "C_CSPlayerPawn", "C_CSObserverPawn"},
@@ -13192,6 +14602,11 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
     lookup("CModelState", "m_ModelName", offsets.model_state_model_name);
     lookup("CModelState", "m_MeshGroupMask", offsets.model_state_mesh_group_mask);
     success = success && lookup_size("CEconItemAttribute", offsets.econ_item_attribute_size);
+    if (offsets.attribute_list_attributes_element_size != offsets.econ_item_attribute_size)
+    {
+        offsets.attribute_list_attributes_operation = nullptr;
+        offsets.attribute_list_attributes_element_size = 0;
+    }
     return success;
 }
 
@@ -14277,7 +15692,15 @@ bool ShouldPromoteWeaponRefreshAttachmentToRuntimeOwned(
     const nskinzcs2::model::CosmeticProfile& profile,
     const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr) noexcept
 {
-    return (keychain_profile != nullptr && UsesTemporaryWorldWeaponRefreshModel(profile)) ||
+    static_cast<void>(keychain_profile);
+    // Current CS2 completes part of the standard-weapon material rebuild after
+    // the reference helper thread has returned.  Restoring the temporary
+    // paint/seed/wear vector immediately leaves the fallback scalar fields
+    // readable but lets the later render consumer rebuild the original skin.
+    // Standard weapons already permit runtime-owned attribute storage; retain
+    // that storage for the entity lifetime.  Knife promotion remains governed
+    // by its stricter crash guard below.
+    return UsesTemporaryWorldWeaponRefreshModel(profile) ||
         (IsKnifeProfile(profile) &&
             nskinzcs2::runtime::ShouldInstallRuntimeOwnedAttributeListForProfile(profile));
 }
@@ -14287,6 +15710,10 @@ bool ShouldRestorePromotedWeaponRefreshAttachmentOnAbandon(
     const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr) noexcept
 {
     static_cast<void>(keychain_profile);
+    // Standard weapons use the entity-owned attribute storage in place.  A
+    // demo seek can invalidate the old entity before the first observable tick
+    // discontinuity, so abandon cleanup must never write that storage.  Knife
+    // attachments retain their existing explicit restore policy.
     return IsKnifeProfile(profile);
 }
 
@@ -20732,11 +22159,37 @@ void ResetWeaponSkinRefreshAttemptWindowForRebuild()
     g_hook_state.weapon_skin_refresh_state.store(nskinzcs2::runtime::WeaponSkinRefreshState::Disabled);
 }
 
+void RestoreRuntimeWearableHandleBuffers(const wchar_t* reason) noexcept;
+
+bool TryInvokeNetworkVectorOperation(
+    const NetworkVectorOperationFn operation,
+    const std::uint32_t operation_code,
+    void* vector,
+    const std::int32_t index,
+    const std::int32_t count) noexcept
+{
+    if (operation == nullptr || vector == nullptr)
+    {
+        return false;
+    }
+
+    __try
+    {
+        operation(operation_code, vector, index, count);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 void RestoreAppliedCosmeticStateForOriginalFrameStage(
     const AttributeBindingReleaseMode mode = AttributeBindingReleaseMode::RestoreOriginal,
     const wchar_t* reason = nullptr)
 {
     g_hook_state.last_applied_demo_tick = -1;
+    RestoreRuntimeWearableHandleBuffers(reason != nullptr ? reason : L"frame_stage_restore");
     ResetDemoKeychainControllerState();
     ReleaseRuntimeCreatedKeychainModuleEntities(
         g_hook_state.schema_offsets,
@@ -20760,9 +22213,107 @@ void RestoreAppliedCosmeticStateForOriginalFrameStage(
     g_hook_state.next_runtime_poll_millis.store(0);
 }
 
+void RestoreRuntimeWearableHandleBuffers(const wchar_t* reason) noexcept
+{
+    auto& buffers = g_hook_state.runtime_entities.runtime_wearable_handle_buffers;
+    for (auto& [xuid, binding] : buffers)
+    {
+        if (binding.appended_with_engine_operation &&
+            binding.vector_address != nullptr &&
+            binding.vector_operation != nullptr)
+        {
+            NetworkVectorView current {};
+            std::uint32_t current_handle = kInvalidEntityHandle;
+            if (TryReadNetworkVectorView(binding.vector_address, current) &&
+                binding.appended_index < current.size &&
+                current.data != nullptr &&
+                SafeReadValue(
+                    current.data + binding.appended_index * sizeof(std::uint32_t),
+                    current_handle) &&
+                current_handle == binding.installed_handle)
+            {
+                const auto removed = TryInvokeNetworkVectorOperation(
+                    binding.vector_operation,
+                    5,
+                    binding.vector_address,
+                    static_cast<std::int32_t>(binding.appended_index),
+                    1);
+
+                if (removed)
+                {
+                    std::wstringstream stream;
+                    stream << L"Removed engine-appended m_hMyWearables slot for XUID " << xuid
+                        << L": reason=" << (reason != nullptr ? reason : L"reset")
+                        << L", installed_handle=0x" << std::hex << std::uppercase
+                        << binding.installed_handle << std::dec << std::nouppercase << L".";
+                    nskinzcs2::Logger::Info(stream.str());
+                }
+            }
+            continue;
+        }
+
+        if (binding.in_place_slot != nullptr)
+        {
+            std::uint32_t current_handle = kInvalidEntityHandle;
+            if (SafeReadValue(binding.in_place_slot, current_handle) &&
+                current_handle == binding.installed_handle &&
+                SafeWriteValue(binding.in_place_slot, binding.original_handle))
+            {
+                std::wstringstream stream;
+                stream << L"Restored in-place m_hMyWearables slot for XUID " << xuid
+                    << L": reason=" << (reason != nullptr ? reason : L"reset")
+                    << L", slot=" << FormatPointer(binding.in_place_slot)
+                    << L", installed_handle=0x" << std::hex << std::uppercase << binding.installed_handle
+                    << L", original_handle=0x" << binding.original_handle
+                    << std::dec << std::nouppercase << L".";
+                nskinzcs2::Logger::Info(stream.str());
+            }
+            continue;
+        }
+
+        if (binding.vector_address == nullptr || binding.installed_data == nullptr)
+        {
+            continue;
+        }
+
+        NetworkVectorView current {};
+        if (!TryReadNetworkVectorView(binding.vector_address, current) ||
+            current.data != binding.installed_data)
+        {
+            continue;
+        }
+
+        NetworkVectorView original {};
+        original.data = binding.original_data;
+        original.size = binding.original_size;
+        if (SafeWriteValue(binding.vector_address, original))
+        {
+            // Publishing this buffer transfers ownership to Source 2. During
+            // a full update the engine can retain the old vector storage in a
+            // pending network/destructor path even after we restore the field
+            // header before FrameStageNotify. Freeing here races that pending
+            // path and causes tier0 to touch an already-freed block. Detach the
+            // header only; CS2 remains the sole final releaser. If a particular
+            // reset path does not release it, the bounded cost is 64 bytes per
+            // runtime-created glove binding.
+            std::wstringstream stream;
+            stream << L"Restored runtime-owned m_hMyWearables storage for XUID " << xuid
+                << L": reason=" << (reason != nullptr ? reason : L"reset")
+                << L", installed_data=" << FormatPointer(binding.installed_data)
+                << L", original_data=" << FormatPointer(binding.original_data)
+                << L", original_size=" << binding.original_size
+                << L", tier0_release=deferred_to_cs2.";
+            nskinzcs2::Logger::Info(stream.str());
+        }
+    }
+
+    buffers.clear();
+}
+
 void PrepareAppliedCosmeticStateForDemoSeekBeforeOriginalFrameStage(const wchar_t* reason = nullptr)
 {
     g_hook_state.last_applied_demo_tick = -1;
+    RestoreRuntimeWearableHandleBuffers(reason != nullptr ? reason : L"demo_seek_prepare");
     ResetDemoKeychainControllerState();
     ReleaseRuntimeCreatedKeychainModuleEntities(
         g_hook_state.schema_offsets,
@@ -20796,9 +22347,9 @@ void ClearRuntimeEntityManager(
     const AttributeBindingReleaseMode knife_model_path_release_mode = AttributeBindingReleaseMode::RestoreOriginal)
 {
     ResetDemoKeychainControllerState();
+    RestoreRuntimeWearableHandleBuffers(reason.empty() ? L"reset" : reason.c_str());
     g_hook_state.runtime_entities.players_by_xuid.clear();
     g_hook_state.runtime_entities.logged_profile_diagnostics.clear();
-    g_hook_state.runtime_entities.runtime_wearable_handle_buffers.clear();
     g_hook_state.runtime_entities.last_rebuild_reason = reason;
     g_hook_state.last_rebuild_reason = reason;
     g_hook_state.stable_wearable_bound.store(false);
@@ -20829,7 +22380,8 @@ void ClearRuntimeEntityManager(
 
 void ResetRuntimeState(
     const std::wstring& reason,
-    const AttributeBindingReleaseMode attribute_binding_release_mode = AttributeBindingReleaseMode::RestoreOriginal)
+    const AttributeBindingReleaseMode attribute_binding_release_mode = AttributeBindingReleaseMode::RestoreOriginal,
+    const bool invalidate_wearable_factory = false)
 {
     const auto knife_model_path_release_mode =
         ResolveKnifeModelPathReleaseModeForReset(reason, attribute_binding_release_mode);
@@ -20839,7 +22391,26 @@ void ResetRuntimeState(
     ClearKnifeRefreshHelperEpoch();
     ResetWeaponSkinRefreshAttemptWindowForRebuild();
     ClearRuntimeEntityManager(reason, knife_model_path_release_mode);
-    ClearCachedWearableFactoryResolution(false);
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.runtime_glove_provenance_mutex);
+        g_hook_state.runtime_glove_provenance_by_handle.clear();
+        g_hook_state.runtime_glove_create_generation_by_xuid.clear();
+    }
+    g_hook_state.attempted_wearable_definition_refresh_signatures.clear();
+    g_hook_state.attempted_wearable_set_model_signatures.clear();
+    g_hook_state.rejected_wearable_model_bind_signatures.clear();
+    if (invalidate_wearable_factory)
+    {
+        InvalidateCachedWearableFactoryResolutionForProviderChange();
+    }
+    else
+    {
+        // Manual/config/watched-player rebuilds do not change the validated
+        // Source2Client/CGameEntitySystem tuple. Preserve an available binding
+        // so Update cannot land in the one-frame Unknown window. Failed or
+        // pending resolutions are cleared and may recover normally.
+        ClearCachedWearableFactoryResolution(true);
+    }
     g_hook_state.runtime_entities.client_entity_factory = RuntimeFeatureAvailability::Unknown;
     g_hook_state.runtime_entities.wearable_client_factory = {};
     g_hook_state.client_entity_factory_requested.store(false);
@@ -23419,8 +24990,27 @@ void RestoreRuntimeOwnedAttributeListBinding(
         RuntimeOwnedAttributeBindingRestoresOriginalOnRelease(binding, mode)
         ? AttributeBindingReleaseMode::RestoreOriginal
         : AttributeBindingReleaseMode::AbandonInstalled;
-    bool release_allocation = false;
+    const auto allocation_was_published =
+        binding.installed.data != nullptr &&
+        binding.allocated_block == binding.installed.data;
     if (effective_mode == AttributeBindingReleaseMode::RestoreOriginal &&
+        binding.in_place_address != nullptr &&
+        !binding.in_place_original_bytes.empty() &&
+        binding.in_place_original_bytes.size() == binding.in_place_installed_bytes.size())
+    {
+        std::vector<std::uint8_t> current(binding.in_place_installed_bytes.size());
+        if (SafeReadBytes(binding.in_place_address, current.data(), current.size()) &&
+            current == binding.in_place_installed_bytes)
+        {
+            SafeWriteBytes(
+                binding.in_place_address,
+                binding.in_place_original_bytes.data(),
+                binding.in_place_original_bytes.size());
+        }
+    }
+
+    if (effective_mode == AttributeBindingReleaseMode::RestoreOriginal &&
+        binding.in_place_address == nullptr &&
         binding.vector_address != nullptr)
     {
         NetworkVectorView current {};
@@ -23428,7 +25018,10 @@ void RestoreRuntimeOwnedAttributeListBinding(
             NetworkVectorViewsEqual(current, binding.installed) &&
             SafeWriteValue(binding.vector_address, binding.original))
         {
-            release_allocation = true;
+            // Do not free a buffer once it has been published to CS2. Render
+            // and material workers can retain a transient copy of the old
+            // vector pointer after the entity field has been restored. The
+            // allocations are intentionally process-lifetime safety leases.
         }
     }
 
@@ -23443,7 +25036,7 @@ void RestoreRuntimeOwnedAttributeListBinding(
             binding.restore_custom_material_original);
     }
 
-    if (binding.allocated_block != nullptr && release_allocation)
+    if (binding.allocated_block != nullptr && !allocation_was_published)
     {
         VirtualFree(binding.allocated_block, 0, MEM_RELEASE);
     }
@@ -23844,7 +25437,8 @@ bool TryInstallRuntimeOwnedAttributeList(
     void* item_view,
     const std::ptrdiff_t item_list_offset,
     const ClientSchemaOffsets& offsets,
-    const std::vector<std::pair<std::uint16_t, float>>& desired_attributes)
+    const std::vector<std::pair<std::uint16_t, float>>& desired_attributes,
+    const bool allow_external_vector_allocation = false)
 {
     if (item_view == nullptr ||
         item_list_offset == 0 ||
@@ -23916,6 +25510,7 @@ bool TryInstallRuntimeOwnedAttributeList(
     binding.vector_address = vector_address;
 
     RuntimeOwnedAttributeListBinding existing_binding {};
+    std::vector<std::uint8_t> existing_in_place_original_bytes;
     bool had_existing_binding = false;
     {
         std::lock_guard<std::mutex> lock(g_hook_state.runtime_owned_attribute_mutex);
@@ -23932,12 +25527,108 @@ bool TryInstallRuntimeOwnedAttributeList(
     if (had_existing_binding)
     {
         binding.original = existing_binding.original;
+        existing_in_place_original_bytes = existing_binding.in_place_original_bytes;
         RestoreRuntimeOwnedAttributeListBinding(std::move(existing_binding));
     }
     else if (!SafeReadValue(vector_address, binding.original))
     {
         return false;
     }
+
+    // Prefer the game's existing vector allocation whenever it has enough
+    // slots.  This is mandatory for glove finishes: a demo seek may destroy a
+    // pawn before the next observable tick, and a CUtlVector must never own a
+    // VirtualAlloc block that CS2 could later release through its allocator.
+    if (binding.original.data != nullptr &&
+        binding.original.size >= desired_attributes.size())
+    {
+        const auto byte_count = static_cast<std::size_t>(binding.original.size) * attribute_stride;
+        std::vector<std::uint8_t> current_bytes(byte_count);
+        if (SafeReadBytes(binding.original.data, current_bytes.data(), current_bytes.size()))
+        {
+            binding.in_place_address = binding.original.data;
+            binding.in_place_original_bytes =
+                !existing_in_place_original_bytes.empty() &&
+                    existing_in_place_original_bytes.size() == byte_count
+                ? std::move(existing_in_place_original_bytes)
+                : current_bytes;
+            binding.in_place_installed_bytes = std::move(current_bytes);
+
+            std::vector<bool> used_slots(static_cast<std::size_t>(binding.original.size), false);
+            auto overlay_succeeded = true;
+            for (const auto& [definition_index, value] : desired_attributes)
+            {
+                std::size_t selected_slot = static_cast<std::size_t>(binding.original.size);
+                for (std::size_t slot = 0; slot < static_cast<std::size_t>(binding.original.size); ++slot)
+                {
+                    if (used_slots[slot])
+                    {
+                        continue;
+                    }
+
+                    std::uint16_t existing_definition_index = 0;
+                    if (SafeReadField(
+                            binding.in_place_installed_bytes.data() + slot * attribute_stride,
+                            offsets.econ_item_attribute_definition_index,
+                            existing_definition_index) &&
+                        existing_definition_index == definition_index)
+                    {
+                        selected_slot = slot;
+                        break;
+                    }
+                }
+
+                if (selected_slot == static_cast<std::size_t>(binding.original.size))
+                {
+                    const auto free_slot = std::find(used_slots.begin(), used_slots.end(), false);
+                    if (free_slot == used_slots.end())
+                    {
+                        overlay_succeeded = false;
+                        break;
+                    }
+                    selected_slot = static_cast<std::size_t>(std::distance(used_slots.begin(), free_slot));
+                }
+
+                auto* record = binding.in_place_installed_bytes.data() + selected_slot * attribute_stride;
+                overlay_succeeded =
+                    SafeWriteField(record, offsets.econ_item_attribute_definition_index, definition_index) &&
+                    SafeWriteField(record, offsets.econ_item_attribute_value, value) &&
+                    (offsets.econ_item_attribute_initial_value == 0 ||
+                        SafeWriteField(record, offsets.econ_item_attribute_initial_value, value));
+                if (!overlay_succeeded)
+                {
+                    break;
+                }
+                used_slots[selected_slot] = true;
+            }
+
+            if (overlay_succeeded &&
+                SafeWriteBytes(
+                    binding.in_place_address,
+                    binding.in_place_installed_bytes.data(),
+                    binding.in_place_installed_bytes.size()))
+            {
+                binding.installed = binding.original;
+                std::lock_guard<std::mutex> lock(g_hook_state.runtime_owned_attribute_mutex);
+                g_hook_state.runtime_owned_attribute_release_frames.erase(item_view);
+                g_hook_state.runtime_owned_attribute_bindings[item_view] = std::move(binding);
+                return VerifyAttributeValuesInList(item_view, item_list_offset, offsets, desired_attributes);
+            }
+        }
+    }
+
+    // Build 2000885 stores allocator capacity/flags after the readable
+    // 16-byte vector prefix. Replacing only that prefix leaves the 24-byte
+    // container inconsistent and later crashes in tier0 destruction. External
+    // buffers remain disabled until the matching Schema operation is resolved.
+    if (!allow_external_vector_allocation)
+    {
+        return false;
+    }
+
+    binding.in_place_address = nullptr;
+    binding.in_place_original_bytes.clear();
+    binding.in_place_installed_bytes.clear();
 
     const auto allocation_size = records.size() * attribute_stride;
     binding.allocated_block = VirtualAlloc(nullptr, allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -23982,10 +25673,15 @@ bool PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(
     TemporaryAttributeListAttachment& attachment,
     const bool restore_on_abandon = true)
 {
+    const auto in_place_attachment =
+        attachment.in_place_address != nullptr &&
+        !attachment.in_place_original_bytes.empty() &&
+        attachment.in_place_original_bytes.size() == attachment.in_place_installed_bytes.size();
     if (attachment.item_view == nullptr ||
         attachment.vector_address == nullptr ||
-        attachment.allocated_block == nullptr ||
-        attachment.allocated_size < sizeof(RefreshEconItemAttribute))
+        (!in_place_attachment &&
+            (attachment.allocated_block == nullptr ||
+                attachment.allocated_size < sizeof(RefreshEconItemAttribute))))
     {
         return false;
     }
@@ -23997,11 +25693,16 @@ bool PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(
         attachment.original.size,
         reinterpret_cast<std::uint8_t*>(attachment.original.ptr),
     };
-    binding.installed = {
-        static_cast<std::uint64_t>(attachment.allocated_size / sizeof(RefreshEconItemAttribute)),
-        reinterpret_cast<std::uint8_t*>(attachment.allocated_block),
-    };
+    binding.installed = in_place_attachment
+        ? binding.original
+        : NetworkVectorView {
+              static_cast<std::uint64_t>(attachment.allocated_size / sizeof(RefreshEconItemAttribute)),
+              reinterpret_cast<std::uint8_t*>(attachment.allocated_block),
+          };
     binding.allocated_block = attachment.allocated_block;
+    binding.in_place_address = attachment.in_place_address;
+    binding.in_place_original_bytes = attachment.in_place_original_bytes;
+    binding.in_place_installed_bytes = attachment.in_place_installed_bytes;
     binding.restore_custom_material_original = attachment.restore_custom_material_original;
     binding.restore_custom_material_written = attachment.restore_custom_material_written;
     binding.restore_on_abandon = restore_on_abandon;
@@ -24023,15 +25724,17 @@ bool PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(
     if (had_existing_binding)
     {
         binding.original = existing_binding.original;
+        if (in_place_attachment && !existing_binding.in_place_original_bytes.empty())
+        {
+            binding.in_place_original_bytes = std::move(existing_binding.in_place_original_bytes);
+        }
         binding.restore_custom_material_original = existing_binding.restore_custom_material_original;
         binding.restore_custom_material_written = existing_binding.restore_custom_material_written;
         binding.restore_on_abandon = existing_binding.restore_on_abandon || binding.restore_on_abandon;
 
-        if (existing_binding.allocated_block != nullptr &&
-            existing_binding.allocated_block != binding.allocated_block)
-        {
-            VirtualFree(existing_binding.allocated_block, 0, MEM_RELEASE);
-        }
+        // The previous block was visible to CS2 render/material workers. Do
+        // not free it here: swapping the entity vector does not prove those
+        // workers have dropped every transient copy of the old pointer.
     }
 
     {
@@ -24076,8 +25779,13 @@ bool TryReadNetworkVectorView(const void* address, NetworkVectorView& out)
 
 bool IsPlausibleEntityHandle(const std::uint32_t handle)
 {
+    if (handle == 0 || handle == kInvalidEntityHandle)
+    {
+        return false;
+    }
+
     const auto entity_index = HandleToEntityIndex(handle);
-    return entity_index >= 0 && entity_index <= kMaxEntityIndex;
+    return entity_index > 0 && entity_index <= kMaxEntityIndex;
 }
 
 std::uint16_t ExtractEntityHandleSerial(const std::uint32_t handle)
@@ -24195,135 +25903,212 @@ bool TryAssignPawnWearableHandle(
     const ClientSchemaOffsets& offsets,
     const std::uint32_t handle)
 {
+    auto log_failure = [&](const wchar_t* reason, const NetworkVectorView* vector_view = nullptr,
+                           const std::vector<std::uint32_t>* handles = nullptr)
+    {
+        std::wstringstream stream;
+        stream << L"m_hMyWearables in-place bind rejected for XUID " << player_binding.xuid
+            << L": reason=" << (reason != nullptr ? reason : L"unknown")
+            << L", pawn=" << FormatPointer(player_binding.pawn_entity)
+            << L", offset=0x" << std::hex << std::uppercase
+            << static_cast<std::uint64_t>(offsets.combat_character_my_wearables)
+            << L", requested_handle=0x" << handle;
+        if (vector_view != nullptr)
+        {
+            stream << L", vector_size=0x" << vector_view->size
+                << L", vector_data=" << FormatPointer(vector_view->data);
+        }
+        if (handles != nullptr)
+        {
+            stream << L", handles=[";
+            for (std::size_t index = 0; index < handles->size(); ++index)
+            {
+                if (index != 0)
+                {
+                    stream << L",";
+                }
+                stream << L"0x" << (*handles)[index];
+            }
+            stream << L"]";
+        }
+        stream << std::dec << std::nouppercase << L".";
+        nskinzcs2::Logger::Warn(stream.str());
+    };
+
     if (player_binding.pawn_entity == nullptr ||
         player_binding.xuid == 0 ||
         offsets.combat_character_my_wearables == 0 ||
         !IsPlausibleEntityHandle(handle))
     {
+        log_failure(L"invalid_input");
         return false;
     }
 
     auto* address =
         reinterpret_cast<std::uint8_t*>(player_binding.pawn_entity) + offsets.combat_character_my_wearables;
     NetworkVectorView vector_view {};
-    if (TryReadNetworkVectorView(address, vector_view))
+    if (!TryReadNetworkVectorView(address, vector_view))
     {
-        if (vector_view.data == nullptr)
-        {
-            if (vector_view.size != 0)
-            {
-                return false;
-            }
-
-            auto& runtime_buffer = runtime_entities.runtime_wearable_handle_buffers[player_binding.xuid];
-            if (runtime_buffer.size() != 16)
-            {
-                runtime_buffer.assign(16, kInvalidEntityHandle);
-            }
-
-            std::size_t write_index = runtime_buffer.size();
-            for (std::size_t index = 0; index < runtime_buffer.size(); ++index)
-            {
-                if (runtime_buffer[index] == handle)
-                {
-                    write_index = index;
-                    break;
-                }
-
-                if (!IsPlausibleEntityHandle(runtime_buffer[index]))
-                {
-                    write_index = index;
-                    break;
-                }
-            }
-
-            if (write_index >= runtime_buffer.size())
-            {
-                return false;
-            }
-
-            runtime_buffer[write_index] = handle;
-            vector_view.size =
-                std::max<std::uint64_t>(vector_view.size, static_cast<std::uint64_t>(write_index + 1));
-            vector_view.data = reinterpret_cast<std::uint8_t*>(runtime_buffer.data());
-            return SafeWriteValue(address, vector_view);
-        }
-
-        constexpr int handle_capacity = 16;
-        int write_index = -1;
-        const auto current_count = std::min<std::size_t>(static_cast<std::size_t>(vector_view.size), handle_capacity);
-        for (std::size_t index = 0; index < current_count; ++index)
-        {
-            std::uint32_t current_handle = kInvalidEntityHandle;
-            if (!SafeReadValue(
-                    vector_view.data + index * sizeof(std::uint32_t),
-                    current_handle))
-            {
-                return false;
-            }
-
-            if (current_handle == handle)
-            {
-                return true;
-            }
-
-            if (write_index < 0 && !IsPlausibleEntityHandle(current_handle))
-            {
-                write_index = static_cast<int>(index);
-            }
-        }
-
-        if (write_index < 0 && current_count < static_cast<std::size_t>(handle_capacity))
-        {
-            write_index = static_cast<int>(current_count);
-        }
-
-        if (write_index < 0)
-        {
-            return false;
-        }
-
-        auto* slot = vector_view.data + static_cast<std::size_t>(write_index) * sizeof(std::uint32_t);
-        if (!SafeWriteValue(slot, handle))
-        {
-            return false;
-        }
-
-        if (vector_view.size <= static_cast<std::uint64_t>(write_index))
-        {
-            const auto new_size = static_cast<std::uint64_t>(write_index + 1);
-            return SafeWriteField(address, offsetof(NetworkVectorView, size), new_size);
-        }
-
-        return true;
+        log_failure(L"unreadable_vector_header", &vector_view);
+        return false;
     }
-
-    int write_index = -1;
-    for (int index = 0; index < 16; ++index)
+    if (vector_view.size != 0 && vector_view.data == nullptr)
     {
-        std::uint32_t current_handle = kInvalidEntityHandle;
-        if (!SafeReadValue(address + static_cast<std::size_t>(index) * sizeof(std::uint32_t), current_handle))
-        {
-            return false;
-        }
-
-        if (current_handle == handle)
-        {
-            return true;
-        }
-
-        if (write_index < 0 && !IsPlausibleEntityHandle(current_handle))
-        {
-            write_index = index;
-        }
-    }
-
-    if (write_index < 0)
-    {
+        log_failure(L"non_empty_vector_has_null_storage", &vector_view);
         return false;
     }
 
-    return SafeWriteValue(address + static_cast<std::size_t>(write_index) * sizeof(std::uint32_t), handle);
+    if (vector_view.size == 0)
+    {
+        // CUtlVector retains its allocation after RemoveMultiple, so
+        // data!=nullptr with size==0 is a valid empty vector. The verified
+        // Schema operation can append into either retained or null storage.
+        if (offsets.combat_character_my_wearables_operation == nullptr ||
+            offsets.combat_character_my_wearables_element_size != sizeof(std::uint32_t) ||
+            offsets.combat_character_my_wearables_storage_size != 0x18)
+        {
+            log_failure(L"empty_vector_requires_verified_engine_append", &vector_view);
+            return false;
+        }
+    }
+
+    constexpr std::size_t handle_limit = 16;
+    const auto current_count = std::min<std::size_t>(
+        static_cast<std::size_t>(vector_view.size),
+        handle_limit);
+    std::vector<std::uint32_t> current_handles(current_count, kInvalidEntityHandle);
+    for (std::size_t index = 0; index < current_count; ++index)
+    {
+        if (!SafeReadValue(
+                vector_view.data + index * sizeof(std::uint32_t),
+                current_handles[index]))
+        {
+            log_failure(L"unreadable_handle_slot", &vector_view, &current_handles);
+            return false;
+        }
+    }
+
+    const auto write_index = nskinzcs2::runtime::SelectReusableWearableHandleSlot(
+        current_handles.data(),
+        current_handles.size(),
+        handle);
+    if (write_index < 0)
+    {
+        if (current_count >= handle_limit ||
+            offsets.combat_character_my_wearables_operation == nullptr ||
+            offsets.combat_character_my_wearables_element_size != sizeof(std::uint32_t) ||
+            offsets.combat_character_my_wearables_storage_size != 0x18)
+        {
+            log_failure(L"no_existing_reusable_slot", &vector_view, &current_handles);
+            return false;
+        }
+
+        const auto append_succeeded = TryInvokeNetworkVectorOperation(
+            offsets.combat_character_my_wearables_operation,
+            4,
+            address,
+            static_cast<std::int32_t>(current_count),
+            1);
+
+        NetworkVectorView appended_view {};
+        if (!append_succeeded ||
+            !TryReadNetworkVectorView(address, appended_view) ||
+            appended_view.size != current_count + 1 ||
+            appended_view.data == nullptr)
+        {
+            log_failure(L"verified_engine_append_failed", &appended_view, &current_handles);
+            return false;
+        }
+
+        auto* appended_slot = appended_view.data + current_count * sizeof(std::uint32_t);
+        if (!SafeWriteValue(appended_slot, handle))
+        {
+            TryInvokeNetworkVectorOperation(
+                offsets.combat_character_my_wearables_operation,
+                5,
+                address,
+                static_cast<std::int32_t>(current_count),
+                1);
+            log_failure(L"engine_appended_slot_write_failed", &appended_view, &current_handles);
+            return false;
+        }
+
+        std::uint32_t appended_readback = kInvalidEntityHandle;
+        if (!SafeReadValue(appended_slot, appended_readback) || appended_readback != handle)
+        {
+            TryInvokeNetworkVectorOperation(
+                offsets.combat_character_my_wearables_operation,
+                5,
+                address,
+                static_cast<std::int32_t>(current_count),
+                1);
+            log_failure(L"engine_appended_slot_readback_mismatch", &appended_view, &current_handles);
+            return false;
+        }
+
+        auto& runtime_binding = runtime_entities.runtime_wearable_handle_buffers[player_binding.xuid];
+        runtime_binding = {};
+        runtime_binding.pawn_entity = player_binding.pawn_entity;
+        runtime_binding.vector_address = address;
+        runtime_binding.installed_handle = handle;
+        runtime_binding.appended_with_engine_operation = true;
+        runtime_binding.appended_index = current_count;
+        runtime_binding.vector_operation = offsets.combat_character_my_wearables_operation;
+
+        std::wstringstream stream;
+        stream << L"Installed runtime glove handle through Schema vector operation for XUID "
+            << player_binding.xuid
+            << L": previous_count=" << current_count
+            << L", new_count=" << appended_view.size
+            << L", slot=" << FormatPointer(appended_slot)
+            << L", installed_handle=0x" << std::hex << std::uppercase << handle
+            << std::dec << std::nouppercase
+            << L", storage_size=0x18, element_size=4.";
+        nskinzcs2::Logger::Info(stream.str());
+        return true;
+    }
+
+    const auto original_handle = current_handles[static_cast<std::size_t>(write_index)];
+    if (original_handle == handle)
+    {
+        return true;
+    }
+
+    auto* slot = vector_view.data + static_cast<std::size_t>(write_index) * sizeof(std::uint32_t);
+    if (!SafeWriteValue(slot, handle))
+    {
+        log_failure(L"slot_write_failed", &vector_view, &current_handles);
+        return false;
+    }
+
+    std::uint32_t installed_readback = kInvalidEntityHandle;
+    if (!SafeReadValue(slot, installed_readback) || installed_readback != handle)
+    {
+        SafeWriteValue(slot, original_handle);
+        log_failure(L"slot_readback_mismatch", &vector_view, &current_handles);
+        return false;
+    }
+
+    auto& runtime_binding = runtime_entities.runtime_wearable_handle_buffers[player_binding.xuid];
+    runtime_binding = {};
+    runtime_binding.pawn_entity = player_binding.pawn_entity;
+    runtime_binding.vector_address = address;
+    runtime_binding.in_place_slot = slot;
+    runtime_binding.original_handle = original_handle;
+    runtime_binding.installed_handle = handle;
+
+    std::wstringstream stream;
+    stream << L"Installed runtime glove handle into existing m_hMyWearables slot for XUID "
+        << player_binding.xuid
+        << L": vector_count=" << current_count
+        << L", slot_index=" << write_index
+        << L", slot=" << FormatPointer(slot)
+        << L", original_handle=0x" << std::hex << std::uppercase << original_handle
+        << L", installed_handle=0x" << handle
+        << std::dec << std::nouppercase
+        << L", vector_size_unchanged=1.";
+    nskinzcs2::Logger::Info(stream.str());
+    return true;
 }
 
 bool TryResolveRuntimeCreatedGloveEntity(
@@ -24441,11 +26226,72 @@ bool TryInvokeClientClassCreateFunction(
     }
 }
 
+bool TryInvokeFormalClientEntityCreateByName(
+    void* create_function,
+    void* entity_system,
+    const char* class_name,
+    const int entity_index,
+    const std::uint16_t entity_serial,
+    void*& entity,
+    DWORD& exception_code,
+    void*& exception_address) noexcept
+{
+    entity = nullptr;
+    exception_code = 0;
+    exception_address = nullptr;
+
+    if (create_function == nullptr || entity_system == nullptr || class_name == nullptr)
+    {
+        return false;
+    }
+
+    // Recovered from the current client wrapper and its formal-create callers.
+    // The fifth and sixth arguments are forwarded as the requested entity
+    // index and serial. The restored wearable path supplies a verified free
+    // slot and final false; for the current wearable descriptor (allocation
+    // flag bit 6 clear), that selects CGameEntitySystem's live identity pool
+    // and publishes the slot directly.
+    using CreateEntityByNameFn = void* (__fastcall*)(
+        void*,
+        int,
+        const char*,
+        int,
+        int,
+        int,
+        bool);
+    __try
+    {
+        entity = reinterpret_cast<CreateEntityByNameFn>(create_function)(
+            entity_system,
+            -1,
+            class_name,
+            0,
+            entity_index,
+            static_cast<int>(entity_serial),
+            false);
+        return entity != nullptr;
+    }
+    __except (CaptureCreateFunctionException(GetExceptionInformation(), exception_code, exception_address))
+    {
+        if (exception_code == 0)
+        {
+            exception_code = 0xFFFFFFFFu;
+        }
+        if (exception_address == nullptr)
+        {
+            exception_address = create_function;
+        }
+        entity = nullptr;
+        return false;
+    }
+}
+
 bool TryCreateRuntimeGloveEntity(
     void* entity_list,
     const int highest_live_entity_index,
-    const RuntimePlayerBinding& player_binding,
+    RuntimePlayerBinding& player_binding,
     const WearableClientClassFactoryBinding& factory,
+    const ClientSchemaOffsets& offsets,
     int& glove_entity_index,
     std::uint32_t& glove_handle,
     void*& glove_entity,
@@ -24456,54 +26302,475 @@ bool TryCreateRuntimeGloveEntity(
     glove_entity = nullptr;
     issue.clear();
 
-    if (factory.create_fn == nullptr)
+    if (factory.resolution_method != L"CGameEntitySystem::CreateEntityByName")
     {
-        issue = L"CEconWearable create function is unavailable.";
+        if (g_hook_state.wearable_factory_post_create_poisoned.load(std::memory_order_acquire))
+        {
+            issue =
+                L"CEconWearable client-class creation is disabled for this process after an earlier post-create validation failure.";
+            return false;
+        }
+
+        std::string factory_network_name;
+        const auto is_frame_render_pass_data_first =
+            factory.resolution_method.rfind(L"FRAME_RENDER_PASS(data_first", 0) == 0;
+        const auto is_descriptor_table =
+            factory.resolution_method == L"FRAME_RENDER_PASS(descriptor_table)";
+        const auto is_get_all_classes =
+            factory.resolution_method.rfind(L"GetAllClasses", 0) == 0;
+        if (factory.client_class == nullptr ||
+            factory.class_provider == nullptr ||
+            (!is_frame_render_pass_data_first && !is_descriptor_table && factory.class_chain_head == nullptr) ||
+            (!is_descriptor_table && factory.next_client_class == nullptr) ||
+            (is_descriptor_table &&
+                (factory.descriptor_guard == nullptr ||
+                    (factory.primary_class_identity & 0x80000000u) == 0 ||
+                    (factory.adjacent_class_identity & 0x80000000u) == 0 ||
+                    (factory.adjacent_class_identity & 0x7FFFFFFFu) + 1u !=
+                        (factory.primary_class_identity & 0x7FFFFFFFu))) ||
+            factory.create_fn == nullptr ||
+            factory.raw_create_fn == nullptr ||
+            factory.network_name == nullptr ||
+            !TryReadClientClassName(factory.network_name, factory_network_name) ||
+            factory_network_name != kWearableClientClassName ||
+            (!is_frame_render_pass_data_first && !is_descriptor_table && !is_get_all_classes))
+        {
+            issue = L"The validated CEconWearable client-class binding is incomplete or has the wrong class identity.";
+            return false;
+        }
+
+        const auto providers = SnapshotSource2ClientProviders();
+        WearableClientClassFactoryBinding validated_factory {};
+        std::wstring validation_issue;
+        bool revalidated = false;
+        if (providers.callback_instance != nullptr || providers.interface_instance != nullptr)
+        {
+            if (is_frame_render_pass_data_first || is_descriptor_table)
+            {
+                void* const provider_anchor = providers.callback_instance != nullptr
+                    ? providers.callback_instance
+                    : providers.interface_instance;
+                revalidated = TryRevalidateWearableClientClassFactoryAtFrameRenderPass(
+                    GetModuleHandleW(L"client.dll"),
+                    provider_anchor,
+                    factory,
+                    validated_factory,
+                    validation_issue);
+            }
+            else
+            {
+                revalidated = TryResolveWearableClientClassFactoryWithSchemaEvidenceAtFrameRenderPass(
+                    providers.interface_instance,
+                    providers.callback_instance,
+                    GetModuleHandleW(L"client.dll"),
+                    validated_factory,
+                    validation_issue);
+            }
+        }
+        else
+        {
+            validation_issue = L"Source2Client provider generation anchor is unavailable.";
+        }
+
+        if (!revalidated ||
+            !WearableClientClassBindingsMatch(factory, validated_factory))
+        {
+            issue = L"The CEconWearable provider-generation/descriptor/create tuple changed or failed immediate revalidation";
+            if (!validation_issue.empty())
+            {
+                issue += L": " + validation_issue;
+            }
+            return false;
+        }
+
+        if (!TryFindAvailableRuntimeEntityIndex(
+                entity_list,
+                highest_live_entity_index + 1,
+                glove_entity_index,
+                issue))
+        {
+            return false;
+        }
+
+        const auto next_serial = static_cast<std::uint16_t>(
+            std::max<std::uint32_t>(
+                1u,
+                static_cast<std::uint32_t>(ExtractEntityHandleSerial(player_binding.runtime_glove_handle)) + 1u));
+        DWORD create_exception_code = 0;
+        void* create_exception_address = nullptr;
+        if (!TryInvokeClientClassCreateFunction(
+                factory.create_fn,
+                glove_entity_index,
+                next_serial,
+                create_exception_code,
+                create_exception_address))
+        {
+            std::wstringstream stream;
+            stream << L"CEconWearable client-class create function raised exception 0x"
+                << std::hex << std::uppercase << create_exception_code
+                << std::dec << std::nouppercase
+                << L" at " << FormatPointer(create_exception_address)
+                << L" (provider_anchor=" << FormatPointer(factory.class_provider)
+                << L", node=" << FormatPointer(factory.client_class);
+            if (is_descriptor_table)
+            {
+                stream << L", descriptor_guard=" << FormatPointer(factory.descriptor_guard)
+                    << L", class_ids=0x" << std::hex << std::uppercase
+                    << factory.primary_class_identity << L"/0x"
+                    << factory.adjacent_class_identity << std::dec << std::nouppercase;
+            }
+            else
+            {
+                stream << L", next=" << FormatPointer(factory.next_client_class);
+            }
+            stream
+                << L", create=" << FormatPointer(factory.create_fn)
+                << L", raw=" << FormatPointer(factory.raw_create_fn)
+                << L", entity_index=" << glove_entity_index
+                << L", serial=" << next_serial << L").";
+            issue = stream.str();
+            glove_entity_index = -1;
+            return false;
+        }
+
+        if (!TryGetEntityFromIndex(entity_list, glove_entity_index, glove_entity) ||
+            glove_entity == nullptr)
+        {
+            issue = L"CEconWearable client-class create function returned without materializing the requested entity slot.";
+            glove_entity_index = -1;
+            return false;
+        }
+
+        void** vtable = nullptr;
+        void* first_virtual_method = nullptr;
+        const auto client_module = GetModuleHandleW(L"client.dll");
+        const auto client_span = GetModuleSpan(client_module);
+        auto* const item_view = ResolveWeaponItemView(glove_entity, offsets);
+        if (item_view == nullptr ||
+            !SafeReadValue(glove_entity, vtable) ||
+            vtable == nullptr ||
+            factory.schema_primary_vtable == nullptr ||
+            vtable != reinterpret_cast<void**>(factory.schema_primary_vtable) ||
+            !SafeReadValue(vtable, first_virtual_method) ||
+            !client_span.has_value() ||
+            !PointerInModule(*client_span, vtable) ||
+            !PointerInModule(*client_span, first_virtual_method) ||
+            !IsExecutablePointer(first_virtual_method))
+        {
+            std::wstringstream stream;
+            stream << L"Created CEconWearable failed ItemView/vtable class validation; the object was left unbound and retries were disabled: entity="
+                << FormatPointer(glove_entity)
+                << L", item_view=" << FormatPointer(item_view)
+                << L", vtable=" << FormatPointer(vtable)
+                << L", expected_vtable=" << FormatPointer(factory.schema_primary_vtable)
+                << L", first_method=" << FormatPointer(first_virtual_method) << L".";
+            issue = stream.str();
+            g_hook_state.wearable_factory_post_create_poisoned.store(true, std::memory_order_release);
+            StoreCachedWearableFactoryResolution(
+                RuntimeFeatureAvailability::Unavailable,
+                {},
+                L"wearable_factory_unavailable: post-create CEconWearable ItemView/class validation failed.");
+            glove_entity_index = -1;
+            glove_entity = nullptr;
+            return false;
+        }
+
+        glove_handle = BuildEntityHandle(glove_entity_index, next_serial);
+        if (!IsPlausibleEntityHandle(glove_handle))
+        {
+            issue = L"Created CEconWearable produced an implausible entity handle.";
+            glove_entity_index = -1;
+            glove_handle = kInvalidEntityHandle;
+            glove_entity = nullptr;
+            return false;
+        }
+
+        player_binding.runtime_glove_entity_index = glove_entity_index;
+        player_binding.runtime_glove_handle = glove_handle;
+        player_binding.glove_binding_mode = RuntimeGloveBindingMode::RuntimeCreatedWearable;
+        {
+            std::lock_guard<std::mutex> lock(g_hook_state.runtime_glove_provenance_mutex);
+            g_hook_state.runtime_glove_provenance_by_handle[glove_handle] = {
+                player_binding.xuid,
+                glove_entity,
+            };
+        }
+        return true;
+    }
+
+    if (g_hook_state.wearable_factory_post_create_poisoned.load(std::memory_order_acquire))
+    {
+        issue =
+            L"Formal CEconWearable creation is disabled for this process after an earlier post-create entity validation failure.";
         return false;
     }
 
-    if (!TryFindAvailableRuntimeEntityIndex(entity_list, highest_live_entity_index + 1, glove_entity_index, issue))
+    if (factory.create_fn == nullptr ||
+        factory.entity_system_storage == nullptr ||
+        factory.entity_system == nullptr ||
+        factory.class_lookup_fn == nullptr ||
+        factory.formal_create_fn == nullptr ||
+        factory.entity_class_metadata == nullptr ||
+        factory.schema_class_info == nullptr ||
+        factory.schema_allocator_fn == nullptr ||
+        factory.schema_primary_vtable == nullptr ||
+        factory.create_class_name == nullptr)
     {
+        issue = L"The formal CEconWearable client entity factory binding is incomplete.";
         return false;
     }
 
-    const auto next_serial = static_cast<std::uint16_t>(
-        std::max<std::uint32_t>(1u, static_cast<std::uint32_t>(ExtractEntityHandleSerial(player_binding.runtime_glove_handle)) + 1u));
+    std::string factory_network_name;
+    std::string factory_create_class_name;
+    if (factory.client_class == nullptr ||
+        factory.network_name == nullptr ||
+        !TryReadClientClassName(factory.network_name, factory_network_name) ||
+        factory_network_name != kWearableClientClassName ||
+        factory.create_class_name == nullptr ||
+        !TryReadClientClassName(factory.create_class_name, factory_create_class_name) ||
+        (factory_create_class_name != kWearableEntityFactoryClassName &&
+            factory_create_class_name != kWearableSchemaClassName &&
+            factory_create_class_name != kWearableClientClassName))
+    {
+        issue = L"CEconWearable factory identity validation failed immediately before entity creation.";
+        return false;
+    }
+
+    WearableClientClassFactoryBinding validated_factory {};
+    std::wstring validation_issue;
+    const auto providers = SnapshotSource2ClientProviders();
+    void* const provider_anchor = providers.callback_instance != nullptr
+        ? providers.callback_instance
+        : providers.interface_instance;
+    if (provider_anchor == nullptr ||
+        provider_anchor != factory.class_provider ||
+        !TryResolveWearableEntityFactoryWithSchemaEvidenceAtFrameRenderPass(
+            GetModuleHandleW(L"client.dll"),
+            provider_anchor,
+            validated_factory,
+            validation_issue))
+    {
+        issue = provider_anchor == nullptr
+            ? L"The Source2Client provider-generation anchor is unavailable before formal CEconWearable creation."
+            : provider_anchor != factory.class_provider
+                ? L"The Source2Client provider-generation anchor changed before formal CEconWearable creation."
+                : L"The formal CEconWearable factory failed immediate revalidation" +
+                    (!validation_issue.empty() ? L": " + validation_issue : L"");
+        return false;
+    }
+    validated_factory.class_provider = provider_anchor;
+    if (
+        !WearableClientClassBindingsMatch(factory, validated_factory))
+    {
+        issue = L"The formal CEconWearable factory changed or failed revalidation immediately before invocation";
+        if (!validation_issue.empty())
+        {
+            issue += L": " + validation_issue;
+        }
+        return false;
+    }
+
+    // CGameEntitySystem's current identity allocator selects the live pool
+    // only when the factory descriptor's allocation flag bit 6 is clear and
+    // the wrapper's final pending-network flag is false.  Recheck the flag at
+    // the game-thread call site so an updated layout cannot silently produce
+    // another standalone/unpublished entity.
+    std::uint32_t factory_allocation_flags = 0;
+    if (!SafeReadValue(
+            static_cast<std::uint8_t*>(factory.client_class) + 0x70,
+            factory_allocation_flags) ||
+        (factory_allocation_flags & (1u << 6u)) != 0)
+    {
+        std::wstringstream stream;
+        stream
+            << L"CEconWearable factory allocation flags do not permit verified live-pool creation; no factory call was made: flags=0x"
+            << std::hex << std::uppercase << factory_allocation_flags
+            << std::dec << std::nouppercase << L".";
+        issue = stream.str();
+        return false;
+    }
+
+    int requested_entity_index = -1;
+    std::wstring slot_issue;
+    if (!TryFindAvailableRuntimeEntityIndex(
+            entity_list,
+            highest_live_entity_index + 1,
+            requested_entity_index,
+            slot_issue))
+    {
+        issue = slot_issue.empty()
+            ? L"No verified free entity slot is available for formal CEconWearable creation."
+            : slot_issue;
+        return false;
+    }
+    constexpr std::uint16_t kRequestedWearableSerial = 1;
 
     DWORD create_exception_code = 0;
     void* create_exception_address = nullptr;
-    if (!TryInvokeClientClassCreateFunction(
+    if (!TryInvokeFormalClientEntityCreateByName(
             factory.create_fn,
-            glove_entity_index,
-            next_serial,
+            factory.entity_system,
+            factory.create_class_name,
+            requested_entity_index,
+            kRequestedWearableSerial,
+            glove_entity,
             create_exception_code,
             create_exception_address))
     {
         std::wstringstream stream;
-        stream << L"CEconWearable client class create function raised an exception 0x"
+        stream << L"Formal CEconWearable CreateEntityByName returned null or raised exception 0x"
             << std::hex << std::uppercase << create_exception_code
             << std::dec << std::nouppercase
             << L" at " << FormatPointer(create_exception_address)
-            << L" (normalized=" << FormatPointer(factory.create_fn)
-            << L", raw=" << FormatPointer(factory.raw_create_fn)
-            << L", entity_index=" << glove_entity_index
-            << L", serial=" << next_serial << L"). create_region="
+            << L" (create=" << FormatPointer(factory.create_fn)
+            << L", entity_system=" << FormatPointer(factory.entity_system)
+            << L", descriptor=" << FormatPointer(factory.client_class)
+            << L", factory_name=" << NarrowToWide(factory.create_class_name)
+            << L"). create_region="
             << DescribeReadableMemoryRegion(factory.create_fn)
-            << L" client_class_region=" << DescribeReadableMemoryRegion(factory.client_class);
+            << L" class_descriptor_region=" << DescribeReadableMemoryRegion(factory.client_class);
         issue = stream.str();
-        glove_entity_index = -1;
         return false;
     }
 
-    if (!TryGetEntityFromIndex(entity_list, glove_entity_index, glove_entity) || glove_entity == nullptr)
+    void* identity = nullptr;
+    void* identity_class_descriptor = nullptr;
+    const auto identity_pointer_read =
+        SafeReadValue(static_cast<std::uint8_t*>(glove_entity) + 0x10, identity);
+    const auto identity_readable =
+        identity_pointer_read && identity != nullptr && IsReadablePointer(identity);
+    const auto identity_class_descriptor_read =
+        identity_readable &&
+        SafeReadValue(static_cast<std::uint8_t*>(identity) + 0x08, identity_class_descriptor);
+    const auto identity_handle_read =
+        identity_readable &&
+        SafeReadValue(static_cast<std::uint8_t*>(identity) + 0x10, glove_handle);
+    const auto identity_handle_plausible =
+        identity_handle_read && IsPlausibleEntityHandle(glove_handle);
+    if (!identity_readable ||
+        !identity_class_descriptor_read ||
+        identity_class_descriptor != factory.client_class ||
+        !identity_handle_plausible)
     {
-        issue = L"CEconWearable create function returned without materializing a client entity.";
-        glove_entity_index = -1;
+        std::wstringstream stream;
+        stream
+            << L"Formal CEconWearable creation returned an entity whose identity, class descriptor or handle failed validation; "
+            << L"the object was left unbound and factory retries were disabled for this process: entity="
+            << FormatPointer(glove_entity)
+            << L", entity_region=" << DescribeReadableMemoryRegion(glove_entity)
+            << L", identity_pointer_read=" << (identity_pointer_read ? 1 : 0)
+            << L", identity=" << FormatPointer(identity)
+            << L", identity_region=" << DescribeReadableMemoryRegion(identity)
+            << L", descriptor_read=" << (identity_class_descriptor_read ? 1 : 0)
+            << L", descriptor_actual=" << FormatPointer(identity_class_descriptor)
+            << L", descriptor_expected=" << FormatPointer(factory.client_class)
+            << L", handle_read=" << (identity_handle_read ? 1 : 0)
+            << L", handle=0x" << std::hex << std::uppercase << glove_handle
+            << std::dec << std::nouppercase
+            << L", handle_index="
+            << (identity_handle_read ? HandleToEntityIndex(glove_handle) : -1)
+            << L", requested_entity_index=" << requested_entity_index
+            << L", requested_serial=" << kRequestedWearableSerial
+            << L", handle_plausible=" << (identity_handle_plausible ? 1 : 0)
+            << L".";
+        issue = stream.str();
+        g_hook_state.wearable_factory_post_create_poisoned.store(true, std::memory_order_release);
+        StoreCachedWearableFactoryResolution(
+            RuntimeFeatureAvailability::Unavailable,
+            {},
+            L"wearable_factory_unavailable: post-create CEconWearable identity validation failed.");
         return false;
     }
 
-    glove_handle = BuildEntityHandle(glove_entity_index, next_serial);
-    return glove_handle != kInvalidEntityHandle;
+    glove_entity_index = HandleToEntityIndex(glove_handle);
+    void* indexed_entity = nullptr;
+    const auto entity_slot_read =
+        glove_entity_index >= 0 &&
+        TryGetEntityFromIndex(entity_list, glove_entity_index, indexed_entity);
+    if (glove_entity_index < 0 ||
+        !entity_slot_read ||
+        indexed_entity != glove_entity)
+    {
+        std::wstringstream stream;
+        stream
+            << L"Formal CEconWearable creation did not publish the returned object in the entity-system slot encoded by its identity handle; "
+            << L"the object was left unbound and factory retries were disabled for this process: entity="
+            << FormatPointer(glove_entity)
+            << L", identity=" << FormatPointer(identity)
+            << L", handle=0x" << std::hex << std::uppercase << glove_handle
+            << std::dec << std::nouppercase
+            << L", entity_index=" << glove_entity_index
+            << L", requested_entity_index=" << requested_entity_index
+            << L", requested_serial=" << kRequestedWearableSerial
+            << L", slot_read=" << (entity_slot_read ? 1 : 0)
+            << L", slot_entity=" << FormatPointer(indexed_entity)
+            << L".";
+        issue = stream.str();
+        g_hook_state.wearable_factory_post_create_poisoned.store(true, std::memory_order_release);
+        StoreCachedWearableFactoryResolution(
+            RuntimeFeatureAvailability::Unavailable,
+            {},
+            L"wearable_factory_unavailable: post-create entity-slot validation failed.");
+        glove_entity_index = -1;
+        glove_handle = kInvalidEntityHandle;
+        glove_entity = nullptr;
+        return false;
+    }
+
+    void** vtable = nullptr;
+    void* first_virtual_method = nullptr;
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_span = GetModuleSpan(client_module);
+    if (!SafeReadValue(glove_entity, vtable) ||
+        vtable == nullptr ||
+        vtable != reinterpret_cast<void**>(factory.schema_primary_vtable) ||
+        !SafeReadValue(vtable, first_virtual_method) ||
+        !client_span.has_value() ||
+        !PointerInModule(*client_span, vtable) ||
+        !PointerInModule(*client_span, first_virtual_method) ||
+        !IsExecutablePointer(first_virtual_method))
+    {
+        std::wstringstream stream;
+        stream
+            << L"Formal CEconWearable creation returned an object with an untrusted primary vtable; "
+            << L"the entity was left unbound and factory retries were disabled for this process: entity="
+            << FormatPointer(glove_entity)
+            << L", vtable=" << FormatPointer(vtable)
+            << L", first_method=" << FormatPointer(first_virtual_method)
+            << L", vtable_region=" << DescribeReadableMemoryRegion(vtable)
+            << L", first_method_region=" << DescribeReadableMemoryRegion(first_virtual_method)
+            << L".";
+        issue = stream.str();
+        g_hook_state.wearable_factory_post_create_poisoned.store(true, std::memory_order_release);
+        StoreCachedWearableFactoryResolution(
+            RuntimeFeatureAvailability::Unavailable,
+            {},
+            L"wearable_factory_unavailable: post-create CEconWearable vtable validation failed.");
+        return false;
+    }
+
+    // Publish the engine-generated handle immediately.  If ItemView setup is
+    // delayed by one frame, the next poll reuses this exact registered entity
+    // instead of creating a duplicate.
+    player_binding.runtime_glove_entity_index = glove_entity_index;
+    player_binding.runtime_glove_handle = glove_handle;
+    player_binding.glove_binding_mode = RuntimeGloveBindingMode::RuntimeCreatedWearable;
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.runtime_glove_provenance_mutex);
+        g_hook_state.runtime_glove_provenance_by_handle[glove_handle] = {
+            player_binding.xuid,
+            glove_entity,
+        };
+    }
+
+    if (ResolveWeaponItemView(glove_entity, offsets) == nullptr)
+    {
+        issue =
+            L"Formal CEconWearable creation published a verified entity/handle, but its ItemView is not readable yet; the entity was retained for next-frame reuse.";
+        return false;
+    }
+
+    return true;
 }
 
 bool TryCreateRuntimeKeychainModuleEntity(
@@ -24606,39 +26873,66 @@ bool TryBindWearableEntityToPawn(
         return false;
     }
 
-    bool success = true;
+    auto pawn_handle = player_binding.pawn_handle;
+    if (pawn_handle == kInvalidEntityHandle)
+    {
+        pawn_handle = BuildEntityHandle(player_binding.pawn_entity_index, 0);
+    }
+
+    bool owner_written = offsets.base_owner_entity == 0;
+    bool old_move_parent_written = offsets.base_old_move_parent == 0;
+    bool force_skin_written = offsets.econ_wearable_force_skin == 0;
+    bool always_allow_written = offsets.econ_wearable_always_allow == 0;
 
     if (offsets.base_owner_entity != 0)
     {
-        auto pawn_handle = player_binding.pawn_handle;
-        if (pawn_handle == kInvalidEntityHandle)
-        {
-            pawn_handle = BuildEntityHandle(player_binding.pawn_entity_index, 0);
-        }
-
-        success = success && pawn_handle != kInvalidEntityHandle &&
+        owner_written = pawn_handle != kInvalidEntityHandle &&
             SafeWriteField(glove_entity, offsets.base_owner_entity, pawn_handle);
 
         if (offsets.base_old_move_parent != 0)
         {
-            success = success && SafeWriteField(glove_entity, offsets.base_old_move_parent, pawn_handle);
+            old_move_parent_written = pawn_handle != kInvalidEntityHandle &&
+                SafeWriteField(glove_entity, offsets.base_old_move_parent, pawn_handle);
         }
     }
 
     if (offsets.econ_wearable_force_skin != 0)
     {
         const std::int32_t force_skin = 1;
-        success = success && SafeWriteField(glove_entity, offsets.econ_wearable_force_skin, force_skin);
+        force_skin_written = SafeWriteField(glove_entity, offsets.econ_wearable_force_skin, force_skin);
     }
 
     if (offsets.econ_wearable_always_allow != 0)
     {
         const bool always_allow = true;
-        success = success && SafeWriteField(glove_entity, offsets.econ_wearable_always_allow, always_allow);
+        always_allow_written = SafeWriteField(glove_entity, offsets.econ_wearable_always_allow, always_allow);
     }
 
-    success = success && TryAssignPawnWearableHandle(runtime_entities, player_binding, offsets, glove_handle);
-    return success;
+    // m_hMyWearables is the canonical relationship and must be attempted even
+    // when an optional compatibility field is absent or no longer writable.
+    // The previous short-circuit chain skipped this call after the first
+    // optional write failure and continuously created orphan wearables.
+    const auto handle_written =
+        TryAssignPawnWearableHandle(runtime_entities, player_binding, offsets, glove_handle);
+
+    if (!owner_written || !old_move_parent_written ||
+        !force_skin_written || !always_allow_written || !handle_written)
+    {
+        std::wstringstream stream;
+        stream << L"Runtime glove bind field results for XUID " << player_binding.xuid
+            << L": entity=" << FormatPointer(glove_entity)
+            << L", pawn_handle=0x" << std::hex << std::uppercase << pawn_handle
+            << L", glove_handle=0x" << glove_handle
+            << std::dec << std::nouppercase
+            << L", owner=" << (owner_written ? 1 : 0)
+            << L", old_move_parent=" << (old_move_parent_written ? 1 : 0)
+            << L", force_skin=" << (force_skin_written ? 1 : 0)
+            << L", always_allow=" << (always_allow_written ? 1 : 0)
+            << L", my_wearables=" << (handle_written ? 1 : 0) << L".";
+        nskinzcs2::Logger::Warn(stream.str());
+    }
+
+    return handle_written && owner_written;
 }
 
 bool TryAppendAttributeInList(
@@ -27862,6 +30156,508 @@ bool TryResolveKnifeDirectRenderModelHandle(
         failure_reasons.empty()
             ? L"resource_handle_query_unavailable"
             : JoinDiagnosticSamples(failure_reasons);
+    return false;
+}
+
+bool TryResolveGloveDirectRenderModelHandleAtSafePoint(
+    const std::string& desired_model_name,
+    const std::string& calibration_model_name,
+    const std::uint64_t calibration_model_handle,
+    const std::uint64_t xuid,
+    std::uint64_t& resolved_handle,
+    std::wstring& resolved_source,
+    std::wstring& resolved_reason,
+    const bool allow_experimental_resource_calls)
+{
+    resolved_handle = 0;
+    resolved_source.clear();
+    resolved_reason.clear();
+
+    if (desired_model_name.empty() || calibration_model_name.empty() ||
+        calibration_model_handle == 0)
+    {
+        resolved_reason = L"glove_calibration_pair_unavailable";
+        return false;
+    }
+
+    if (!g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        !g_glove_resource_query_frame_render_pass_active ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive() ||
+        g_knife_model_path_swap_query_hook_reentry)
+    {
+        resolved_reason = L"glove_resource_query_outside_safe_point";
+        return false;
+    }
+
+    // ResourceSystem013 slot 40 is the engine's blocking resource preload
+    // entry point on the HLAE 2.191.1 / CS2 build 2000885 combination. HLAE
+    // itself uses this exact ABI for material precaching. It accepts the
+    // engine's 0xE0-byte resource-name descriptor and returns the stable
+    // CStrongHandle binding. Calibrate it against the model already owned by
+    // this CModelState before asking it to load a different glove model.
+    const auto try_blocking_resource_preload = [&]() noexcept
+    {
+        constexpr std::size_t kBlockingPreloadSlot = 40;
+        void* resource_system = g_hook_state.resource_system_interface;
+        if (resource_system == nullptr)
+        {
+            return false;
+        }
+
+        void** vtable = nullptr;
+        void* preload_method = nullptr;
+        const auto resource_module = GetModuleHandleW(L"resourcesystem.dll");
+        if (!SafeReadValue(resource_system, vtable) || vtable == nullptr ||
+            !SafeReadValue(vtable + kBlockingPreloadSlot, preload_method) ||
+            preload_method == nullptr || !IsExecutablePointer(preload_method) ||
+            resource_module == nullptr || GetModuleFromAddress(preload_method) != resource_module)
+        {
+            return false;
+        }
+
+        const auto murmur_hash_64b = [](const void* key, int length, std::uint64_t seed)
+        {
+            constexpr std::uint32_t multiplier = 0x5bd1e995u;
+            constexpr int shift = 24;
+            std::uint32_t h1 = static_cast<std::uint32_t>(seed) ^
+                static_cast<std::uint32_t>(length);
+            std::uint32_t h2 = static_cast<std::uint32_t>(seed >> 32u);
+            const auto* data = static_cast<const std::uint8_t*>(key);
+
+            while (length >= 8)
+            {
+                std::uint32_t k1 = 0;
+                std::uint32_t k2 = 0;
+                std::memcpy(&k1, data, sizeof(k1));
+                std::memcpy(&k2, data + sizeof(k1), sizeof(k2));
+                k1 *= multiplier;
+                k1 ^= k1 >> shift;
+                k1 *= multiplier;
+                h1 *= multiplier;
+                h1 ^= k1;
+                k2 *= multiplier;
+                k2 ^= k2 >> shift;
+                k2 *= multiplier;
+                h2 *= multiplier;
+                h2 ^= k2;
+                data += 8;
+                length -= 8;
+            }
+            if (length >= 4)
+            {
+                std::uint32_t k1 = 0;
+                std::memcpy(&k1, data, sizeof(k1));
+                k1 *= multiplier;
+                k1 ^= k1 >> shift;
+                k1 *= multiplier;
+                h1 *= multiplier;
+                h1 ^= k1;
+                data += 4;
+                length -= 4;
+            }
+            switch (length)
+            {
+            case 3:
+                h2 ^= static_cast<std::uint32_t>(data[2]) << 16u;
+                [[fallthrough]];
+            case 2:
+                h2 ^= static_cast<std::uint32_t>(data[1]) << 8u;
+                [[fallthrough]];
+            case 1:
+                h2 ^= data[0];
+                h2 *= multiplier;
+                break;
+            default:
+                break;
+            }
+            h1 ^= h2 >> 18u;
+            h1 *= multiplier;
+            h2 ^= h1 >> 22u;
+            h2 *= multiplier;
+            h1 ^= h2 >> 17u;
+            h1 *= multiplier;
+            h2 ^= h1 >> 19u;
+            h2 *= multiplier;
+            return (static_cast<std::uint64_t>(h1) << 32u) | h2;
+        };
+
+        const auto invoke_preload = [&](const std::string& input, std::uint64_t& handle)
+        {
+            handle = 0;
+            std::string path = input;
+            std::replace(path.begin(), path.end(), '\\', '/');
+            std::transform(
+                path.begin(),
+                path.end(),
+                path.begin(),
+                [](const unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            while (path.starts_with("./"))
+            {
+                path.erase(0, 2);
+            }
+            const auto dot = path.find_last_of('.');
+            if (path.empty() || path.size() > 0x3FFFFFFEu || dot == std::string::npos ||
+                dot + 1 >= path.size() || path.size() - dot - 1 > 7)
+            {
+                return false;
+            }
+
+            alignas(8) std::array<std::uint8_t, 0xE0> descriptor {};
+            const auto length = static_cast<std::uint32_t>(path.size());
+            const auto allocation_size = length + 1u;
+            const auto path_pointer = path.data();
+            const auto hash = murmur_hash_64b(
+                path.data(),
+                static_cast<int>(path.size()),
+                0xEDABCDEFull);
+            std::memcpy(descriptor.data() + 0x00, &length, sizeof(length));
+            std::memcpy(descriptor.data() + 0x04, &allocation_size, sizeof(allocation_size));
+            std::memcpy(descriptor.data() + 0x08, &path_pointer, sizeof(path_pointer));
+            std::memcpy(descriptor.data() + 0xD0, &hash, sizeof(hash));
+            std::memcpy(
+                descriptor.data() + 0xD8,
+                path.data() + dot + 1,
+                path.size() - dot - 1);
+
+            void* result = nullptr;
+            if (!SafeInvokeFunctionPointer(
+                    preload_method,
+                    result,
+                    resource_system,
+                    descriptor.data(),
+                    "") ||
+                result == nullptr || !IsReadablePointer(result))
+            {
+                return false;
+            }
+            handle = reinterpret_cast<std::uint64_t>(result);
+            return true;
+        };
+
+        std::uint64_t calibration_first = 0;
+        std::uint64_t calibration_second = 0;
+        if (!invoke_preload(calibration_model_name, calibration_first) ||
+            !invoke_preload(calibration_model_name, calibration_second) ||
+            calibration_first != calibration_model_handle ||
+            calibration_second != calibration_model_handle)
+        {
+            std::wstringstream stream;
+            stream << L"Glove ResourceSystem blocking preload calibration for XUID " << xuid
+                << L": slot=" << kBlockingPreloadSlot
+                << L", method=" << FormatPointer(preload_method)
+                << L", expected=0x" << std::hex << std::uppercase << calibration_model_handle
+                << L", first=0x" << calibration_first
+                << L", second=0x" << calibration_second
+                << L", calibrated=0";
+            LogProfileDiagnosticOnce(xuid ^ 0x474C50524543414Cull, stream.str());
+            return false;
+        }
+
+        std::uint64_t target_first = 0;
+        std::uint64_t target_second = 0;
+        if (!invoke_preload(desired_model_name, target_first) ||
+            !invoke_preload(desired_model_name, target_second) ||
+            target_first == 0 || target_first != target_second)
+        {
+            return false;
+        }
+
+        resolved_handle = target_first;
+        resolved_source = L"ResourceSystem013[blocking_preload_slot=40,calibrated]";
+        std::wstringstream stream;
+        stream << L"Glove ResourceSystem blocking preload for XUID " << xuid
+            << L": current=" << NarrowToWide(calibration_model_name)
+            << L", target=" << NarrowToWide(desired_model_name)
+            << L", current_handle=0x" << std::hex << std::uppercase << calibration_first
+            << L", target_handle=0x" << target_first
+            << L", calibrated=1";
+        LogProfileDiagnosticOnce(xuid ^ 0x474C5052454C4F41ull, stream.str());
+        return true;
+    };
+
+    if (allow_experimental_resource_calls && try_blocking_resource_preload())
+    {
+        return true;
+    }
+
+    // client.dll owns a contiguous 0x28-byte glove-model descriptor table on
+    // this build.  The canonical path is the first qword of each record; the
+    // live descriptor fields follow it.  Older builds of this adapter scanned
+    // negative offsets and therefore inspected the preceding glove record.
+    // Calibrate only same-record fields against the currently bound
+    // CStrongHandle<CModel>.  This also avoids calling ResourceSystem013's
+    // update/pump method (vtable slot 13) as though it were a path lookup.
+    const auto try_registered_glove_model = [&]() noexcept
+    {
+        const auto client_module = GetModuleHandleW(L"client.dll");
+        const auto module = GetModuleSpan(client_module);
+        if (!module.has_value())
+        {
+            return false;
+        }
+
+        const auto find_unique_ascii = [&](const std::string& value) -> const std::uint8_t*
+        {
+            if (value.empty())
+            {
+                return nullptr;
+            }
+
+            const std::uint8_t* match = nullptr;
+            std::size_t matches = 0;
+            __try
+            {
+                auto* cursor = module->base;
+                auto* const end = module->base + module->size;
+                while (cursor < end)
+                {
+                    auto* found = std::search(
+                        cursor,
+                        end,
+                        reinterpret_cast<const std::uint8_t*>(value.data()),
+                        reinterpret_cast<const std::uint8_t*>(value.data() + value.size()));
+                    if (found == end)
+                    {
+                        break;
+                    }
+                    if (found + value.size() < end && found[value.size()] == 0)
+                    {
+                        match = found;
+                        ++matches;
+                    }
+                    cursor = found + 1;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return nullptr;
+            }
+            return matches == 1 ? match : nullptr;
+        };
+
+        const auto find_unique_pointer_reference = [&](const void* pointer) -> const std::uint8_t*
+        {
+            const auto needle = reinterpret_cast<std::uintptr_t>(pointer);
+            const std::uint8_t* match = nullptr;
+            std::size_t matches = 0;
+            __try
+            {
+                for (std::size_t offset = 0;
+                     offset + sizeof(needle) <= module->size;
+                     offset += alignof(std::uintptr_t))
+                {
+                    std::uintptr_t value = 0;
+                    std::memcpy(&value, module->base + offset, sizeof(value));
+                    if (value == needle)
+                    {
+                        match = module->base + offset;
+                        ++matches;
+                    }
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER)
+            {
+                return nullptr;
+            }
+            return matches == 1 ? match : nullptr;
+        };
+
+        const auto* current_path = find_unique_ascii(calibration_model_name);
+        const auto* target_path = find_unique_ascii(desired_model_name);
+        const auto* current_path_field = find_unique_pointer_reference(current_path);
+        const auto* target_path_field = find_unique_pointer_reference(target_path);
+        if (current_path == nullptr || target_path == nullptr ||
+            current_path_field == nullptr || target_path_field == nullptr)
+        {
+            return false;
+        }
+
+        constexpr std::array<std::ptrdiff_t, 4> kOpaqueFieldOffsets {{0x08, 0x10, 0x18, 0x20}};
+        std::wstringstream snapshot;
+        snapshot << L"Glove client model registry calibration for XUID " << xuid
+            << L": current_path_field=" << FormatPointer(current_path_field)
+            << L", target_path_field=" << FormatPointer(target_path_field)
+            << L", live_handle=0x" << std::hex << std::uppercase << calibration_model_handle;
+
+        for (const auto field_offset : kOpaqueFieldOffsets)
+        {
+            std::uint64_t current_value = 0;
+            std::uint64_t target_value = 0;
+            const auto current_ok = SafeReadValue(current_path_field + field_offset, current_value);
+            const auto target_ok = SafeReadValue(target_path_field + field_offset, target_value);
+            snapshot << L" | off=" << std::showbase << field_offset
+                << L":cur=0x" << std::hex << (current_ok ? current_value : 0)
+                << L",dst=0x" << (target_ok ? target_value : 0);
+            if (current_ok && target_ok &&
+                current_value == calibration_model_handle &&
+                target_value != 0 && target_value != calibration_model_handle)
+            {
+                resolved_handle = target_value;
+                resolved_source = L"client_glove_model_registry[offset=" +
+                    std::to_wstring(field_offset) + L"]";
+                LogProfileDiagnosticOnce(
+                    xuid ^ 0x474C4F5645524547ull,
+                    snapshot.str() + L" | calibrated=1");
+                return true;
+            }
+
+            if (!current_ok || !target_ok || current_value == 0 || target_value == 0 ||
+                !IsReadablePointer(reinterpret_cast<const void*>(current_value)) ||
+                !IsReadablePointer(reinterpret_cast<const void*>(target_value)))
+            {
+                continue;
+            }
+
+            constexpr std::size_t kRegisteredObjectScanBytes = 0x1000;
+            for (std::size_t object_offset = 0;
+                 object_offset < kRegisteredObjectScanBytes;
+                 object_offset += sizeof(std::uintptr_t))
+            {
+                std::uint64_t current_nested = 0;
+                std::uint64_t target_nested = 0;
+                if (!SafeReadValue(
+                        reinterpret_cast<const std::uint8_t*>(current_value) + object_offset,
+                        current_nested) ||
+                    !SafeReadValue(
+                        reinterpret_cast<const std::uint8_t*>(target_value) + object_offset,
+                        target_nested))
+                {
+                    continue;
+                }
+
+                if (current_nested != calibration_model_handle ||
+                    target_nested == 0 ||
+                    target_nested == calibration_model_handle ||
+                    !IsReadablePointer(reinterpret_cast<const void*>(target_nested)))
+                {
+                    continue;
+                }
+
+                resolved_handle = target_nested;
+                resolved_source = L"client_glove_model_registry[record_offset=" +
+                    std::to_wstring(field_offset) +
+                    L",object_offset=" + std::to_wstring(object_offset) + L"]";
+                snapshot << L" | nested_match(record=" << std::dec << field_offset
+                    << L",object=" << object_offset
+                    << L",target=0x" << std::hex << target_nested << L")";
+                LogProfileDiagnosticOnce(
+                    xuid ^ 0x474C4F5645524547ull,
+                    snapshot.str() + L" | calibrated=1");
+                return true;
+            }
+        }
+
+        LogProfileDiagnosticOnce(
+            xuid ^ 0x474C4F5645524547ull,
+            snapshot.str() + L" | calibrated=0");
+        return false;
+    };
+
+    if (try_registered_glove_model())
+    {
+        return true;
+    }
+
+    if (!allow_experimental_resource_calls)
+    {
+        resolved_reason = L"validated_client_model_registry_binding_unavailable";
+        return false;
+    }
+
+    const auto desired_paths = BuildResourceHandleQueryPathCandidates(desired_model_name);
+    const auto calibration_paths = BuildResourceHandleQueryPathCandidates(calibration_model_name);
+    if (desired_paths.empty() || calibration_paths.empty())
+    {
+        resolved_reason = L"glove_resource_path_unmapped";
+        return false;
+    }
+
+    std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
+    auto& binding = g_hook_state.resource_system_query;
+    const auto hook_index = ResourceHandleQueryHookIndex(binding.interface_kind);
+    if (binding.interface_instance == nullptr ||
+        binding.interface_kind != ResourceHandleQueryInterfaceKind::ResourceSystem ||
+        hook_index == kInvalidResourceHandleQuerySlot ||
+        hook_index >= g_hook_state.knife_model_path_swap_query_hooks.size())
+    {
+        resolved_reason = L"glove_resource_system_interface_unavailable";
+        return false;
+    }
+
+    const auto query_slot =
+        binding.path_to_handle_slot_ready &&
+                       binding.path_to_handle_slot != kInvalidResourceHandleQuerySlot
+            ? binding.path_to_handle_slot
+            : kInvalidResourceHandleQuerySlot;
+    if (query_slot == kInvalidResourceHandleQuerySlot)
+    {
+        resolved_reason = L"glove_descriptor_model_handle_unavailable";
+        return false;
+    }
+
+    const auto& hook = g_hook_state.knife_model_path_swap_query_hooks[hook_index];
+    const auto can_invoke_saved_original =
+        hook.valid && hook.patch.installed && hook.original != nullptr &&
+        hook.slot == query_slot;
+
+    const auto invoke_query =
+        [&](const std::string& path, std::uint64_t& handle)
+        {
+            handle = 0;
+            if (can_invoke_saved_original)
+            {
+                return SafeInvokeFunctionPointer(
+                    reinterpret_cast<void*>(hook.original),
+                    handle,
+                    binding.interface_instance,
+                    path.c_str(),
+                    static_cast<std::uint64_t>(0),
+                    static_cast<std::uint64_t>(0));
+            }
+
+            return TryInvokeResourceHandleQuerySlot(
+                binding.interface_instance,
+                query_slot,
+                path,
+                handle);
+        };
+
+    bool calibration_confirmed = false;
+    for (const auto& path : calibration_paths)
+    {
+        std::uint64_t first = 0;
+        std::uint64_t second = 0;
+        if (invoke_query(path, first) && invoke_query(path, second) &&
+            first == calibration_model_handle && second == calibration_model_handle)
+        {
+            calibration_confirmed = true;
+            break;
+        }
+    }
+    if (!calibration_confirmed)
+    {
+        resolved_reason = L"glove_resource_query_calibration_mismatch";
+        return false;
+    }
+
+    for (const auto& path : desired_paths)
+    {
+        std::uint64_t first = 0;
+        std::uint64_t second = 0;
+        if (!invoke_query(path, first) || !invoke_query(path, second) ||
+            first == 0 || first != second || first == calibration_model_handle)
+        {
+            continue;
+        }
+
+        resolved_handle = first;
+        resolved_source = L"ResourceSystem013[signature_slot=" +
+            std::to_wstring(query_slot) +
+            (can_invoke_saved_original ? L",saved_original]" : L",validated_vtable]" );
+        return true;
+    }
+
+    resolved_reason = L"glove_target_resource_handle_unresolved";
     return false;
 }
 
@@ -31254,6 +34050,1328 @@ bool TryWriteKnifeSyntheticRenderProxyModelState(
         nskinzcs2::Logger::Info(stream.str());
     }
 
+    return verified;
+}
+
+struct LiveGloveModelBindingDonor
+{
+    int entity_index = -1;
+    void* entity = nullptr;
+    std::uint64_t model_handle = 0;
+    std::string model_name;
+    bool exact_target = false;
+};
+
+bool TryFindLiveGloveModelBindingDonor(
+    const std::vector<void*>& entity_cache,
+    const ClientSchemaOffsets& offsets,
+    const std::string& desired_model_name,
+    void* excluded_entity,
+    LiveGloveModelBindingDonor& donor)
+{
+    donor = {};
+    auto best_score = std::numeric_limits<int>::min();
+    for (std::size_t index = 0; index < entity_cache.size(); ++index)
+    {
+        auto* candidate = entity_cache[index];
+        if (candidate == nullptr || candidate == excluded_entity)
+        {
+            continue;
+        }
+
+        std::string candidate_model_name;
+        std::uint64_t candidate_model_handle = 0;
+        if (!TryReadEntityModelNameString(candidate, offsets, candidate_model_name) ||
+            candidate_model_name.empty() ||
+            !ContainsAsciiInsensitive(candidate_model_name, "glove") ||
+            !TryReadEntityModelHandle(candidate, offsets, candidate_model_handle) ||
+            candidate_model_handle == 0 ||
+            !IsReadablePointer(reinterpret_cast<const void*>(candidate_model_handle)))
+        {
+            continue;
+        }
+
+        const auto exact_target =
+            ModelIdentityPathMatches(candidate_model_name, desired_model_name);
+        auto score = exact_target ? 1024 : 0;
+        if (ContainsAsciiInsensitive(candidate_model_name, "/arms/"))
+        {
+            score += 128;
+        }
+        if (IsResolvedRuntimeEntityIndex(static_cast<int>(index)))
+        {
+            score += 32;
+        }
+        if (score <= best_score)
+        {
+            continue;
+        }
+
+        best_score = score;
+        donor.entity_index = static_cast<int>(index);
+        donor.entity = candidate;
+        donor.model_handle = candidate_model_handle;
+        donor.model_name = std::move(candidate_model_name);
+        donor.exact_target = exact_target;
+    }
+
+    return donor.entity != nullptr && donor.model_handle != 0;
+}
+
+bool TryResolveFormalSkeletonModelBindChain(
+    void*& formal_entry,
+    void*& dispatcher,
+    void*& lower_bind_model)
+{
+    formal_entry = nullptr;
+    dispatcher = nullptr;
+    lower_bind_model = nullptr;
+
+    static HMODULE cached_client_module = nullptr;
+    static void* cached_formal_entry = nullptr;
+    static void* cached_dispatcher = nullptr;
+    static void* cached_lower_bind_model = nullptr;
+
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    if (client_module != nullptr && client_module == cached_client_module &&
+        cached_formal_entry != nullptr && cached_dispatcher != nullptr &&
+        cached_lower_bind_model != nullptr &&
+        IsExecutablePointer(cached_formal_entry) &&
+        IsExecutablePointer(cached_dispatcher) &&
+        IsExecutablePointer(cached_lower_bind_model) &&
+        GetModuleFromAddress(cached_formal_entry) == client_module &&
+        GetModuleFromAddress(cached_dispatcher) == client_module &&
+        GetModuleFromAddress(cached_lower_bind_model) == client_module)
+    {
+        formal_entry = cached_formal_entry;
+        dispatcher = cached_dispatcher;
+        lower_bind_model = cached_lower_bind_model;
+        return true;
+    }
+
+    const auto client_text = GetTextSectionSpan(client_module);
+    if (client_module == nullptr || !client_text.has_value())
+    {
+        return false;
+    }
+
+    auto* const entry = FindUniquePattern(
+        *client_text,
+        nskinzcs2::compatibility::kSkeletonInstanceBindModelPattern);
+    auto* const lower = FindUniquePattern(
+        *client_text,
+        nskinzcs2::compatibility::kBindModelPattern);
+    if (entry == nullptr || lower == nullptr ||
+        !IsExecutablePointer(entry) || !IsExecutablePointer(lower))
+    {
+        return false;
+    }
+
+    const auto* const text_begin = client_text->base;
+    const auto* const text_end = client_text->base + client_text->size;
+    const auto in_client_text =
+        [&](const std::uint8_t* pointer) noexcept
+        {
+            return pointer >= text_begin && pointer < text_end;
+        };
+    const auto relative_call_target =
+        [&](const std::uint8_t* instruction) -> std::uint8_t*
+        {
+            if (instruction == nullptr || instruction + 5 > text_end || instruction[0] != 0xE8)
+            {
+                return nullptr;
+            }
+            std::int32_t displacement = 0;
+            if (!SafeReadValue(instruction + 1, displacement))
+            {
+                return nullptr;
+            }
+            auto* const target = const_cast<std::uint8_t*>(instruction + 5 + displacement);
+            return in_client_text(target) ? target : nullptr;
+        };
+    const auto calls_lower_bind =
+        [&](const std::uint8_t* candidate) noexcept
+        {
+            if (!in_client_text(candidate))
+            {
+                return false;
+            }
+            const auto available = static_cast<std::size_t>(text_end - candidate);
+            const auto scan_size = std::min<std::size_t>(available, 0x180);
+            for (std::size_t offset = 0; offset + 5 <= scan_size; ++offset)
+            {
+                if (relative_call_target(candidate + offset) == lower)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    std::unordered_set<std::uint8_t*> matching_dispatchers;
+    const auto entry_available = static_cast<std::size_t>(text_end - entry);
+    const auto entry_scan_size = std::min<std::size_t>(entry_available, 0x380);
+    for (std::size_t offset = 0; offset + 5 <= entry_scan_size; ++offset)
+    {
+        auto* const target = relative_call_target(entry + offset);
+        if (target != nullptr && target != lower && calls_lower_bind(target))
+        {
+            matching_dispatchers.insert(target);
+        }
+    }
+
+    if (matching_dispatchers.size() != 1)
+    {
+        return false;
+    }
+
+    cached_client_module = client_module;
+    cached_formal_entry = entry;
+    cached_dispatcher = *matching_dispatchers.begin();
+    cached_lower_bind_model = lower;
+    formal_entry = cached_formal_entry;
+    dispatcher = cached_dispatcher;
+    lower_bind_model = cached_lower_bind_model;
+    return true;
+}
+
+std::wstring FormatClientRelativeCodePointer(const void* pointer)
+{
+    if (pointer == nullptr)
+    {
+        return L"0x0";
+    }
+
+    std::wstringstream stream;
+    stream << FormatPointer(pointer);
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    if (client_module != nullptr && GetModuleFromAddress(pointer) == client_module)
+    {
+        const auto offset = reinterpret_cast<std::uintptr_t>(pointer) -
+            reinterpret_cast<std::uintptr_t>(client_module);
+        stream << L"(client+0x" << std::hex << std::uppercase << offset
+            << std::dec << std::nouppercase << L")";
+    }
+    else
+    {
+        const auto module_name = GetModuleFileNameOnly(GetModuleFromAddress(pointer));
+        if (!module_name.empty())
+        {
+            stream << L"(" << module_name << L")";
+        }
+    }
+    return stream.str();
+}
+
+std::wstring BuildFormalModelObjectSnapshot(
+    const wchar_t* label,
+    void* entity,
+    const ClientSchemaOffsets& offsets)
+{
+    std::wstringstream stream;
+    stream << (label != nullptr ? label : L"model_object")
+        << L"{entity=" << FormatPointer(entity);
+    if (entity == nullptr || offsets.base_entity_game_scene_node == 0)
+    {
+        stream << L", unavailable=1}";
+        return stream.str();
+    }
+
+    void* scene_node = nullptr;
+    void* scene_owner = nullptr;
+    SafeReadField(entity, offsets.base_entity_game_scene_node, scene_node);
+    if (scene_node != nullptr && offsets.game_scene_node_owner != 0)
+    {
+        SafeReadField(scene_node, offsets.game_scene_node_owner, scene_owner);
+    }
+
+    constexpr std::ptrdiff_t kSceneOuterToSkeletonOffset = 0x140;
+    constexpr std::ptrdiff_t kSceneOuterModelProviderOffset = 0x30;
+    constexpr std::ptrdiff_t kSceneOuterUpdateResourceOffset = 0x1E0;
+    auto* scene_outer = static_cast<std::uint8_t*>(scene_node);
+    auto* skeleton_instance = scene_outer != nullptr
+        ? scene_outer + kSceneOuterToSkeletonOffset
+        : nullptr;
+    void* model_provider = nullptr;
+    void* update_resource = nullptr;
+    if (scene_outer != nullptr)
+    {
+        SafeReadValue(scene_outer + kSceneOuterModelProviderOffset, model_provider);
+        SafeReadValue(scene_outer + kSceneOuterUpdateResourceOffset, update_resource);
+    }
+
+    stream << L", scene=" << FormatPointer(scene_node)
+        << L", owner=" << FormatPointer(scene_owner)
+        << L", outer=" << FormatPointer(scene_outer)
+        << L", skeleton=" << FormatPointer(skeleton_instance)
+        << L", provider=" << FormatPointer(model_provider)
+        << L", update_resource=" << FormatPointer(update_resource);
+
+    std::uint64_t model_handle = 0;
+    std::uint64_t model_name_token = 0;
+    std::string model_name;
+    const auto model_handle_read = TryReadEntityModelHandle(entity, offsets, model_handle);
+    const auto model_name_token_read =
+        TryReadEntityModelNameToken(entity, offsets, model_name_token);
+    const auto model_name_read = TryReadEntityModelNameString(entity, offsets, model_name);
+    stream << L", model_handle="
+        << (model_handle_read ? L"0x" : L"unreadable:0x")
+        << std::hex << std::uppercase << model_handle
+        << L", model_name_token="
+        << (model_name_token_read ? L"0x" : L"unreadable:0x")
+        << model_name_token
+        << std::dec << std::nouppercase
+        << L", model_name="
+        << (model_name_read ? NarrowToWide(model_name) : L"<unreadable>");
+
+    const auto append_vtable_window =
+        [&](const wchar_t* window_label, void* object)
+        {
+            void** vtable = nullptr;
+            stream << L", " << window_label << L"_vtable=";
+            if (object == nullptr || !SafeReadValue(object, vtable) || vtable == nullptr)
+            {
+                stream << L"0x0";
+                return;
+            }
+
+            stream << FormatPointer(vtable) << L"[low:";
+            bool first = true;
+            const auto append_slot = [&](const std::size_t slot)
+            {
+                void* target = nullptr;
+                if (!SafeReadValue(vtable + slot, target) ||
+                    target == nullptr || !IsExecutablePointer(target))
+                {
+                    return;
+                }
+                if (!first)
+                {
+                    stream << L", ";
+                }
+                first = false;
+                stream << slot << L"=" << FormatClientRelativeCodePointer(target);
+            };
+            for (std::size_t slot = 0; slot <= 16; ++slot)
+            {
+                append_slot(slot);
+            }
+            stream << L"; model_provider_window:";
+            first = true;
+            for (std::size_t slot = 24; slot <= 44; ++slot)
+            {
+                append_slot(slot);
+            }
+            stream << L"]";
+        };
+
+    append_vtable_window(L"entity", entity);
+    append_vtable_window(L"scene", scene_node);
+    append_vtable_window(L"skeleton", skeleton_instance);
+    append_vtable_window(L"provider", model_provider);
+
+    // This virtual is the same provider getter used by the validated formal
+    // bind path below. Invoke it twice at FRAME_RENDER_PASS so the snapshot
+    // can distinguish a real loaded CModel source from the non-null inline
+    // placeholder exposed by a freshly created CEconWearable.
+    constexpr std::size_t kModelProviderGetModelVtableSlot = 0x210 / sizeof(void*);
+    void** provider_vtable = nullptr;
+    void* provider_get_model = nullptr;
+    void* provider_model_first = nullptr;
+    void* provider_model_second = nullptr;
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto provider_getter_valid =
+        model_provider != nullptr &&
+        SafeReadValue(model_provider, provider_vtable) &&
+        provider_vtable != nullptr &&
+        SafeReadValue(
+            provider_vtable + kModelProviderGetModelVtableSlot,
+            provider_get_model) &&
+        provider_get_model != nullptr &&
+        IsExecutablePointer(provider_get_model) &&
+        client_module != nullptr &&
+        GetModuleFromAddress(provider_get_model) == client_module;
+    const auto provider_model_stable =
+        provider_getter_valid &&
+        SafeInvokeFunctionPointer(
+            provider_get_model,
+            provider_model_first,
+            model_provider) &&
+        SafeInvokeFunctionPointer(
+            provider_get_model,
+            provider_model_second,
+            model_provider) &&
+        provider_model_first != nullptr &&
+        provider_model_first == provider_model_second &&
+        IsReadablePointer(provider_model_first);
+    stream << L", provider_get_model="
+        << FormatClientRelativeCodePointer(provider_get_model)
+        << L", provider_model_first=" << FormatPointer(provider_model_first)
+        << L", provider_model_second=" << FormatPointer(provider_model_second)
+        << L", provider_model_stable=" << (provider_model_stable ? 1 : 0);
+    stream << L"}";
+    return stream.str();
+}
+
+bool TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
+    const int entity_index,
+    void* entity,
+    void* expected_primary_vtable,
+    const std::uint64_t signature,
+    const std::uint64_t xuid)
+{
+    constexpr std::size_t kClientThinkVtableSlot = 0x478 / sizeof(void*);
+    constexpr std::size_t kThunkSize = 27;
+    constexpr std::size_t kBaseCallDisplacementOffset = 10;
+    constexpr std::size_t kBaseCallNextInstructionOffset = 14;
+    constexpr std::size_t kRefreshJumpDisplacementOffset = 23;
+    constexpr std::size_t kRefreshJumpNextInstructionOffset = 27;
+
+    const auto attempt_signature = signature ^
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(entity_index)) << 32) ^
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(entity)) ^
+        0x5745415254484E4Bull;
+    if (g_hook_state.attempted_wearable_definition_refresh_signatures.contains(attempt_signature))
+    {
+        return false;
+    }
+
+    if (entity == nullptr || entity_index < 0 || expected_primary_vtable == nullptr ||
+        !g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        !g_glove_resource_query_frame_render_pass_active ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        return false;
+    }
+
+    void** primary_vtable = nullptr;
+    void* client_think = nullptr;
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_span = GetModuleSpan(client_module);
+    std::array<std::uint8_t, kThunkSize> thunk_bytes {};
+    if (!SafeReadValue(entity, primary_vtable) ||
+        primary_vtable == nullptr ||
+        primary_vtable != reinterpret_cast<void**>(expected_primary_vtable) ||
+        !SafeReadValue(primary_vtable + kClientThinkVtableSlot, client_think) ||
+        client_think == nullptr ||
+        client_module == nullptr ||
+        !client_span.has_value() ||
+        !PointerInModule(*client_span, primary_vtable) ||
+        !PointerInModule(*client_span, client_think) ||
+        !IsExecutablePointer(client_think) ||
+        !SafeReadBytes(client_think, thunk_bytes.data(), thunk_bytes.size()) ||
+        !nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk(
+            thunk_bytes.data(),
+            thunk_bytes.size()))
+    {
+        std::wstringstream stream;
+        stream << L"CEconWearable definition refresh rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", entity_pointer=" << FormatPointer(entity)
+            << L", vtable=" << FormatPointer(primary_vtable)
+            << L", expected_vtable=" << FormatPointer(expected_primary_vtable)
+            << L", client_think=" << FormatClientRelativeCodePointer(client_think)
+            << L", reason=untrusted_client_think_identity.";
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x01ull, stream.str());
+        return false;
+    }
+
+    std::int32_t base_call_displacement = 0;
+    std::int32_t refresh_jump_displacement = 0;
+    std::memcpy(
+        &base_call_displacement,
+        thunk_bytes.data() + kBaseCallDisplacementOffset,
+        sizeof(base_call_displacement));
+    std::memcpy(
+        &refresh_jump_displacement,
+        thunk_bytes.data() + kRefreshJumpDisplacementOffset,
+        sizeof(refresh_jump_displacement));
+    auto* const thunk = static_cast<std::uint8_t*>(client_think);
+    void* const base_client_think =
+        thunk + kBaseCallNextInstructionOffset + base_call_displacement;
+    void* const definition_refresh =
+        thunk + kRefreshJumpNextInstructionOffset + refresh_jump_displacement;
+
+    constexpr std::array<std::uint8_t, 3> kExpectedBaseNoOp {0xC2, 0x00, 0x00};
+    constexpr std::array<std::uint8_t, 10> kExpectedRefreshPrologue {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20};
+    std::array<std::uint8_t, kExpectedBaseNoOp.size()> base_bytes {};
+    std::array<std::uint8_t, kExpectedRefreshPrologue.size()> refresh_bytes {};
+    const auto targets_valid =
+        PointerInModule(*client_span, base_client_think) &&
+        PointerInModule(*client_span, definition_refresh) &&
+        IsExecutablePointer(base_client_think) &&
+        IsExecutablePointer(definition_refresh) &&
+        SafeReadBytes(base_client_think, base_bytes.data(), base_bytes.size()) &&
+        SafeReadBytes(definition_refresh, refresh_bytes.data(), refresh_bytes.size()) &&
+        base_bytes == kExpectedBaseNoOp &&
+        refresh_bytes == kExpectedRefreshPrologue;
+    if (!targets_valid)
+    {
+        std::wstringstream stream;
+        stream << L"CEconWearable definition refresh rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", client_think=" << FormatClientRelativeCodePointer(client_think)
+            << L", base=" << FormatClientRelativeCodePointer(base_client_think)
+            << L", refresh=" << FormatClientRelativeCodePointer(definition_refresh)
+            << L", reason=client_think_target_shape_mismatch.";
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x02ull, stream.str());
+        return false;
+    }
+
+    // Poison before invocation. Even an SEH-contained failure can leave a
+    // partially transitioned entity; never retry the same entity/profile.
+    g_hook_state.attempted_wearable_definition_refresh_signatures.insert(attempt_signature);
+    const auto invoked = SafeInvokeVoidFunctionPointer(client_think, entity);
+
+    std::wstringstream stream;
+    stream << L"CEconWearable definition refresh client-think for XUID " << xuid
+        << L": entity=" << entity_index
+        << L", entity_pointer=" << FormatPointer(entity)
+        << L", vtable=" << FormatPointer(primary_vtable)
+        << L", client_think=" << FormatClientRelativeCodePointer(client_think)
+        << L", base=" << FormatClientRelativeCodePointer(base_client_think)
+        << L", refresh=" << FormatClientRelativeCodePointer(definition_refresh)
+        << L", invoked=" << (invoked ? 1 : 0)
+        << L", one_shot=1.";
+    if (invoked)
+    {
+        LogProfileDiagnosticOnce(attempt_signature ^ 0x03ull, stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x04ull, stream.str());
+    }
+    return invoked;
+}
+
+bool TryInvokeWearableSetModelAtFrameRenderPass(
+    const int entity_index,
+    void* entity,
+    void* expected_primary_vtable,
+    const ClientSchemaOffsets& offsets,
+    const std::string& desired_model_name,
+    const std::uint64_t signature,
+    const std::uint64_t xuid)
+{
+    const auto attempt_signature = signature ^
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(entity_index)) << 32) ^
+        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(entity)) ^
+        0x5345544D4F44454Cull;
+
+    if (entity == nullptr || entity_index < 0 || expected_primary_vtable == nullptr ||
+        desired_model_name.empty() || offsets.base_entity_game_scene_node == 0 ||
+        offsets.model_state_model_handle == 0 || offsets.model_state_model_name == 0 ||
+        !g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        !g_glove_resource_query_frame_render_pass_active ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        return false;
+    }
+
+    void** primary_vtable = nullptr;
+    std::uint64_t before_model_handle = 0;
+    std::uint64_t before_model_name_token = 0;
+    std::string before_model_name;
+    const auto before_handle_read =
+        TryReadEntityModelHandle(entity, offsets, before_model_handle);
+    const auto before_name_token_read =
+        TryReadEntityModelNameToken(entity, offsets, before_model_name_token);
+    const auto before_name_read =
+        TryReadEntityModelNameString(entity, offsets, before_model_name);
+    if (before_handle_read && before_model_handle != 0 && before_name_read &&
+        ModelIdentityPathMatches(before_model_name, desired_model_name))
+    {
+        return true;
+    }
+
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_text = GetTextSectionSpan(client_module);
+    auto* set_model = client_text.has_value()
+        ? FindUniquePattern(
+            *client_text,
+            nskinzcs2::compatibility::kBaseModelEntitySetModelPattern)
+        : nullptr;
+    if (!SafeReadValue(entity, primary_vtable) ||
+        primary_vtable == nullptr ||
+        primary_vtable != reinterpret_cast<void**>(expected_primary_vtable) ||
+        client_module == nullptr ||
+        set_model == nullptr ||
+        !IsExecutablePointer(set_model) ||
+        GetModuleFromAddress(set_model) != client_module)
+    {
+        std::wstringstream stream;
+        stream << L"CEconWearable SetModel rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", entity_pointer=" << FormatPointer(entity)
+            << L", vtable=" << FormatPointer(primary_vtable)
+            << L", expected_vtable=" << FormatPointer(expected_primary_vtable)
+            << L", set_model=" << FormatClientRelativeCodePointer(set_model)
+            << L", reason=untrusted_set_model_identity.";
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x01ull, stream.str());
+        return false;
+    }
+
+    if ((before_handle_read && before_model_handle != 0) ||
+        (before_name_token_read && before_model_name_token != 0))
+    {
+        std::wstringstream stream;
+        stream << L"CEconWearable SetModel rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", before_handle=0x" << std::hex << std::uppercase << before_model_handle
+            << L", before_name_token=0x" << before_model_name_token
+            << std::dec << std::nouppercase
+            << L", before_name="
+            << (before_name_read ? NarrowToWide(before_model_name) : L"<unreadable>")
+            << L", target=" << NarrowToWide(desired_model_name)
+            << L", reason=nonempty_model_state_mismatch.";
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x02ull, stream.str());
+        return false;
+    }
+
+    if (g_hook_state.attempted_wearable_set_model_signatures.contains(attempt_signature))
+    {
+        return false;
+    }
+
+    // CreateEntityByName constructs a valid C_BaseModelEntity, but unlike the
+    // network creation path it never calls C_BaseModelEntity::SetModel.  The
+    // wrapper interns the path and owns the complete CModelState/resource and
+    // scene transition; do not stage a raw CStrongHandle or call the lower
+    // six-argument render-instance factory directly.
+    g_hook_state.attempted_wearable_set_model_signatures.insert(attempt_signature);
+    const auto invoked = SafeInvokeVoidFunctionPointer(
+        set_model,
+        entity,
+        desired_model_name.c_str());
+
+    std::uint64_t after_model_handle = 0;
+    std::uint64_t after_model_name_token = 0;
+    std::string after_model_name;
+    const auto after_handle_read =
+        TryReadEntityModelHandle(entity, offsets, after_model_handle);
+    const auto after_name_token_read =
+        TryReadEntityModelNameToken(entity, offsets, after_model_name_token);
+    const auto after_name_read =
+        TryReadEntityModelNameString(entity, offsets, after_model_name);
+    const auto verified = invoked && after_handle_read && after_model_handle != 0 &&
+        after_name_read && ModelIdentityPathMatches(after_model_name, desired_model_name);
+
+    std::wstringstream stream;
+    stream << L"CEconWearable client SetModel for XUID " << xuid
+        << L": entity=" << entity_index
+        << L", entity_pointer=" << FormatPointer(entity)
+        << L", set_model=" << FormatClientRelativeCodePointer(set_model)
+        << L", target=" << NarrowToWide(desired_model_name)
+        << L", before_handle=0x" << std::hex << std::uppercase << before_model_handle
+        << L", after_handle=0x" << after_model_handle
+        << L", before_name_token=0x" << before_model_name_token
+        << L", after_name_token=0x" << after_model_name_token
+        << std::dec << std::nouppercase
+        << L", after_name_token_read=" << (after_name_token_read ? 1 : 0)
+        << L", after_name="
+        << (after_name_read ? NarrowToWide(after_model_name) : L"<unreadable>")
+        << L", invoked=" << (invoked ? 1 : 0)
+        << L", verified=" << (verified ? 1 : 0)
+        << L", one_shot=1.";
+    if (verified)
+    {
+        LogProfileDiagnosticOnce(attempt_signature ^ 0x03ull, stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x04ull, stream.str());
+    }
+    return verified;
+}
+
+bool TryInitializeWearableModelThroughFormalBind(
+    const int entity_index,
+    void* entity,
+    const ClientSchemaOffsets& offsets,
+    const std::string& desired_model_name,
+    const std::uint64_t signature,
+    const std::uint64_t xuid)
+{
+    const auto diagnostic_base = signature ^
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(entity_index)) << 32) ^
+        0x464F524D435458ull;
+    const auto log_context_rejection =
+        [&](const std::uint64_t suffix,
+            const wchar_t* reason,
+            void* scene_node,
+            void* scene_owner,
+            const std::uintptr_t model_state_address,
+            const std::uint64_t model_handle,
+            const std::uint64_t model_name_token,
+            void* skeleton_bind_state_a0)
+        {
+            std::wstringstream stream;
+            stream << L"Formal Wearable model bind context rejected for XUID " << xuid
+                << L": entity=" << entity_index
+                << L", entity_pointer=" << FormatPointer(entity)
+                << L", scene=" << FormatPointer(scene_node)
+                << L", scene_owner=" << FormatPointer(scene_owner)
+                << L", expected_owner=" << FormatPointer(entity)
+                << L", model_state=" << FormatPointer(reinterpret_cast<void*>(model_state_address))
+                << L", expected_model_state="
+                << FormatPointer(
+                    scene_node != nullptr
+                        ? reinterpret_cast<std::uint8_t*>(scene_node) +
+                            static_cast<std::uintptr_t>(offsets.skeleton_instance_model_state)
+                        : nullptr)
+                << L", model_handle=0x" << std::hex << std::uppercase << model_handle
+                << L", model_name_token=0x" << model_name_token
+                << std::dec << std::nouppercase
+                << L", skeleton_bind_state_a0=" << FormatPointer(skeleton_bind_state_a0)
+                << L", demo_playing="
+                << (g_hook_state.demo_playing.load(std::memory_order_acquire) ? 1 : 0)
+                << L", frame_render_pass="
+                << (g_glove_resource_query_frame_render_pass_active ? 1 : 0)
+                << L", seek_window="
+                << (IsKnifeModelPathSwapDemoSeekSafetyWindowActive() ? 1 : 0)
+                << L", reason=" << reason;
+            LogProfileDiagnosticOnce(diagnostic_base ^ suffix, stream.str());
+        };
+
+    if (entity == nullptr || entity_index < 0 || desired_model_name.empty() ||
+        offsets.base_entity_game_scene_node == 0 ||
+        offsets.game_scene_node_owner == 0 ||
+        offsets.skeleton_instance_model_state == 0 ||
+        offsets.model_state_model_handle == 0 ||
+        !g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        !g_glove_resource_query_frame_render_pass_active ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        log_context_rejection(
+            0x01ull,
+            L"formal_bind_prerequisite_unavailable",
+            nullptr,
+            nullptr,
+            0,
+            0,
+            0,
+            nullptr);
+        return false;
+    }
+
+    void* scene_node = nullptr;
+    void* scene_owner = nullptr;
+    void* skeleton_bind_state_a0 = nullptr;
+    std::uintptr_t model_state_address = 0;
+    std::uint64_t before_model_handle = 0;
+    std::uint64_t before_model_name_token = 0;
+    // The unique formal entry at client+0xA6D680 branches on this opaque
+    // CSkeletonInstance field: zero dispatches the initial bind path and
+    // nonzero dispatches CS2's existing-skeleton update path. It is not a
+    // pointer/null readiness gate, so only require that it is readable.
+    constexpr std::ptrdiff_t kSceneOuterToSkeletonOffset = 0x140;
+    constexpr std::ptrdiff_t kSkeletonBindStateOffset = 0xA0;
+    constexpr std::ptrdiff_t kSkeletonBoundRenderObjectOffset = 0xE0;
+    if (!SafeReadField(entity, offsets.base_entity_game_scene_node, scene_node) ||
+        scene_node == nullptr)
+    {
+        log_context_rejection(
+            0x02ull,
+            L"game_scene_node_unavailable",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+    if (!SafeReadField(scene_node, offsets.game_scene_node_owner, scene_owner))
+    {
+        log_context_rejection(
+            0x03ull,
+            L"game_scene_node_owner_unreadable",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+    if (scene_owner != entity)
+    {
+        log_context_rejection(
+            0x04ull,
+            L"game_scene_node_owner_mismatch",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+    if (!TryResolveEntityModelStateAddress(entity, offsets, model_state_address))
+    {
+        log_context_rejection(
+            0x05ull,
+            L"model_state_unavailable",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+    if (model_state_address != reinterpret_cast<std::uintptr_t>(scene_node) +
+            static_cast<std::uintptr_t>(offsets.skeleton_instance_model_state))
+    {
+        log_context_rejection(
+            0x06ull,
+            L"model_state_layout_mismatch",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+    if (!TryReadEntityModelHandle(entity, offsets, before_model_handle))
+    {
+        log_context_rejection(
+            0x07ull,
+            L"model_handle_unreadable",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+    if (!TryReadEntityModelNameToken(entity, offsets, before_model_name_token))
+    {
+        log_context_rejection(
+            0x08ull,
+            L"model_name_token_unreadable",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+    auto* const skeleton_instance =
+        reinterpret_cast<std::uint8_t*>(scene_node) + kSceneOuterToSkeletonOffset;
+    if (!SafeReadValue(
+            skeleton_instance + kSkeletonBindStateOffset,
+            skeleton_bind_state_a0))
+    {
+        log_context_rejection(
+            0x09ull,
+            L"skeleton_bind_state_a0_unreadable",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+
+    if (!nskinzcs2::runtime::ShouldInitializeWearableModel(
+            nskinzcs2::runtime::GloveSlotMode::ModelAndFinish,
+            true,
+            entity_index,
+            true,
+            before_model_handle,
+            true) ||
+        before_model_name_token != 0)
+    {
+        log_context_rejection(
+            0x0Aull,
+            before_model_name_token != 0
+                ? L"model_name_token_already_initialized"
+                : before_model_handle != 0
+                    ? L"model_handle_already_initialized"
+                    : L"wearable_model_initialization_gate_rejected",
+            scene_node,
+            scene_owner,
+            model_state_address,
+            before_model_handle,
+            before_model_name_token,
+            skeleton_bind_state_a0);
+        return false;
+    }
+
+    void* formal_entry = nullptr;
+    void* dispatcher = nullptr;
+    void* lower_bind_model = nullptr;
+    if (!TryResolveFormalSkeletonModelBindChain(
+            formal_entry,
+            dispatcher,
+            lower_bind_model))
+    {
+        std::wstringstream stream;
+        stream << L"Formal Wearable model bind rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", reason=unique_formal_bind_call_chain_unavailable";
+        WarnOnceForRuntimeSignature(signature ^ 0x464F524D434841ull, stream.str());
+        return false;
+    }
+
+    // Every direct caller of the unique entry forms the arguments as shown
+    // below. The schema m_pGameSceneNode is the scene outer itself: its vtable
+    // slot 10 is the unique native initializer that contains this exact call.
+    // The CSkeletonInstance is embedded at outer+0x140; subtracting 0x140 from
+    // m_pGameSceneNode was the previous, reversed interpretation.
+    //   RCX = scene_outer + 0x140 (CSkeletonInstance)
+    //   R8  = scene_outer
+    //   R9  = scene_outer + 0x10
+    constexpr std::ptrdiff_t kSceneOuterIdentityContextOffset = 0x10;
+    constexpr std::ptrdiff_t kSceneOuterModelProviderOffset = 0x30;
+    constexpr std::ptrdiff_t kSceneOuterUpdateResourceOffset = 0x1E0;
+    constexpr std::size_t kModelProviderGetModelVtableSlot = 0x210 / sizeof(void*);
+    const auto scene_address = reinterpret_cast<std::uintptr_t>(scene_node);
+    auto* const scene_outer = reinterpret_cast<std::uint8_t*>(scene_node);
+    auto* const identity_context =
+        scene_outer + kSceneOuterIdentityContextOffset;
+    void** scene_outer_vtable = nullptr;
+    void* scene_model_initializer = nullptr;
+    void* model_provider = nullptr;
+    void** model_provider_vtable = nullptr;
+    void* model_provider_get_model = nullptr;
+    void* update_resource = nullptr;
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto initializer_calls_formal_entry =
+        [&]() noexcept
+        {
+            if (!SafeReadValue(scene_outer, scene_outer_vtable) ||
+                scene_outer_vtable == nullptr ||
+                !SafeReadValue(scene_outer_vtable + 10, scene_model_initializer) ||
+                scene_model_initializer == nullptr ||
+                !IsExecutablePointer(scene_model_initializer) ||
+                client_module == nullptr ||
+                GetModuleFromAddress(scene_model_initializer) != client_module)
+            {
+                return false;
+            }
+
+            const auto client_text = GetTextSectionSpan(client_module);
+            if (!client_text.has_value())
+            {
+                return false;
+            }
+            const auto* const text_end = client_text->base + client_text->size;
+            auto* const initializer = static_cast<std::uint8_t*>(scene_model_initializer);
+            if (initializer < client_text->base || initializer >= text_end)
+            {
+                return false;
+            }
+            const auto available = static_cast<std::size_t>(text_end - initializer);
+            const auto scan_size = std::min<std::size_t>(available, 0x500);
+            for (std::size_t offset = 0; offset + 5 <= scan_size; ++offset)
+            {
+                if (initializer[offset] != 0xE8)
+                {
+                    continue;
+                }
+                std::int32_t displacement = 0;
+                if (!SafeReadValue(initializer + offset + 1, displacement))
+                {
+                    continue;
+                }
+                if (initializer + offset + 5 + displacement == formal_entry)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }();
+    if (!initializer_calls_formal_entry ||
+        !SafeReadValue(scene_outer + kSceneOuterModelProviderOffset, model_provider) ||
+        model_provider == nullptr ||
+        !SafeReadValue(model_provider, model_provider_vtable) ||
+        model_provider_vtable == nullptr ||
+        !SafeReadValue(
+            model_provider_vtable + kModelProviderGetModelVtableSlot,
+            model_provider_get_model) ||
+        model_provider_get_model == nullptr ||
+        !IsExecutablePointer(model_provider_get_model) ||
+        client_module == nullptr ||
+        GetModuleFromAddress(model_provider_get_model) != client_module ||
+        !SafeReadValue(scene_outer + kSceneOuterUpdateResourceOffset, update_resource))
+    {
+        std::wstringstream stream;
+        stream << L"Formal Wearable scene provider rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", scene=" << FormatPointer(scene_node)
+            << L", scene_outer=" << FormatPointer(scene_outer)
+            << L", skeleton=" << FormatPointer(skeleton_instance)
+            << L", scene_model_initializer=" << FormatClientRelativeCodePointer(scene_model_initializer)
+            << L", initializer_calls_formal_entry=" << (initializer_calls_formal_entry ? 1 : 0)
+            << L", model_provider=" << FormatPointer(model_provider)
+            << L", get_model=" << FormatPointer(model_provider_get_model)
+            << L", update_resource=" << FormatPointer(update_resource)
+            << L", reason=caller_shape_or_provider_unavailable";
+        WarnOnceForRuntimeSignature(signature ^ 0x464F524D50524Full, stream.str());
+        return false;
+    }
+
+    void* provider_model_first = nullptr;
+    void* provider_model_second = nullptr;
+    const auto provider_model_stable =
+        SafeInvokeFunctionPointer(
+            model_provider_get_model,
+            provider_model_first,
+            model_provider) &&
+        SafeInvokeFunctionPointer(
+            model_provider_get_model,
+            provider_model_second,
+            model_provider) &&
+        provider_model_first != nullptr &&
+        provider_model_first == provider_model_second &&
+        IsReadablePointer(provider_model_first);
+    const auto initial_bind_branch = skeleton_bind_state_a0 == nullptr;
+    std::uint8_t provider_model_type = 0;
+    void** provider_model_vtable = nullptr;
+    void* provider_model_first_method = nullptr;
+    const auto provider_model_object_valid =
+        provider_model_stable &&
+        SafeReadValue(provider_model_first, provider_model_vtable) &&
+        provider_model_vtable != nullptr &&
+        SafeReadValue(provider_model_vtable, provider_model_first_method) &&
+        provider_model_first_method != nullptr &&
+        client_module != nullptr &&
+        GetModuleFromAddress(provider_model_vtable) == client_module &&
+        GetModuleFromAddress(provider_model_first_method) == client_module &&
+        IsExecutablePointer(provider_model_first_method) &&
+        SafeReadValue(
+            static_cast<std::uint8_t*>(provider_model_first) + 0x5B,
+            provider_model_type);
+    // The initial branch in the unique native entry reads byte +0x5B from
+    // the provider model and dispatches only types 2..4 or 7..8. A freshly
+    // created Wearable starts at type 0 until the pawn glove-refresh path has
+    // resolved its item definition into a real model resource. Calling the
+    // binder before that point is a harmless no-op, but poisoning that first
+    // attempt permanently prevented the later engine-initialized frame from
+    // succeeding.
+    const auto provider_model_type_ready =
+        provider_model_object_valid &&
+        nskinzcs2::runtime::IsWearableModelSourceTypeReady(provider_model_type);
+    const auto formal_source_ready = initial_bind_branch
+        ? provider_model_type_ready
+        : update_resource != nullptr;
+    if (!formal_source_ready)
+    {
+        std::wstringstream stream;
+        stream << L"Formal Wearable model source unavailable for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", scene=" << FormatPointer(scene_node)
+            << L", scene_outer=" << FormatPointer(scene_outer)
+            << L", branch=" << (initial_bind_branch ? L"initial" : L"existing_skeleton")
+            << L", model_provider=" << FormatPointer(model_provider)
+            << L", provider_model_first=" << FormatPointer(provider_model_first)
+            << L", provider_model_second=" << FormatPointer(provider_model_second)
+            << L", provider_model_vtable=" << FormatPointer(provider_model_vtable)
+            << L", provider_model_type=" << static_cast<unsigned int>(provider_model_type)
+            << L", provider_model_object_valid=" << (provider_model_object_valid ? 1 : 0)
+            << L", provider_model_type_ready=" << (provider_model_type_ready ? 1 : 0)
+            << L", update_resource=" << FormatPointer(update_resource)
+            << L", reason=entity_model_source_waiting_for_definition_refresh";
+        WarnOnceForRuntimeSignature(signature ^ 0x464F524D534F55ull, stream.str());
+        return false;
+    }
+
+    const auto invoke_signature = signature ^
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(entity_index)) << 32) ^
+        static_cast<std::uint64_t>(scene_address);
+    if (g_hook_state.rejected_wearable_model_bind_signatures.contains(invoke_signature))
+    {
+        return false;
+    }
+
+    void* before_bound_render_object = nullptr;
+    SafeReadValue(
+        skeleton_instance + kSkeletonBoundRenderObjectOffset,
+        before_bound_render_object);
+
+    std::uintptr_t bind_return = 0;
+    const auto bind_invoked = SafeInvokeFunctionPointer(
+        formal_entry,
+        bind_return,
+        skeleton_instance,
+        static_cast<void*>(nullptr),
+        scene_outer,
+        identity_context);
+
+    std::uint64_t after_model_handle = 0;
+    std::uint64_t after_model_name_token = 0;
+    void* after_bound_render_object = nullptr;
+    std::string after_model_name;
+    const auto handle_verified =
+        TryReadEntityModelHandle(entity, offsets, after_model_handle) &&
+        after_model_handle != 0;
+    const auto name_token_read =
+        TryReadEntityModelNameToken(entity, offsets, after_model_name_token);
+    const auto name_read =
+        TryReadEntityModelNameString(entity, offsets, after_model_name);
+    const auto render_object_verified =
+        SafeReadValue(
+            skeleton_instance + kSkeletonBoundRenderObjectOffset,
+            after_bound_render_object) &&
+        after_bound_render_object != nullptr;
+    const auto model_name_matches =
+        name_read && ModelIdentityPathMatches(after_model_name, desired_model_name);
+    const auto verified =
+        bind_invoked && handle_verified && render_object_verified && model_name_matches;
+
+    if (!verified)
+    {
+        // The formal CS2 call owns any partial transition. Do not patch fields
+        // or invoke an unverified rollback ABI; poison this exact entity/model
+        // pair so later frames remain fail-closed.
+        g_hook_state.rejected_wearable_model_bind_signatures.insert(invoke_signature);
+    }
+
+    std::wstringstream stream;
+    stream << L"Formal CEconWearable skeleton model bind for XUID " << xuid
+        << L": entity=" << entity_index
+        << L", scene=" << FormatPointer(scene_node)
+        << L", model_state=" << FormatPointer(reinterpret_cast<void*>(model_state_address))
+        << L", target=" << NarrowToWide(desired_model_name)
+        << L", before_handle=0x" << std::hex << std::uppercase << before_model_handle
+        << L", after_handle=0x" << after_model_handle
+        << L", before_name_token=0x" << before_model_name_token
+        << L", after_name_token=0x" << after_model_name_token
+        << std::dec << std::nouppercase
+        << L", scene_outer=" << FormatPointer(scene_outer)
+        << L", skeleton=" << FormatPointer(skeleton_instance)
+        << L", identity_context=" << FormatPointer(identity_context)
+        << L", branch=" << (initial_bind_branch ? L"initial" : L"existing_skeleton")
+        << L", model_provider=" << FormatPointer(model_provider)
+        << L", provider_model=" << FormatPointer(provider_model_first)
+        << L", provider_model_type=" << static_cast<unsigned int>(provider_model_type)
+        << L", update_resource=" << FormatPointer(update_resource)
+        << L", formal_entry=" << FormatPointer(formal_entry)
+        << L", scene_model_initializer=" << FormatClientRelativeCodePointer(scene_model_initializer)
+        << L", dispatcher=" << FormatPointer(dispatcher)
+        << L", lower_bind_model=" << FormatPointer(lower_bind_model)
+        << L", before_render_object=" << FormatPointer(before_bound_render_object)
+        << L", after_render_object=" << FormatPointer(after_bound_render_object)
+        << L", return=0x" << std::hex << std::uppercase << bind_return
+        << std::dec << std::nouppercase
+        << L", invoked=" << (bind_invoked ? 1 : 0)
+        << L", handle_verified=" << (handle_verified ? 1 : 0)
+        << L", name_token_read=" << (name_token_read ? 1 : 0)
+        << L", model_name_matches=" << (model_name_matches ? 1 : 0)
+        << L", render_object_verified=" << (render_object_verified ? 1 : 0)
+        << L", verified=" << (verified ? 1 : 0);
+    LogProfileDiagnosticOnce(
+        invoke_signature ^ (verified ? 0x464F524D4F4Bull : 0x464F524D4641ull),
+        stream.str());
+    return verified;
+}
+
+bool TryWriteGloveSyntheticRenderProxyModelState(
+    const int entity_index,
+    void* entity,
+    const ClientSchemaOffsets& offsets,
+    const std::string& desired_model_name,
+    const std::uint64_t signature,
+    const std::uint64_t xuid)
+{
+    if (entity == nullptr || desired_model_name.empty() ||
+        !IsSyntheticRuntimeEntityIndex(entity_index) ||
+        offsets.model_state_model_name == 0 || offsets.model_state_model_handle == 0)
+    {
+        return false;
+    }
+
+    std::uintptr_t model_state_address = 0;
+    std::uint64_t before_name_token = 0;
+    std::uint64_t before_handle = 0;
+    std::string before_name;
+    if (!TryResolveEntityModelStateAddress(entity, offsets, model_state_address) ||
+        model_state_address == 0 ||
+        !TryReadEntityModelNameToken(entity, offsets, before_name_token) ||
+        before_name_token == 0 ||
+        !TryReadEntityModelHandle(entity, offsets, before_handle) ||
+        before_handle == 0 ||
+        !TryReadEntityModelNameString(entity, offsets, before_name) ||
+        before_name.empty())
+    {
+        return false;
+    }
+
+    if (ModelIdentityPathMatches(before_name, desired_model_name))
+    {
+        return true;
+    }
+
+    std::uint64_t desired_handle = 0;
+    std::wstring desired_handle_source;
+    std::wstring desired_handle_reason;
+    const auto handle_resolved = TryResolveGloveDirectRenderModelHandleAtSafePoint(
+        desired_model_name,
+        before_name,
+        before_handle,
+        xuid,
+        desired_handle,
+        desired_handle_source,
+        desired_handle_reason,
+        true);
+    const auto* persistent_name =
+        handle_resolved && desired_handle != 0
+            ? RememberPersistentModelName(desired_model_name)
+            : nullptr;
+
+    if (persistent_name == nullptr)
+    {
+        std::wstringstream stream;
+        stream << L"Glove guarded first-person model rebind rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", current=" << NarrowToWide(before_name)
+            << L", target=" << NarrowToWide(desired_model_name)
+            << L", reason="
+            << (desired_handle_reason.empty() ? L"target_resource_handle_unavailable" : desired_handle_reason);
+        WarnOnceForRuntimeSignature(signature ^ 0x47A1ull, stream.str());
+        return false;
+    }
+
+    // The unique signature historically labelled BindModel is the internal
+    // render-instance factory.  Calling it as (service, path) corrupts the
+    // six-argument ABI.  Resolve the real CModelState::SetupModel wrapper and
+    // let CS2 perform the render-instance transition after the strongly typed
+    // model state has been staged below.
+    void* scene_node = nullptr;
+    auto* setup_model = static_cast<std::uint8_t*>(nullptr);
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_text = GetTextSectionSpan(client_module);
+    if (offsets.base_entity_game_scene_node != 0 &&
+        SafeReadField(entity, offsets.base_entity_game_scene_node, scene_node) &&
+        scene_node != nullptr &&
+        client_text.has_value())
+    {
+        setup_model = FindUniquePattern(
+            *client_text,
+            nskinzcs2::compatibility::kModelStateSetupModelPattern);
+    }
+
+    const auto expected_model_state =
+        scene_node != nullptr
+            ? reinterpret_cast<std::uintptr_t>(scene_node) +
+                  static_cast<std::uintptr_t>(offsets.skeleton_instance_model_state)
+            : 0;
+    if (setup_model == nullptr ||
+        !IsExecutablePointer(setup_model) ||
+        GetModuleFromAddress(setup_model) != client_module ||
+        expected_model_state != model_state_address)
+    {
+        std::wstringstream stream;
+        stream << L"Glove formal CModelState::SetupModel rebind rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", setup=" << FormatPointer(setup_model)
+            << L", scene=" << FormatPointer(scene_node)
+            << L", model_state=" << FormatPointer(reinterpret_cast<void*>(model_state_address))
+            << L", expected_state=" << FormatPointer(reinterpret_cast<void*>(expected_model_state))
+            << L", reason=setup_model_context_validation_failed";
+        WarnOnceForRuntimeSignature(signature ^ 0x47A4ull, stream.str());
+        return false;
+    }
+
+    // CStrongHandle assignment is not a raw pointer store. The engine's own
+    // assignment sites take a reference on the new ResourceBinding at +0x20
+    // before the owning field becomes observable. Without that reference the
+    // blocking-preload result can be reclaimed immediately after SetupModel,
+    // which leaves the next render pass dereferencing a freed binding. Keep
+    // the previous binding referenced for this experimental demo-only path;
+    // releasing it safely requires the private ResourceSystem owner used by
+    // the generated CStrongHandle destructor and is preferable to a UAF.
+    LONG desired_reference_count_before = 0;
+    LONG desired_reference_count_after = 0;
+    bool desired_reference_acquired = false;
+    desired_reference_acquired = SafeIncrementResourceBindingRefCount(
+        desired_handle,
+        desired_reference_count_before,
+        desired_reference_count_after);
+
+    if (!desired_reference_acquired)
+    {
+        std::wstringstream stream;
+        stream << L"Glove formal CStrongHandle acquisition rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", handle=0x" << std::hex << std::uppercase << desired_handle
+            << L", ref_before=" << std::dec << desired_reference_count_before
+            << L", ref_after=" << desired_reference_count_after;
+        WarnOnceForRuntimeSignature(signature ^ 0x47A5ull, stream.str());
+        return false;
+    }
+
+    const auto wrote_name = SafeWriteValue(
+        reinterpret_cast<void*>(model_state_address + offsets.model_state_model_name),
+        reinterpret_cast<std::uintptr_t>(persistent_name));
+    const auto wrote_handle = wrote_name && SafeWriteValue(
+        reinterpret_cast<void*>(model_state_address + offsets.model_state_model_handle),
+        desired_handle);
+
+    std::uintptr_t setup_return = 0;
+    const auto setup_invoked = wrote_handle && SafeInvokeFunctionPointer(
+        setup_model,
+        setup_return,
+        reinterpret_cast<void*>(model_state_address),
+        static_cast<void*>(nullptr),
+        scene_node,
+        reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(scene_node) + 0x10u));
+
+    std::string after_name;
+    std::uint64_t after_handle = 0;
+    const auto verified = setup_invoked &&
+        TryReadEntityModelNameString(entity, offsets, after_name) &&
+        ModelIdentityPathMatches(after_name, desired_model_name) &&
+        TryReadEntityModelHandle(entity, offsets, after_handle) &&
+        after_handle == desired_handle;
+
+    if (!verified)
+    {
+        // Both original values came from this still-live model state in this
+        // call. Restore immediately and ask CS2 to bind the original model
+        // again; no snapshot is retained across a seek.
+        const auto restored_name = SafeWriteValue(
+            reinterpret_cast<void*>(model_state_address + offsets.model_state_model_name),
+            before_name_token);
+        const auto restored_handle = SafeWriteValue(
+            reinterpret_cast<void*>(model_state_address + offsets.model_state_model_handle),
+            before_handle);
+        std::uintptr_t rollback_return = 0;
+        if (restored_name && restored_handle && setup_invoked)
+        {
+            SafeInvokeFunctionPointer(
+                setup_model,
+                rollback_return,
+                reinterpret_cast<void*>(model_state_address),
+                static_cast<void*>(nullptr),
+                scene_node,
+                reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(scene_node) + 0x10u));
+        }
+    }
+
+    std::wstringstream stream;
+    stream << L"Glove guarded first-person model rebind for XUID " << xuid
+        << L": entity=" << entity_index
+        << L", current=" << NarrowToWide(before_name)
+        << L", target=" << NarrowToWide(desired_model_name)
+        << L", handle_source=" << desired_handle_source
+        << L", wrote_name=" << (wrote_name ? 1 : 0)
+        << L", wrote_handle=" << (wrote_handle ? 1 : 0)
+        << L", target_ref_before=" << desired_reference_count_before
+        << L", target_ref_after=" << desired_reference_count_after
+        << L", previous_ref_retained=1"
+        << L", setup_model=" << FormatPointer(setup_model)
+        << L", setup_invoked=" << (setup_invoked ? 1 : 0)
+        << L", verified=" << (verified ? 1 : 0)
+        << (verified ? L", rollback=not_needed" : L", rollback=completed");
+    LogProfileDiagnosticOnce(signature ^ (verified ? 0x47A2ull : 0x47A3ull), stream.str());
     return verified;
 }
 
@@ -42970,7 +47088,7 @@ nskinzcs2::runtime::ResolvedGloveRenderBinding ResolveGloveRenderBinding(
         binding.carrier_entity_index = player_binding.pawn_entity_index;
     }
 
-    binding.valid = binding.has_world_render;
+    binding.valid = binding.has_world_render || binding.has_first_person_render;
     return binding;
 }
 
@@ -43314,7 +47432,8 @@ bool ApplyGloveFinishToPawnEconGloves(
                 glove_item_view,
                 offsets.item_view_dynamic_attribute_list,
                 offsets,
-                desired_attributes);
+                desired_attributes,
+                false);
         const auto install_into_static =
             !install_into_dynamic &&
             offsets.item_view_attribute_list != 0 &&
@@ -43322,7 +47441,8 @@ bool ApplyGloveFinishToPawnEconGloves(
                 glove_item_view,
                 offsets.item_view_attribute_list,
                 offsets,
-                desired_attributes);
+                desired_attributes,
+                false);
         success = (install_into_dynamic || install_into_static) && field_write_succeeded;
     }
 
@@ -43354,7 +47474,7 @@ std::wstring BuildGloveFinishVerifyLine(
     }
 
     std::wstringstream stream;
-    stream << L"Verified glove finish slot: pawn_entity=" << pawn_entity_index
+    stream << L"Verified pawn glove appearance slot: pawn_entity=" << pawn_entity_index
         << L", item_view=" << FormatPointer(glove_item_view)
         << L", definition=" << definition_index
         << L", attr_paint=" << ReadAttributeValueOrDefault(glove_item_view, offsets, kAttributePaintKit, -1.0f)
@@ -44146,6 +48266,43 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
         return false;
     }
 
+    if (UsesTemporaryWorldWeaponRefreshModel(profile) &&
+        original.size < attributes.size() &&
+        offsets.attribute_list_attributes_operation != nullptr &&
+        offsets.attribute_list_attributes_element_size == attribute_stride)
+    {
+        const auto missing_count = attributes.size() - static_cast<std::size_t>(original.size);
+        const auto append_succeeded =
+            missing_count <= static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) &&
+            TryInvokeNetworkVectorOperation(
+                offsets.attribute_list_attributes_operation,
+                4,
+                vector_address,
+                static_cast<std::int32_t>(original.size),
+                static_cast<std::int32_t>(missing_count));
+
+        RefreshAttributeVector expanded {};
+        if (!append_succeeded ||
+            !SafeReadValue(vector_address, expanded) ||
+            expanded.size != original.size + missing_count ||
+            expanded.ptr == 0)
+        {
+            return false;
+        }
+
+        const auto diagnostic_signature =
+            BuildProfileApplySignature(profile, profile.xuid, profile.base_item, 0x4154545247524F57ull);
+        std::wstringstream stream;
+        stream << L"Expanded the standard-weapon attribute vector through its verified Schema operation"
+            << L": previous_count=" << original.size
+            << L", new_count=" << expanded.size
+            << L", element_size=" << attribute_stride
+            << L", schema_tail_span="
+            << offsets.attribute_list_attributes_schema_tail_span << L".";
+        LogProfileDiagnosticOnce(diagnostic_signature, stream.str());
+        original = expanded;
+    }
+
     if (offsets.item_view_restore_custom_material_after_precache != 0)
     {
         bool restore_custom_material = false;
@@ -44168,6 +48325,94 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
     attachment.original = original;
     attachment.replaced_existing_vector = original.size != 0 || original.ptr != 0;
 
+    // Standard-weapon material generation is deferred beyond the refresh
+    // helper call, so its paint attributes must remain visible.  Publishing a
+    // VirtualAlloc-backed CUtlVector is unsafe across demo seeks because CS2
+    // can destroy the entity before we observe the tick discontinuity.  Reuse
+    // the entity-owned records instead; their allocator ownership then remains
+    // intact when the demo tears the entity down.
+    if (UsesTemporaryWorldWeaponRefreshModel(profile) &&
+        original.ptr != 0 &&
+        original.size >= attributes.size())
+    {
+        const auto byte_count = static_cast<std::size_t>(original.size) * attribute_stride;
+        attachment.in_place_original_bytes.resize(byte_count);
+        if (!SafeReadBytes(
+                reinterpret_cast<const void*>(original.ptr),
+                attachment.in_place_original_bytes.data(),
+                byte_count))
+        {
+            attachment = {};
+            return false;
+        }
+
+        attachment.in_place_installed_bytes = attachment.in_place_original_bytes;
+        std::vector<bool> used_slots(static_cast<std::size_t>(original.size), false);
+        for (const auto& [definition_index, value] : attributes)
+        {
+            std::size_t selected_slot = static_cast<std::size_t>(original.size);
+            for (std::size_t slot = 0; slot < static_cast<std::size_t>(original.size); ++slot)
+            {
+                if (used_slots[slot])
+                {
+                    continue;
+                }
+
+                std::uint16_t existing_definition_index = 0;
+                if (SafeReadField(
+                        attachment.in_place_installed_bytes.data() + slot * attribute_stride,
+                        offsets.econ_item_attribute_definition_index,
+                        existing_definition_index) &&
+                    existing_definition_index == definition_index)
+                {
+                    selected_slot = slot;
+                    break;
+                }
+            }
+
+            if (selected_slot == static_cast<std::size_t>(original.size))
+            {
+                const auto free_slot = std::find(used_slots.begin(), used_slots.end(), false);
+                if (free_slot == used_slots.end())
+                {
+                    attachment = {};
+                    return false;
+                }
+                selected_slot = static_cast<std::size_t>(std::distance(used_slots.begin(), free_slot));
+            }
+
+            auto* record = attachment.in_place_installed_bytes.data() + selected_slot * attribute_stride;
+            if (!SafeWriteField(record, offsets.econ_item_attribute_definition_index, definition_index) ||
+                !SafeWriteField(record, offsets.econ_item_attribute_value, value) ||
+                (offsets.econ_item_attribute_initial_value != 0 &&
+                    !SafeWriteField(record, offsets.econ_item_attribute_initial_value, value)))
+            {
+                attachment = {};
+                return false;
+            }
+            used_slots[selected_slot] = true;
+        }
+
+        attachment.in_place_address = reinterpret_cast<void*>(original.ptr);
+        attachment.replaced_existing_vector = false;
+        if (!SafeWriteBytes(
+                attachment.in_place_address,
+                attachment.in_place_installed_bytes.data(),
+                attachment.in_place_installed_bytes.size()))
+        {
+            attachment = {};
+            return false;
+        }
+        return true;
+    }
+
+    // The current attribute container is 24 bytes (count, data, capacity and
+    // allocator flags). Publishing a VirtualAlloc block through its 16-byte
+    // prefix corrupts the deferred destructor. In-place overlays above remain
+    // allowed; external temporary storage is fail-closed.
+    return false;
+
+#if 0
     attachment.allocated_size = records.size() * attribute_stride;
     attachment.allocated_block = VirtualAlloc(nullptr, attachment.allocated_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (attachment.allocated_block == nullptr)
@@ -44197,6 +48442,7 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
     }
 
     return true;
+#endif
 }
 
 void RestoreTemporaryWeaponRefreshAttributes(TemporaryAttributeListAttachment& attachment)
@@ -44211,7 +48457,21 @@ void RestoreTemporaryWeaponRefreshAttributes(TemporaryAttributeListAttachment& a
             attachment.restore_custom_material_original);
     }
 
-    if (attachment.vector_address != nullptr)
+    if (attachment.in_place_address != nullptr &&
+        !attachment.in_place_original_bytes.empty() &&
+        attachment.in_place_original_bytes.size() == attachment.in_place_installed_bytes.size())
+    {
+        std::vector<std::uint8_t> current(attachment.in_place_installed_bytes.size());
+        if (SafeReadBytes(attachment.in_place_address, current.data(), current.size()) &&
+            current == attachment.in_place_installed_bytes)
+        {
+            SafeWriteBytes(
+                attachment.in_place_address,
+                attachment.in_place_original_bytes.data(),
+                attachment.in_place_original_bytes.size());
+        }
+    }
+    else if (attachment.vector_address != nullptr)
     {
         SafeWriteValue(attachment.vector_address, attachment.original);
     }
@@ -44382,6 +48642,38 @@ bool TryProcessPendingWeaponRefreshRequests(
                 keychain_profile);
         if (!attached_refresh_attributes && needs_skin_refresh)
         {
+            if (UsesTemporaryWorldWeaponRefreshModel(request.profile))
+            {
+                RefreshAttributeVector observed_vector {};
+                const auto vector_header_readable =
+                    effective_refresh_item_view != nullptr &&
+                    offsets.item_view_attribute_list != 0 &&
+                    offsets.attribute_list_attributes != 0 &&
+                    SafeReadValue(
+                        reinterpret_cast<std::uint8_t*>(effective_refresh_item_view) +
+                            offsets.item_view_attribute_list + offsets.attribute_list_attributes,
+                        observed_vector);
+                std::wstringstream stream;
+                stream << L"Standard-weapon refresh attachment unavailable for entity "
+                    << request.entity_index
+                    << L": econ_attribute_size=" << offsets.econ_item_attribute_size
+                    << L", vector_operation="
+                    << FormatPointer(reinterpret_cast<void*>(offsets.attribute_list_attributes_operation))
+                    << L", vector_element_size=" << offsets.attribute_list_attributes_element_size
+                    << L", vector_schema_tail_span="
+                    << offsets.attribute_list_attributes_schema_tail_span
+                    << L", header_readable=" << (vector_header_readable ? 1 : 0)
+                    << L", current_count=" << (vector_header_readable ? observed_vector.size : 0)
+                    << L", current_data="
+                    << FormatPointer(
+                           vector_header_readable
+                               ? reinterpret_cast<void*>(observed_vector.ptr)
+                               : nullptr)
+                    << L", required_count="
+                    << BuildWeaponRefreshAttributesImpl(request.profile, keychain_profile).size()
+                    << L".";
+                LogProfileDiagnosticOnce(request.desired_signature ^ 0x7331ull, stream.str());
+            }
             if (trace_watched_knife)
             {
                 std::wstringstream stream;
@@ -44600,11 +48892,11 @@ bool TryProcessPendingWeaponRefreshRequests(
                 ScheduleRuntimeOwnedKeychainAttributeBindingRelease(effective_refresh_item_view);
             }
 
-            if (request.keychain_profile.has_value() && UsesTemporaryWorldWeaponRefreshModel(request.profile))
+            if (UsesTemporaryWorldWeaponRefreshModel(request.profile))
             {
-                cleanup_stream << L"Keychain refresh promoted the temporary attribute payload to runtime-owned";
+                cleanup_stream << L"Standard weapon refresh retained the paint attribute payload in runtime-owned";
                 cleanup_stream << L" storage on world weapon entity " << request.entity_index
-                    << L" with a short lease.";
+                    << L" for deferred render material consumption.";
             }
             else
             {
@@ -45862,8 +50154,15 @@ bool DoesAppliedEconItemMatchProfile(
         if (require_legacy_activation_writes && offsets.item_view_item_id_low != 0)
         {
             std::uint32_t actual_item_id_low = 0;
+            const auto expected_item_id_low =
+                IsStandardWeaponProfile(profile)
+                    ? nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey(
+                          profile,
+                          xuid,
+                          current_definition_index)
+                    : 0xFFFFFFFFu;
             if (!SafeReadField(item_view, offsets.item_view_item_id_low, actual_item_id_low) ||
-                actual_item_id_low != 0xFFFFFFFFu)
+                actual_item_id_low != expected_item_id_low)
             {
                 return false;
             }
@@ -46063,7 +50362,13 @@ bool ApplyProfileToEconItem(
         should_write_definition_override ? profile.override_item : current_definition_index);
     const auto quality = static_cast<std::uint8_t>(std::clamp(profile.quality, 0, 255));
     const auto item_id_high = static_cast<std::uint32_t>(0xFFFFFFFFu);
-    const auto item_id_low = static_cast<std::uint32_t>(0xFFFFFFFFu);
+    const auto item_id_low =
+        IsStandardWeaponProfile(profile)
+            ? nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey(
+                  profile,
+                  xuid,
+                  current_definition_index)
+            : static_cast<std::uint32_t>(0xFFFFFFFFu);
     const auto account_id = AccountIdFromXuid(xuid);
     const auto xuid_parts = SplitXuid(xuid);
 
@@ -49556,21 +53861,15 @@ bool TryResolveSchemaOffsets(HMODULE schema_module, void* schema_interface, Clie
         return false;
     }
 
-    auto* instruction = FindPattern(*text_span, "48 89 05 ?? ?? ?? ?? 4C 8D 0D ?? ?? ?? ?? 33 C0 48 C7 05");
+    auto* instruction = FindUniquePattern(*text_span, nskinzcs2::compatibility::kSchemaGlobalPattern);
     if (instruction == nullptr)
     {
         return false;
     }
 
     const auto rel = *reinterpret_cast<std::int32_t*>(instruction + 3);
-    auto** storage = reinterpret_cast<schema::System**>(instruction + 7 + rel);
-    if (storage == nullptr)
-    {
-        return false;
-    }
-
-    schema::System* schema_system = nullptr;
-    if (!SafeReadValue(storage, schema_system))
+    auto* schema_system = reinterpret_cast<schema::System*>(instruction + 7 + rel);
+    if (schema_system == nullptr)
     {
         return false;
     }
@@ -49586,9 +53885,7 @@ bool TryResolveEntitySystemBindings(HMODULE client_module, EntitySystemBindings&
         return false;
     }
 
-    auto* entity_root = FindPattern(
-        *text_span,
-        "40 55 53 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 33 D2 E8 ?? ?? ?? ??");
+    auto* entity_root = FindUniquePattern(*text_span, nskinzcs2::compatibility::kEntitySystemRootPattern);
     if (entity_root == nullptr)
     {
         return false;
@@ -49597,7 +53894,7 @@ bool TryResolveEntitySystemBindings(HMODULE client_module, EntitySystemBindings&
     const auto rel = *reinterpret_cast<std::int32_t*>(entity_root + 21);
     bindings.entity_list_storage = reinterpret_cast<void**>(entity_root + 25 + rel);
 
-    auto* get_entity = FindPattern(*text_span, "4C 8D 49 10 81 FA FE 7F 00 00");
+    auto* get_entity = FindUniquePattern(*text_span, nskinzcs2::compatibility::kGetEntityFromIndexPattern);
     if (get_entity == nullptr)
     {
         bindings = {};
@@ -49651,7 +53948,7 @@ bool TryResolveWeaponSkinRefreshBinding(
         return false;
     }
 
-    auto* function = FindPattern(*text_span, "48 83 EC ? E8 ? ? ? ? 48 85 C0 0F 84 ? ? ? ? 48 8B 10");
+    auto* function = FindUniquePattern(*text_span, nskinzcs2::compatibility::kAttributeHelperPattern);
     if (function == nullptr)
     {
         issue = L"Reference-style RegenerateWeaponSkins signature was not found in client.dll.";
@@ -49778,14 +54075,21 @@ bool TryResolveEngineState(bool& demo_playing, bool& demo_paused, int& demo_tick
         return false;
     }
 
-    if (!SafeInvokeMethod0(g_hook_state.engine_to_client, 41, demo_playing))
+    if (!SafeInvokeMethod0(
+            g_hook_state.engine_to_client,
+            nskinzcs2::compatibility::kEngineIsPlayingDemoVtableIndex,
+            demo_playing))
     {
         issue = L"Failed to query ISource2EngineToClient::IsPlayingDemo().";
         return false;
     }
 
     const char* level_name_short = nullptr;
-    if (SafeInvokeMethod0(g_hook_state.engine_to_client, 63, level_name_short) && level_name_short != nullptr)
+    if (SafeInvokeMethod0(
+            g_hook_state.engine_to_client,
+            nskinzcs2::compatibility::kEngineGetLevelNameShortVtableIndex,
+            level_name_short) &&
+        level_name_short != nullptr)
     {
         level_name = NarrowToWide(level_name_short);
     }
@@ -49796,20 +54100,34 @@ bool TryResolveEngineState(bool& demo_playing, bool& demo_paused, int& demo_tick
     }
 
     void* demo_file = nullptr;
-    if (!SafeInvokeMethod0(g_hook_state.engine_to_client, 67, demo_file) || demo_file == nullptr)
+    if (!SafeInvokeMethod0(
+            g_hook_state.engine_to_client,
+            nskinzcs2::compatibility::kEngineGetDemoFileVtableIndex,
+            demo_file) ||
+        demo_file == nullptr)
     {
         issue = L"Demo playback is active, but ISource2EngineToClient::GetDemoFile() returned null.";
         return false;
     }
 
     bool demo_file_playing = false;
-    if (SafeInvokeMethod0(demo_file, 11, demo_file_playing) && !demo_file_playing)
+    if (SafeInvokeMethod0(
+            demo_file,
+            nskinzcs2::compatibility::kDemoFileIsPlayingVtableIndex,
+            demo_file_playing) &&
+        !demo_file_playing)
     {
         issue = L"Engine reports demo playback, but IDemoFile does not.";
     }
 
-    SafeInvokeMethod0(demo_file, 12, demo_paused);
-    SafeInvokeMethod0(demo_file, 3, demo_tick);
+    SafeInvokeMethod0(
+        demo_file,
+        nskinzcs2::compatibility::kDemoFileIsPausedVtableIndex,
+        demo_paused);
+    SafeInvokeMethod0(
+        demo_file,
+        nskinzcs2::compatibility::kDemoFileGetTickVtableIndex,
+        demo_tick);
     return true;
 }
 
@@ -52569,10 +56887,7 @@ bool IsResourceHandleQueryPrimaryCaller(const void* address) noexcept
         return false;
     }
 
-    const auto offset =
-        reinterpret_cast<std::uintptr_t>(address) -
-        reinterpret_cast<std::uintptr_t>(module_span->base);
-    return offset == kResourceHandleQueryPrimaryCallerEngine2Offset;
+    return IsExecutablePointer(address);
 }
 
 bool TryStepUnwindContextForResourceHandleQuery(CONTEXT& context) noexcept
@@ -68379,6 +72694,49 @@ void PollGameThreadStateModern()
     std::wstring issue;
     TryResolveEngineState(demo_playing, demo_paused, demo_tick, level_name, issue);
 
+    // Snapshot the active configuration before the demo guard.  Previously the
+    // status counter was reset to zero and the configuration was not inspected
+    // until after IsPlayingDemo() succeeded.  That made a valid, armed profile
+    // look disabled while CS2 was in the menu (and hid the real reason no write
+    // was attempted).
+    nskinzcs2::model::ConfigDocument config;
+    std::uint64_t config_revision = 0;
+    if (g_hook_state.app_state != nullptr)
+    {
+        config = g_hook_state.app_state->SnapshotConfig();
+        config_revision = g_hook_state.app_state->ConfigRevision();
+    }
+
+    int configured_enabled_profiles = 0;
+    for (const auto& profile : config.profiles)
+    {
+        if (profile.enabled && profile.xuid != 0 && profile.base_item != 5028)
+        {
+            ++configured_enabled_profiles;
+        }
+    }
+    for (const auto& profile : config.knife_profiles)
+    {
+        if (profile.enabled && profile.xuid != 0)
+        {
+            ++configured_enabled_profiles;
+        }
+    }
+    for (const auto& profile : config.glove_profiles)
+    {
+        if (profile.enabled && profile.xuid != 0)
+        {
+            ++configured_enabled_profiles;
+        }
+    }
+    for (const auto& profile : config.keychain_profiles)
+    {
+        if (profile.enabled && profile.xuid != 0 && profile.keychain_kit > 0)
+        {
+            ++configured_enabled_profiles;
+        }
+    }
+
     if (trace.active())
     {
         std::wstringstream stream;
@@ -68402,7 +72760,7 @@ void PollGameThreadStateModern()
     g_hook_state.preview_character_count.store(0);
     g_hook_state.active_weapon_count.store(0);
     g_hook_state.owned_weapon_count.store(0);
-    g_hook_state.enabled_profile_count.store(0);
+    g_hook_state.enabled_profile_count.store(configured_enabled_profiles);
     g_hook_state.matched_profile_count.store(0);
     g_hook_state.applied_weapon_count.store(0);
     g_hook_state.applied_glove_count.store(0);
@@ -68435,7 +72793,31 @@ void PollGameThreadStateModern()
             g_hook_state.schema_ready.store(true);
             if (!g_hook_state.schema_logged.exchange(true))
             {
-                nskinzcs2::Logger::Info(L"Bound client.dll schema offsets through Source 2 schema reflection.");
+                std::wstringstream stream;
+                stream << L"Bound client.dll schema offsets through Source 2 schema reflection"
+                    << L": m_hMyWearables=0x" << std::hex << std::uppercase
+                    << static_cast<std::uint64_t>(offsets.combat_character_my_wearables)
+                    << L", vector_operation="
+                    << FormatPointer(reinterpret_cast<void*>(offsets.combat_character_my_wearables_operation))
+                    << std::dec << std::nouppercase
+                    << L", element_size=" << offsets.combat_character_my_wearables_element_size
+                    << L", storage_size=" << offsets.combat_character_my_wearables_storage_size
+                    << L", append_ready="
+                    << (offsets.combat_character_my_wearables_operation != nullptr &&
+                        offsets.combat_character_my_wearables_element_size == sizeof(std::uint32_t) &&
+                        offsets.combat_character_my_wearables_storage_size == 0x18 ? 1 : 0)
+                    << L", econ_attribute_size=" << offsets.econ_item_attribute_size
+                    << L", econ_attribute_vector_operation="
+                    << FormatPointer(reinterpret_cast<void*>(offsets.attribute_list_attributes_operation))
+                    << L", econ_attribute_vector_element_size="
+                    << offsets.attribute_list_attributes_element_size
+                    << L", econ_attribute_vector_schema_tail_span="
+                    << offsets.attribute_list_attributes_schema_tail_span
+                    << L", econ_attribute_append_ready="
+                    << (offsets.attribute_list_attributes_operation != nullptr &&
+                        offsets.attribute_list_attributes_element_size == offsets.econ_item_attribute_size ? 1 : 0)
+                    << L".";
+                nskinzcs2::Logger::Info(stream.str());
             }
         }
         else
@@ -68483,14 +72865,10 @@ void PollGameThreadStateModern()
 
     trace.Step(L"Schema/entity bindings ready; live entity list resolved.");
 
-    nskinzcs2::model::ConfigDocument config;
     nskinzcs2::model::Catalog catalog;
-    std::uint64_t config_revision = 0;
     if (g_hook_state.app_state != nullptr)
     {
-        config = g_hook_state.app_state->SnapshotConfig();
         catalog = g_hook_state.app_state->SnapshotCatalog();
-        config_revision = g_hook_state.app_state->ConfigRevision();
     }
 
     if (trace.active())
@@ -68937,7 +73315,32 @@ void PollGameThreadStateModern()
             observer_resolution,
             bridge_resolution,
             heuristic_watched_xuid);
-    const auto watched_xuid = watched_resolution.watched_xuid;
+    const auto raw_watched_xuid = watched_resolution.watched_xuid;
+    auto watched_xuid = raw_watched_xuid;
+    constexpr std::uint32_t kWatchedXuidMissingConfirmationThreshold = 3;
+    const auto previous_watched_xuid = runtime_entities.last_watched_xuid;
+    const auto previous_watched_is_live_target =
+        previous_watched_xuid != 0 &&
+        target_xuids.contains(previous_watched_xuid) &&
+        pawn_entities_by_xuid.contains(previous_watched_xuid);
+    if (raw_watched_xuid == 0 && previous_watched_is_live_target)
+    {
+        runtime_entities.watched_xuid_missing_confirmations =
+            std::min(
+                runtime_entities.watched_xuid_missing_confirmations + 1u,
+                kWatchedXuidMissingConfirmationThreshold);
+        // The observer/viewmodel bridges can briefly report no watched
+        // player while the previously confirmed pawn remains live. Treating
+        // that transient zero as a switch tears down m_hMyWearables and
+        // creates an orphan wearable. Preserve the last confirmed target
+        // until a new non-zero target is observed or the old pawn disappears;
+        // seek and entity-list changes have independent rebuild reasons.
+        watched_xuid = previous_watched_xuid;
+    }
+    else
+    {
+        runtime_entities.watched_xuid_missing_confirmations = 0;
+    }
     g_hook_state.watched_xuid.store(watched_xuid);
     if (watched_xuid != 0)
     {
@@ -68993,6 +73396,9 @@ void PollGameThreadStateModern()
     {
         std::wstringstream stream;
         stream << L"Watched player resolved: watched_xuid=" << watched_xuid
+            << L", raw_watched_xuid=" << raw_watched_xuid
+            << L", missing_confirmations="
+            << runtime_entities.watched_xuid_missing_confirmations
             << L", watched_source=" << watched_resolution.resolution_source
             << L", heuristic_watched_xuid=" << heuristic_watched_xuid
             << L", observer_state="
@@ -69038,7 +73444,14 @@ void PollGameThreadStateModern()
             rebuild_decision.reason == nskinzcs2::runtime::RuntimeRebuildReason::FullUpdate;
         constexpr std::uint64_t kSeekRebuildStabilizationDelayMs = 2500;
         constexpr std::uint64_t kKeychainCreatePostSeekCooldownMs = 5000;
-        ResetRuntimeState(rebuild_reason, AttributeBindingReleaseModeForRebuildReason(rebuild_decision.reason));
+        const auto rebuild_invalidates_wearable_factory =
+            rebuild_decision.reason == nskinzcs2::runtime::RuntimeRebuildReason::DemoSeek ||
+            rebuild_decision.reason == nskinzcs2::runtime::RuntimeRebuildReason::FullUpdate ||
+            rebuild_decision.reason == nskinzcs2::runtime::RuntimeRebuildReason::EntityListChanged;
+        ResetRuntimeState(
+            rebuild_reason,
+            AttributeBindingReleaseModeForRebuildReason(rebuild_decision.reason),
+            rebuild_invalidates_wearable_factory);
         UpdateKnifeRefreshHelperEpochForRebuildReason(rebuild_decision.reason);
         runtime_entities.last_demo_tick = demo_tick;
         runtime_entities.last_demo_paused = demo_paused;
@@ -69108,19 +73521,19 @@ void PollGameThreadStateModern()
         {
             runtime_entities.wearable_client_factory = cached_binding;
             runtime_entities.client_entity_factory = RuntimeFeatureAvailability::Available;
-            trace.Step(L"Adopted CEconWearable client class factory from background resolution cache.");
+            trace.Step(L"Adopted CEconWearable client class factory from the FRAME_RENDER_PASS validation cache.");
         }
         else if (cached_availability == RuntimeFeatureAvailability::Unavailable)
         {
             runtime_entities.client_entity_factory = RuntimeFeatureAvailability::Unavailable;
             runtime_entities.wearable_client_factory = {};
-            trace.Step(L"CEconWearable client class factory remains unresolved after background resolution attempt.");
+            trace.Step(L"CEconWearable client class factory remains unavailable after FRAME_RENDER_PASS validation.");
         }
         else
         {
             runtime_entities.client_entity_factory = RuntimeFeatureAvailability::Unknown;
             runtime_entities.wearable_client_factory = {};
-            trace.Step(L"CEconWearable client class factory pending background resolution; render path skipped fast scan.");
+            trace.Step(L"CEconWearable client class factory pending consecutive FRAME_RENDER_PASS validation.");
         }
     }
 
@@ -70937,14 +75350,30 @@ void PollGameThreadStateModern()
                 }
             }
 
-            if (request.mode == nskinzcs2::runtime::GloveSlotMode::FinishOnly)
+            // Current CS2 derives both the glove family and finish from the
+            // pawn-owned m_EconGloves item view, then rebuilds its first-person
+            // presentation when m_bNeedToReApplyGloves / m_nEconGlovesChanged
+            // changes. Prefer that native path for model_and_finish as well as
+            // finish_only; the CEconWearable factory path below remains a
+            // compatibility fallback for builds without the pawn item view.
+            void* direct_pawn_glove_item_view =
+                ResolveGloveItemView(player_binding.pawn_entity, g_hook_state.schema_offsets);
+            int direct_pawn_glove_definition_index = 0;
+            const auto direct_pawn_glove_valid =
+                direct_pawn_glove_item_view != nullptr &&
+                TryReadItemDefinitionIndex(
+                    direct_pawn_glove_item_view,
+                    g_hook_state.schema_offsets,
+                    direct_pawn_glove_definition_index) &&
+                direct_pawn_glove_definition_index > 0 &&
+                glove_definition_indices.contains(direct_pawn_glove_definition_index);
+            if (request.mode == nskinzcs2::runtime::GloveSlotMode::FinishOnly ||
+                (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                 direct_pawn_glove_valid))
             {
-                void* glove_item_view = ResolveGloveItemView(player_binding.pawn_entity, g_hook_state.schema_offsets);
-                int current_definition_index = 0;
-                const auto carrier_valid =
-                    glove_item_view != nullptr &&
-                    TryReadItemDefinitionIndex(glove_item_view, g_hook_state.schema_offsets, current_definition_index) &&
-                    current_definition_index > 0;
+                void* glove_item_view = direct_pawn_glove_item_view;
+                const auto current_definition_index = direct_pawn_glove_definition_index;
+                const auto carrier_valid = direct_pawn_glove_valid;
                 const auto glove_signature =
                     BuildGloveProfileApplySignature(
                         *glove_profile,
@@ -70973,6 +75402,14 @@ void PollGameThreadStateModern()
                 compatibility_inputs.compatible_paint_definition =
                     CompatibleGloveDefinitionForPaint(catalog, request.paint_kit);
                 compatibility_inputs.carrier_valid = carrier_valid;
+                if (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                    request.model_definition != 0)
+                {
+                    const auto visual_it = catalog.visuals.find(request.model_definition);
+                    compatibility_inputs.target_model_known =
+                        visual_it != catalog.visuals.end() &&
+                        (!visual_it->second.world_model.empty() || !visual_it->second.view_model.empty());
+                }
                 const auto compatibility = nskinzcs2::runtime::EvaluateGloveCompatibility(compatibility_inputs);
 
                 std::wstringstream compatibility_stream;
@@ -71044,20 +75481,18 @@ void PollGameThreadStateModern()
 
                 bool verification_passed = false;
                 std::wstring verification_issue;
-                if (request.mode == nskinzcs2::runtime::GloveSlotMode::FinishOnly)
+                nskinzcs2::runtime::GloveRenderVerificationInputs verification_inputs;
+                verification_inputs.mode = request.mode;
+                verification_inputs.pawn_econ_gloves_reapply_path = true;
+                verification_inputs.carrier_field_readback_matched = carrier_field_readback_matched;
+                verification_inputs.reapply_triggered = reapply_triggered;
+                const auto verification =
+                    nskinzcs2::runtime::EvaluateGloveRenderVerification(verification_inputs);
+                verification_passed = verification.verified;
+                if (!verification.verified)
                 {
-                    nskinzcs2::runtime::GloveRenderVerificationInputs verification_inputs;
-                    verification_inputs.mode = request.mode;
-                    verification_inputs.carrier_field_readback_matched = carrier_field_readback_matched;
-                    verification_inputs.reapply_triggered = reapply_triggered;
-                    const auto verification =
-                        nskinzcs2::runtime::EvaluateGloveRenderVerification(verification_inputs);
-                    verification_passed = verification.verified;
-                    if (!verification.verified)
-                    {
-                        verification_issue =
-                            nskinzcs2::runtime::GloveRenderVerificationReasonText(verification.reason);
-                    }
+                    verification_issue =
+                        nskinzcs2::runtime::GloveRenderVerificationReasonText(verification.reason);
                 }
                 if (!verification_passed)
                 {
@@ -71096,7 +75531,10 @@ void PollGameThreadStateModern()
                     << L", wear=" << request.wear
                     << L", seed=" << request.seed
                     << L", quality=" << request.quality
-                    << L", mode=finish_only";
+                    << L", mode="
+                    << (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish
+                            ? L"model_and_finish"
+                            : L"finish_only");
                 LogProfileDiagnosticOnce(glove_signature ^ 0x1Bull, applied_stream.str());
                 continue;
             }
@@ -71126,6 +75564,44 @@ void PollGameThreadStateModern()
                     carrier,
                     glove_entity,
                     glove_item_view);
+
+                // Once our runtime-created wearable is visible through the
+                // canonical pawn handle, the ordinary entity scan also finds
+                // it. Preserve its provenance so later frames keep the
+                // post-apply render-binding allowance and never misreport it
+                // as a stock/stable wearable.
+                if (carrier.valid &&
+                    player_binding.runtime_glove_entity_index >= 0 &&
+                    carrier.glove_entity_index == player_binding.runtime_glove_entity_index &&
+                    player_binding.runtime_glove_handle != kInvalidEntityHandle &&
+                    carrier.glove_handle == player_binding.runtime_glove_handle)
+                {
+                    carrier.runtime_created = true;
+                }
+
+                if (carrier.valid && !carrier.runtime_created &&
+                    carrier.glove_handle != 0 &&
+                    carrier.glove_handle != kInvalidEntityHandle)
+                {
+                    std::lock_guard<std::mutex> lock(g_hook_state.runtime_glove_provenance_mutex);
+                    const auto provenance =
+                        std::find_if(
+                            g_hook_state.runtime_glove_provenance_by_handle.begin(),
+                            g_hook_state.runtime_glove_provenance_by_handle.end(),
+                            [xuid, glove_entity](const auto& entry)
+                            {
+                                return entry.second.first == xuid &&
+                                    entry.second.second == glove_entity;
+                            });
+                    if (provenance != g_hook_state.runtime_glove_provenance_by_handle.end())
+                    {
+                        carrier.runtime_created = true;
+                        player_binding.runtime_glove_entity_index = carrier.glove_entity_index;
+                        player_binding.runtime_glove_handle = carrier.glove_handle;
+                        player_binding.glove_binding_mode =
+                            RuntimeGloveBindingMode::RuntimeCreatedWearable;
+                    }
+                }
             }
 
             std::uint32_t runtime_glove_handle = player_binding.runtime_glove_handle;
@@ -71159,14 +75635,45 @@ void PollGameThreadStateModern()
                     glove_entity = runtime_glove_entity;
                     glove_item_view = runtime_glove_item_view;
                 }
+                else if (runtime_entities.client_entity_factory == RuntimeFeatureAvailability::Available &&
+                    (g_hook_state.schema_offsets.combat_character_my_wearables_operation == nullptr ||
+                     g_hook_state.schema_offsets.combat_character_my_wearables_element_size != sizeof(std::uint32_t) ||
+                     g_hook_state.schema_offsets.combat_character_my_wearables_storage_size != 0x18))
+                {
+                    const auto warning_signature =
+                        BuildGloveProfileApplySignature(*glove_profile, xuid, 0, kTargetTagGloveEntity) ^ 0x176ull;
+                    WarnOnceForRuntimeSignature(
+                        warning_signature,
+                        L"Runtime glove creation deferred: m_hMyWearables Schema vector operation is not verified for a 24-byte C_NetworkUtlVectorBase<CHandle<C_EconWearable>>.");
+                }
                 else if (runtime_entities.client_entity_factory == RuntimeFeatureAvailability::Available)
                 {
                     std::wstring create_issue;
-                    if (TryCreateRuntimeGloveEntity(
+                    const auto provider_generation =
+                        g_hook_state.source2_client_provider_generation.load(std::memory_order_acquire);
+                    bool creation_claimed = false;
+                    {
+                        std::lock_guard<std::mutex> lock(g_hook_state.runtime_glove_provenance_mutex);
+                        auto& attempted_generation =
+                            g_hook_state.runtime_glove_create_generation_by_xuid[xuid];
+                        if (attempted_generation != provider_generation)
+                        {
+                            attempted_generation = provider_generation;
+                            creation_claimed = true;
+                        }
+                    }
+
+                    if (!creation_claimed)
+                    {
+                        create_issue =
+                            L"A CEconWearable create call was already made for this XUID in the current Source2Client provider generation; duplicate creation is blocked.";
+                    }
+                    else if (TryCreateRuntimeGloveEntity(
                             entity_list,
                             highest_live_entity_index,
                             player_binding,
                             runtime_entities.wearable_client_factory,
+                            g_hook_state.schema_offsets,
                             runtime_glove_entity_index,
                             runtime_glove_handle,
                             runtime_glove_entity,
@@ -71204,10 +75711,18 @@ void PollGameThreadStateModern()
                 }
             }
 
-            const auto using_pawn_render_fallback =
-                request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
-                !carrier.valid &&
-                pawn_glove_valid;
+            // GitHub v0.2.0 changed glove model families through a real
+            // CEconWearable. The canonical decision now returns None when no
+            // wearable exists, so the pawn item view can never impersonate a
+            // model_and_finish carrier.
+            const auto preliminary_carrier_kind =
+                nskinzcs2::runtime::ResolveCanonicalGloveCarrierKind(
+                    request.mode,
+                    carrier.valid,
+                    pawn_glove_valid);
+            const bool using_pawn_render_fallback =
+                preliminary_carrier_kind ==
+                nskinzcs2::runtime::GloveCarrierKind::PawnEconGlovesRenderFallback;
             if (using_pawn_render_fallback)
             {
                 carrier = {};
@@ -71246,7 +75761,7 @@ void PollGameThreadStateModern()
             LogProfileDiagnosticOnce(glove_signature ^ 0x11ull, carrier_stream.str());
 
             std::wstringstream pawn_fallback_stream;
-            pawn_fallback_stream << L"Resolved pawn glove fallback carrier for XUID " << xuid
+            pawn_fallback_stream << L"Observed pawn finish-only glove item view for XUID " << xuid
                 << L": pawn_entity=" << player_binding.pawn_entity_index
                 << L", item_view=" << FormatPointer(pawn_glove_item_view)
                 << L", current_definition=" << pawn_glove_definition_index
@@ -71260,42 +75775,127 @@ void PollGameThreadStateModern()
                 std::wstringstream stream;
                 if (runtime_entities.client_entity_factory != RuntimeFeatureAvailability::Available)
                 {
-                    stream << L"Glove wearable path unavailable for XUID " << xuid
-                        << L": client entity factory unresolved";
+                    stream << L"wearable_factory_unavailable for XUID " << xuid
+                        << L": model_and_finish requires a validated CEconWearable factory";
                 }
                 else
                 {
-                    stream << L"Resolved glove carrier for XUID " << xuid
-                        << L" failed: no live glove wearable slot was available";
+                    stream << L"wearable_creation_unavailable for XUID " << xuid
+                        << L": the validated factory did not yield a live glove wearable";
                 }
 
                 if (!pawn_glove_valid)
                 {
-                    stream << L"; pawn glove render fallback was unavailable.";
+                    stream << L"; pawn finish-only item view was unavailable.";
                 }
                 else
                 {
-                    stream << L"; pawn glove render fallback was not selected.";
+                    stream << L"; pawn finish-only item view is intentionally not used for model replacement.";
                 }
 
                 WarnOnceForRuntimeSignature(glove_signature ^ 0x12ull, stream.str());
                 continue;
             }
 
-            if (!using_pawn_render_fallback &&
-                carrier.runtime_created &&
-                !TryBindWearableEntityToPawn(
+            if (!using_pawn_render_fallback && created_runtime_glove)
+            {
+                // CS2 observes m_hMyWearables when it constructs the wearable
+                // render/model state. Publish the requested definition before
+                // the first canonical pawn association; binding the factory
+                // default (5028) and changing it afterwards leaves the new
+                // entity with a permanently empty model handle on this build.
+                PrepareWearableEntityForApply(glove_entity, g_hook_state.schema_offsets);
+                const auto requested_definition =
+                    ResolveRequestedGloveDefinitionIndex(request, carrier.current_definition_index);
+                if (!ApplyGloveProfileToWearable(
+                        glove_entity,
+                        glove_item_view,
+                        g_hook_state.schema_offsets,
+                        request,
+                        xuid,
+                        carrier.current_definition_index))
+                {
+                    std::wstringstream stream;
+                    stream << L"Runtime-created glove pre-bind initialization failed for XUID " << xuid
+                        << L": entity=" << carrier.glove_entity_index
+                        << L", requested_definition=" << requested_definition << L".";
+                    WarnOnceForRuntimeSignature(glove_signature ^ 0x172ull, stream.str());
+                    continue;
+                }
+
+                int definition_readback = 0;
+                if (!TryReadItemDefinitionIndex(
+                        glove_item_view,
+                        g_hook_state.schema_offsets,
+                        definition_readback) ||
+                    definition_readback != requested_definition)
+                {
+                    std::wstringstream stream;
+                    stream << L"Runtime-created glove pre-bind definition readback failed for XUID " << xuid
+                        << L": entity=" << carrier.glove_entity_index
+                        << L", requested_definition=" << requested_definition
+                        << L", readback=" << definition_readback << L".";
+                    WarnOnceForRuntimeSignature(glove_signature ^ 0x173ull, stream.str());
+                    continue;
+                }
+
+                carrier.current_definition_index = definition_readback;
+                std::wstringstream stream;
+                stream << L"Pre-initialized runtime-created CEconWearable before pawn binding for XUID " << xuid
+                    << L": entity=" << carrier.glove_entity_index
+                    << L", definition_readback=" << definition_readback
+                    << L", paint=" << request.paint_kit
+                    << L", wear=" << request.wear << L".";
+                LogProfileDiagnosticOnce(glove_signature ^ 0x174ull, stream.str());
+            }
+
+            if (!using_pawn_render_fallback && carrier.runtime_created)
+            {
+                const auto bind_succeeded = TryBindWearableEntityToPawn(
                     runtime_entities,
                     player_binding,
                     glove_entity,
                     carrier.glove_handle,
-                    g_hook_state.schema_offsets))
-            {
+                    g_hook_state.schema_offsets);
+                const auto wearable_handles = CollectPawnWearableHandles(
+                    player_binding.pawn_entity,
+                    g_hook_state.schema_offsets);
+                const auto handle_readback =
+                    std::find(
+                        wearable_handles.begin(),
+                        wearable_handles.end(),
+                        carrier.glove_handle) != wearable_handles.end();
+                if (!bind_succeeded || !handle_readback)
+                {
+                    std::wstringstream stream;
+                    stream << L"Glove wearable bind failed for XUID " << xuid
+                        << L": runtime-created glove entity could not be verified in m_hMyWearables"
+                        << L", entity=" << carrier.glove_entity_index
+                        << L", serial=" << ExtractEntityHandleSerial(carrier.glove_handle)
+                        << L", handle=0x" << std::hex << std::uppercase << carrier.glove_handle
+                        << std::dec << std::nouppercase
+                        << L", bind_succeeded=" << (bind_succeeded ? 1 : 0)
+                        << L", handle_readback=" << (handle_readback ? 1 : 0) << L".";
+                    WarnOnceForRuntimeSignature(glove_signature ^ 0x17ull, stream.str());
+                    continue;
+                }
+
                 std::wstringstream stream;
-                stream << L"Glove wearable bind failed for XUID " << xuid
-                    << L": runtime-created glove entity could not be attached to m_hMyWearables.";
-                WarnOnceForRuntimeSignature(glove_signature ^ 0x17ull, stream.str());
-                continue;
+                stream << L"Runtime-created CEconWearable bound for XUID " << xuid
+                    << L": class_node=" << FormatPointer(runtime_entities.wearable_client_factory.client_class)
+                    << L", create=" << FormatPointer(runtime_entities.wearable_client_factory.create_fn)
+                    << L", factory_name="
+                    << (runtime_entities.wearable_client_factory.create_class_name != nullptr
+                            ? NarrowToWide(runtime_entities.wearable_client_factory.create_class_name)
+                            : L"<null>")
+                    << L", entity=" << carrier.glove_entity_index
+                    << L", serial=" << ExtractEntityHandleSerial(carrier.glove_handle)
+                    << L", handle=0x" << std::hex << std::uppercase << carrier.glove_handle
+                    << std::dec << std::nouppercase
+                    << L", item_view=" << FormatPointer(glove_item_view)
+                    << L", m_hMyWearables_readback=1"
+                    << L", newly_created=" << (created_runtime_glove ? 1 : 0) << L".";
+                LogProfileDiagnosticOnce(glove_signature ^ 0x171ull, stream.str());
             }
 
             if (!using_pawn_render_fallback &&
@@ -71328,7 +75928,7 @@ void PollGameThreadStateModern()
 
             void* world_render_entity = nullptr;
             void* first_person_render_entity = nullptr;
-            const auto render_binding =
+            auto render_binding =
                 ResolveGloveRenderBinding(
                     entity_list,
                     entity_cache,
@@ -71348,15 +75948,16 @@ void PollGameThreadStateModern()
                 << L", valid=" << (render_binding.valid ? 1 : 0);
             LogProfileDiagnosticOnce(glove_signature ^ 0x13ull, render_stream.str());
 
-            const auto model_identity = ResolveGloveModelIdentity(
+            auto model_identity = ResolveGloveModelIdentity(
                 catalog,
                 carrier,
                 world_render_entity,
                 first_person_render_entity,
                 g_hook_state.schema_offsets,
                 request);
-            const auto hud_arms_identity =
+            auto hud_arms_identity =
                 ResolveHudArmsIdentity(entity_list, player_binding, g_hook_state.schema_offsets);
+            bool guarded_first_person_model_rebind_verified = false;
             std::wstringstream model_stream;
             model_stream << L"Resolved glove model/skeleton identity for XUID " << xuid
                 << L": live_model_state=0x" << std::hex << std::uppercase << model_identity.live_glove_model_state
@@ -71383,8 +75984,39 @@ void PollGameThreadStateModern()
                 << ((model_identity.target_view_skeleton_identity_resolved &&
                      hud_arms_identity.skeleton_identity_resolved &&
                      model_identity.target_view_skeleton_identity_hash == hud_arms_identity.skeleton_identity_hash) ? 1 : 0)
-                << L", target_known=" << (model_identity.target_model_known ? 1 : 0);
+                << L", target_known=" << (model_identity.target_model_known ? 1 : 0)
+                << L", formal_wearable_model_bind_phase="
+                << ((!using_pawn_render_fallback &&
+                     request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                     model_identity.target_model_known)
+                        ? L"eligible_after_profile_apply"
+                        : L"ineligible");
             LogProfileDiagnosticOnce(glove_signature ^ 0x14ull, model_stream.str());
+
+            // Compare the formally created Wearable with two healthy live
+            // scene objects before attempting any model initialization. In
+            // addition to fields/vtables, the snapshot invokes the already
+            // validated provider getter twice at FRAME_RENDER_PASS. This is
+            // needed to tell a loaded model source from the non-null inline
+            // placeholder owned by a freshly created Wearable.
+            LogProfileDiagnosticOnce(
+                glove_signature ^ 0x464F524D574541ull,
+                BuildFormalModelObjectSnapshot(
+                    L"formal_wearable",
+                    using_pawn_render_fallback ? nullptr : glove_entity,
+                    g_hook_state.schema_offsets));
+            LogProfileDiagnosticOnce(
+                glove_signature ^ 0x464F524D485544ull,
+                BuildFormalModelObjectSnapshot(
+                    L"hud_arms",
+                    hud_arms_identity.entity,
+                    g_hook_state.schema_offsets));
+            LogProfileDiagnosticOnce(
+                glove_signature ^ 0x464F524D504157ull,
+                BuildFormalModelObjectSnapshot(
+                    L"watched_pawn",
+                    player_binding.pawn_entity,
+                    g_hook_state.schema_offsets));
 
             std::wstringstream material_stream;
             material_stream << L"Resolved glove material binding identity for XUID " << xuid
@@ -71444,7 +76076,10 @@ void PollGameThreadStateModern()
                 (request.mode == nskinzcs2::runtime::GloveSlotMode::FinishOnly ||
                  render_binding.has_first_person_render);
             compatibility_inputs.allow_render_binding_after_apply =
-                carrier.runtime_created || using_pawn_render_fallback;
+                carrier.runtime_created ||
+                (!using_pawn_render_fallback &&
+                 carrier.valid &&
+                 request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish);
             compatibility_inputs.live_glove_model_state_resolved = model_identity.live_glove_model_state_resolved;
             compatibility_inputs.first_person_arms_model_state_resolved =
                 hud_arms_identity.model_state_resolved;
@@ -71549,6 +76184,98 @@ void PollGameThreadStateModern()
 
             TouchPawnGloveRefresh(player_binding.pawn_entity, g_hook_state.schema_offsets);
 
+            // CreateEntityByName publishes a valid CEconWearable but does not
+            // enqueue the client-think callback that stock network creation
+            // uses after definition/owner state becomes available. Invoke the
+            // exact reflected Wearable override once, only on the game thread
+            // and only after profile and m_hMyWearables readback succeeded.
+            // The helper validates the primary vtable, the derived thunk, its
+            // base no-op target and the Wearable-specific refresh target before
+            // making the call; any fault permanently poisons this entity/profile
+            // attempt instead of retrying it.
+            if (!using_pawn_render_fallback &&
+                carrier.runtime_created &&
+                request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                model_identity.target_model_known)
+            {
+                const auto definition_refresh_invoked =
+                    TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
+                        carrier.glove_entity_index,
+                        active_glove_entity,
+                        runtime_entities.wearable_client_factory.schema_primary_vtable,
+                        glove_signature,
+                        xuid);
+                std::wstringstream stream;
+                stream << L"Runtime-created CEconWearable definition refresh phase for XUID " << xuid
+                    << L": entity=" << carrier.glove_entity_index
+                    << L", invoked=" << (definition_refresh_invoked ? 1 : 0) << L".";
+                LogProfileDiagnosticOnce(
+                    glove_signature ^ 0x5745415254484E4Bull,
+                    stream.str());
+            }
+
+            bool client_set_model_verified = false;
+            if (!using_pawn_render_fallback &&
+                carrier.runtime_created &&
+                request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                model_identity.target_model_known)
+            {
+                client_set_model_verified = TryInvokeWearableSetModelAtFrameRenderPass(
+                    carrier.glove_entity_index,
+                    active_glove_entity,
+                    runtime_entities.wearable_client_factory.schema_primary_vtable,
+                    g_hook_state.schema_offsets,
+                    model_identity.target_world_model_path,
+                    glove_signature,
+                    xuid);
+
+                std::wstringstream stream;
+                stream << L"Runtime-created CEconWearable SetModel phase for XUID " << xuid
+                    << L": entity=" << carrier.glove_entity_index
+                    << L", target=" << NarrowToWide(model_identity.target_world_model_path)
+                    << L", verified=" << (client_set_model_verified ? 1 : 0) << L".";
+                LogProfileDiagnosticOnce(
+                    glove_signature ^
+                        (client_set_model_verified ? 0x5345544D4F4B00ull : 0x5345544D464149ull),
+                    stream.str());
+            }
+
+            // A formally created CEconWearable does not receive demo network
+            // state, so its CSkeletonInstance can remain uninitialized even
+            // after Definition/Paint and m_hMyWearables are correct. Invoke
+            // CS2's unique high-level skeleton binder only for a real Wearable
+            // and only after the helper has reconstructed and validated the
+            // exact native caller relationship:
+            //   RCX = scene_outer + 0x140 (CSkeletonInstance)
+            //   RDX = nullptr (initial bind)
+            //   R8  = scene_outer
+            //   R9  = scene_outer + 0x10
+            // The helper additionally requires an empty model handle/name,
+            // validates the provider vtable/model source, and poisons a
+            // partially completed entity/model pair instead of retrying it.
+            if (!using_pawn_render_fallback &&
+                !client_set_model_verified &&
+                request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                model_identity.target_model_known)
+            {
+                const auto formal_bind_verified = TryInitializeWearableModelThroughFormalBind(
+                    carrier.glove_entity_index,
+                    active_glove_entity,
+                    g_hook_state.schema_offsets,
+                    model_identity.target_world_model_path,
+                    glove_signature,
+                    xuid);
+
+                std::wstringstream stream;
+                stream << L"Formal CEconWearable model initialization phase for XUID " << xuid
+                    << L": entity=" << carrier.glove_entity_index
+                    << L", target=" << NarrowToWide(model_identity.target_world_model_path)
+                    << L", verified=" << (formal_bind_verified ? 1 : 0) << L".";
+                LogProfileDiagnosticOnce(
+                    glove_signature ^ (formal_bind_verified ? 0x464F524D504153ull : 0x464F524D52454Aull),
+                    stream.str());
+            }
+
             if (carrier.runtime_created)
             {
                 std::wstring refreshed_ceiling_issue;
@@ -71629,6 +76356,7 @@ void PollGameThreadStateModern()
             {
                 const auto fallback_readback_verified =
                     using_pawn_render_fallback &&
+                    request.mode == nskinzcs2::runtime::GloveSlotMode::FinishOnly &&
                     !after_snapshot.has_world_render &&
                     DoesAppliedGloveCarrierMatchProfile(
                         active_glove_entity,
@@ -71638,7 +76366,28 @@ void PollGameThreadStateModern()
                         xuid,
                         active_current_definition_index,
                         read_finish_from_item_view);
-                if (!fallback_readback_verified)
+                const auto guarded_model_and_finish_verified =
+                    using_pawn_render_fallback &&
+                    request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                    guarded_first_person_model_rebind_verified &&
+                    verified_render_binding.has_first_person_render &&
+                    ((verified_model_identity.first_person_arms_model_name_resolved &&
+                      ModelIdentityPathMatches(
+                          verified_model_identity.first_person_arms_model_name,
+                          verified_model_identity.target_view_model_path)) ||
+                     (!verified_model_identity.first_person_arms_model_resource_path.empty() &&
+                      ModelIdentityPathMatches(
+                          verified_model_identity.first_person_arms_model_resource_path,
+                          verified_model_identity.target_view_model_path))) &&
+                    DoesAppliedGloveCarrierMatchProfile(
+                        active_glove_entity,
+                        active_glove_item_view,
+                        g_hook_state.schema_offsets,
+                        request,
+                        xuid,
+                        active_current_definition_index,
+                        read_finish_from_item_view);
+                if (!fallback_readback_verified && !guarded_model_and_finish_verified)
                 {
                     std::wstringstream stream;
                     stream << L"Applied glove slot failed verification for XUID " << xuid
@@ -71648,7 +76397,9 @@ void PollGameThreadStateModern()
                 }
 
                 verification_passed = true;
-                verify_line += L", verification_mode=pawn_render_fallback_readback";
+                verify_line += guarded_model_and_finish_verified
+                    ? L", verification_mode=guarded_first_person_model_rebind"
+                    : L", verification_mode=pawn_render_fallback_readback";
                 glove_pawn_fallback_bound = true;
 
                 std::wstringstream stream;
@@ -71689,7 +76440,8 @@ void PollGameThreadStateModern()
                 << L", mode="
                 << (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish ? L"model_and_finish" : L"finish_only")
                 << L", created=" << (created_runtime_glove ? 1 : 0)
-                << L", carrier=" << (using_pawn_render_fallback ? L"pawn_render_fallback" : L"wearable");
+                << L", carrier="
+                << (carrier.runtime_created ? L"runtime_created_wearable" : L"stable_wearable");
             LogProfileDiagnosticOnce(glove_signature ^ 0x1Bull, applied_stream.str());
         }
     }
@@ -71779,7 +76531,8 @@ void PollGameThreadStateModern()
         }
         else
         {
-            runtime_status_lines.push_back(L"Unavailable: wearable client entity factory not resolved");
+            runtime_status_lines.push_back(
+                L"wearable_factory_unavailable: model_and_finish requires a validated CEconWearable factory");
         }
     }
     if (runtime_status_lines.empty())
@@ -72201,7 +76954,8 @@ void HookedClientFrameStageNotify(void* this_ptr, int cur_stage)
         {
             ResetRuntimeState(
                 L"Demo seek rebuilding runtime entities",
-                AttributeBindingReleaseMode::AbandonInstalled);
+                AttributeBindingReleaseMode::AbandonInstalled,
+                true);
             UpdateKnifeRefreshHelperEpochForRebuildReason(nskinzcs2::runtime::RuntimeRebuildReason::DemoSeek);
             g_hook_state.runtime_trace_polls_remaining.store(
                 kEnableAutomaticWatchedKnifeTracingOnUpdate ? kWatchedKnifeRuntimeTracePollBudget : 0);
@@ -72228,7 +76982,23 @@ void HookedClientFrameStageNotify(void* this_ptr, int cur_stage)
             nskinzcs2::Logger::Info(L"Manual refresh cleared the runtime exception latch; retrying runtime poll.");
         }
 
-        if (!TryPollGameThreadStateGuarded())
+        if (!TryAdvanceWearableFactoryCacheAtFrameRenderPassGuarded())
+        {
+            StoreCachedWearableFactoryResolution(
+                RuntimeFeatureAvailability::Unavailable,
+                {},
+                L"wearable_factory_unavailable: structured exception during game-thread client-class validation.");
+            nskinzcs2::Logger::Warn(
+                L"FRAME_RENDER_PASS CEconWearable client-class validation failed closed after a structured exception; no create function will be called.");
+        }
+
+        // Active model/resource discovery is allowed only in this post-original
+        // FRAME_RENDER_PASS window on the game thread. Always clear the guard
+        // immediately after the SEH-wrapped poll returns.
+        g_glove_resource_query_frame_render_pass_active = true;
+        const auto runtime_poll_succeeded = TryPollGameThreadStateGuarded();
+        g_glove_resource_query_frame_render_pass_active = false;
+        if (!runtime_poll_succeeded)
         {
             if (!g_hook_state.runtime_faulted.exchange(true))
             {
@@ -72313,6 +77083,57 @@ nskinzcs2::runtime::RuntimeGloveBindingChoice nskinzcs2::runtime::EvaluateGloveB
     }
 
     return RuntimeGloveBindingChoice::Unavailable;
+}
+
+nskinzcs2::runtime::WearableFactoryConfirmationResult
+nskinzcs2::runtime::EvaluateWearableFactoryConfirmation(
+    const WearableFactoryConfirmationInputs& inputs) noexcept
+{
+    WearableFactoryConfirmationResult result;
+    if (!inputs.candidate_resolved)
+    {
+        result.failure_confirmations =
+            std::min<std::uint32_t>(inputs.previous_failure_confirmations + 1, 2);
+        result.publish_unavailable = result.failure_confirmations >= 2;
+        return result;
+    }
+
+    result.candidate_confirmations = inputs.candidate_matches_previous
+        ? std::min<std::uint32_t>(inputs.previous_candidate_confirmations + 1, 2)
+        : 1;
+    result.publish_available = result.candidate_confirmations >= 2;
+    return result;
+}
+
+bool nskinzcs2::runtime::IsWearableModelSourceTypeReady(
+    const std::uint8_t model_type) noexcept
+{
+    return (model_type >= 2 && model_type <= 4) ||
+        (model_type >= 7 && model_type <= 8);
+}
+
+bool nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk(
+    const std::uint8_t* bytes,
+    const std::size_t size) noexcept
+{
+    constexpr std::size_t kThunkSize = 27;
+    constexpr std::array<std::uint8_t, 9> kPrefix {
+        0x40, 0x53,
+        0x48, 0x83, 0xEC, 0x20,
+        0x48, 0x8B, 0xD9};
+    constexpr std::array<std::uint8_t, 9> kSuffix {
+        0x48, 0x8B, 0xCB,
+        0x48, 0x83, 0xC4, 0x20,
+        0x5B,
+        0xE9};
+    if (bytes == nullptr || size < kThunkSize)
+    {
+        return false;
+    }
+
+    return std::equal(kPrefix.begin(), kPrefix.end(), bytes) &&
+        bytes[9] == 0xE8 &&
+        std::equal(kSuffix.begin(), kSuffix.end(), bytes + 14);
 }
 
 nskinzcs2::runtime::GloveApplyMode nskinzcs2::runtime::ResolveGloveApplyMode(
@@ -72468,6 +77289,27 @@ bool nskinzcs2::runtime::StandardWeaponNeedsItemIdHighReset(
     const bool uses_temporary_world_refresh_model) noexcept
 {
     return ::StandardWeaponNeedsItemIdHighResetImpl(current_item_id_high, uses_temporary_world_refresh_model);
+}
+
+std::uint32_t nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const std::uint64_t xuid,
+    const int current_definition_index) noexcept
+{
+    constexpr std::uint64_t kMaterialCacheTargetTag = 0x4D41544C4F57ull; // "MATLOW"
+    const auto signature =
+        BuildProfileApplySignature(
+            profile,
+            xuid,
+            current_definition_index,
+            kMaterialCacheTargetTag);
+    auto key = static_cast<std::uint32_t>(signature) ^
+        static_cast<std::uint32_t>(signature >> 32);
+    if (key == 0 || key == 0xFFFFFFFFu)
+    {
+        key ^= 0xA5C39E17u;
+    }
+    return key;
 }
 
 bool nskinzcs2::runtime::KnifeAnimationRemapTableHasDuplicateKeys()
@@ -73045,11 +77887,34 @@ nskinzcs2::RuntimeController::RuntimeController(AppState& state, HMODULE module_
     : state_(state)
     , module_instance_(module_instance)
 {
+    if (IsCs2Process(CurrentProcessPath()) && IsHlaeLoaded())
+    {
+        std::wstringstream event_name;
+        event_name << L"Local\\nSkinzCS2.ManualRefresh." << GetCurrentProcessId();
+        automation_refresh_event_ = CreateEventW(
+            nullptr,
+            FALSE,
+            FALSE,
+            event_name.str().c_str());
+        if (automation_refresh_event_ != nullptr)
+        {
+            Logger::Info(L"Local HLAE regression refresh event enabled: " + event_name.str() + L".");
+        }
+        else
+        {
+            Logger::Warn(L"Local HLAE regression refresh event could not be created.");
+        }
+    }
 }
 
 nskinzcs2::RuntimeController::~RuntimeController()
 {
     Stop();
+    if (automation_refresh_event_ != nullptr)
+    {
+        CloseHandle(automation_refresh_event_);
+        automation_refresh_event_ = nullptr;
+    }
 }
 
 void nskinzcs2::RuntimeController::Start()
@@ -73119,7 +77984,7 @@ bool nskinzcs2::RuntimeController::IsCs2Process(const std::wstring& process_path
 
 bool nskinzcs2::RuntimeController::IsHlaeLoaded()
 {
-    return GetModuleHandleW(L"AfxHookSource2.dll") != nullptr ||
+    return GetHlaeSource2Module() != nullptr ||
         GetModuleHandleW(L"AfxHookSource.dll") != nullptr;
 }
 
@@ -73190,6 +78055,13 @@ void nskinzcs2::RuntimeController::WorkerLoopImpl()
 
         while (!stop_requested_.load() && !state_.ShutdownRequested())
         {
+            if (automation_refresh_event_ != nullptr &&
+                WaitForSingleObject(automation_refresh_event_, 0) == WAIT_OBJECT_0)
+            {
+                state_.RequestManualRefresh();
+                Logger::Info(L"Runtime Update requested by the local HLAE regression event.");
+            }
+
             auto status = BuildStatusSkeleton();
             status.process_path = CurrentProcessPath();
             status.process_detected = IsCs2Process(status.process_path);
@@ -73279,7 +78151,8 @@ void nskinzcs2::RuntimeController::WorkerLoopImpl()
                 status.hook_installed = true;
                 if (!degraded_query_runtime)
                 {
-                    ResolveWearableFactoryCacheIfNeeded(state_.SnapshotConfig());
+                    status.diagnostics.push_back(
+                        L"CEconWearable factory discovery uses two matching FRAME_RENDER_PASS observations of the formal CGameEntitySystem CreateEntityByName/class-lookup chain, cross-checked against the unique Schema reflection identity. Runtime-created wearables additionally require the verified CEconWearable definition-refresh thunk before model initialization; background factory scans remain disabled.");
                 }
                 else
                 {
@@ -73406,7 +78279,8 @@ nskinzcs2::RuntimeController::Bindings nskinzcs2::RuntimeController::TryResolveB
     auto source2_client_versions = FilterVersionCandidates(client_interfaces, "Source2Client", 1, 64);
     if (source2_client_versions.empty())
     {
-        source2_client_versions = BuildVersionCandidates("Source2Client", 1, 64);
+        source2_client_versions = BuildVersionCandidates(
+            "Source2Client", 1, 64, {nskinzcs2::compatibility::kSource2ClientInterface});
     }
 
     auto engine_versions = FilterVersionCandidates(engine_interfaces, "Source2EngineToClient", 1, 32);
@@ -73454,7 +78328,8 @@ nskinzcs2::RuntimeController::Bindings nskinzcs2::RuntimeController::TryResolveB
     auto resource_system_versions = FilterVersionCandidates(resource_interfaces, "ResourceSystem", 1, 64);
     if (resource_system_versions.empty())
     {
-        resource_system_versions = BuildVersionCandidates("ResourceSystem", 1, 64, {"ResourceSystem013"});
+        resource_system_versions = BuildVersionCandidates(
+            "ResourceSystem", 1, 64, {nskinzcs2::compatibility::kResourceSystemInterface});
     }
 
     auto resource_handle_utils_versions = FilterVersionCandidates(resource_interfaces, "ResourceHandleUtils", 1, 64);
@@ -73479,7 +78354,8 @@ nskinzcs2::RuntimeController::Bindings nskinzcs2::RuntimeController::TryResolveB
     auto file_system_versions = FilterVersionCandidates(filesystem_interfaces, "VFileSystem", 1, 64);
     if (file_system_versions.empty())
     {
-        file_system_versions = BuildVersionCandidates("VFileSystem", 1, 64, {"VFileSystem017"});
+        file_system_versions = BuildVersionCandidates(
+            "VFileSystem", 1, 64, {nskinzcs2::compatibility::kFileSystemInterface});
     }
 
     LogFileSystemInterfaceCandidatesFromFactory(
@@ -73637,7 +78513,9 @@ bool nskinzcs2::RuntimeController::TryInstallRuntimeHook(runtime::Status& status
 
     if (!hook_attempted_.exchange(true))
     {
-        Logger::Info(L"Installing Source2Client FrameStageNotify hook only using official HLAE vtable index 36.");
+        Logger::Info(
+            L"Installing Source2Client002 FrameStageNotify hook for HLAE 2.191.1 using validated vtable index " +
+            std::to_wstring(nskinzcs2::compatibility::kFrameStageNotifyVtableIndex) + L".");
     }
 
     const auto bindings = TryResolveBindings(status);
@@ -73651,7 +78529,7 @@ bool nskinzcs2::RuntimeController::TryInstallRuntimeHook(runtime::Status& status
     std::wstring validation_issue;
     if (!TryGetValidatedInterfaceVtableEntry(
             bindings.source2_client.address,
-            36,
+            nskinzcs2::compatibility::kFrameStageNotifyVtableIndex,
             GetModuleHandleW(L"client.dll"),
             validated_frame_stage_target,
             validation_issue))
@@ -73708,7 +78586,10 @@ bool nskinzcs2::RuntimeController::TryInstallRuntimeHook(runtime::Status& status
 
     if (!g_hook_state.frame_stage_hook_installed.load())
     {
-        if (g_hook_state.frame_stage_patch.Install(bindings.source2_client.address, 36, reinterpret_cast<void*>(&HookedClientFrameStageNotify)))
+        if (g_hook_state.frame_stage_patch.Install(
+                bindings.source2_client.address,
+                nskinzcs2::compatibility::kFrameStageNotifyVtableIndex,
+                reinterpret_cast<void*>(&HookedClientFrameStageNotify)))
         {
             g_hook_state.original_frame_stage_notify =
                 reinterpret_cast<HookState::ClientFrameStageNotifyFn>(g_hook_state.frame_stage_patch.original);
@@ -73763,7 +78644,21 @@ bool nskinzcs2::RuntimeController::TryRunManualCarrierOnlyProbe(
             g_hook_state.schema_ready.store(true);
             if (!g_hook_state.schema_logged.exchange(true))
             {
-                nskinzcs2::Logger::Info(L"Bound client.dll schema offsets through Source 2 schema reflection.");
+                std::wstringstream stream;
+                stream << L"Bound client.dll schema offsets through Source 2 schema reflection"
+                    << L": m_hMyWearables=0x" << std::hex << std::uppercase
+                    << static_cast<std::uint64_t>(offsets.combat_character_my_wearables)
+                    << L", vector_operation="
+                    << FormatPointer(reinterpret_cast<void*>(offsets.combat_character_my_wearables_operation))
+                    << std::dec << std::nouppercase
+                    << L", element_size=" << offsets.combat_character_my_wearables_element_size
+                    << L", storage_size=" << offsets.combat_character_my_wearables_storage_size
+                    << L", append_ready="
+                    << (offsets.combat_character_my_wearables_operation != nullptr &&
+                        offsets.combat_character_my_wearables_element_size == sizeof(std::uint32_t) &&
+                        offsets.combat_character_my_wearables_storage_size == 0x18 ? 1 : 0)
+                    << L".";
+                nskinzcs2::Logger::Info(stream.str());
             }
         }
     }
@@ -74461,9 +79356,7 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     else if (status.client_entity_factory_requested)
     {
         status.diagnostics.push_back(
-            status.applied_glove_count > 0
-                ? L"Wearable factory unresolved; pawn glove fallback active."
-                : L"Unavailable: wearable client entity factory not resolved");
+            L"wearable_factory_unavailable: the legacy CEconWearable compatibility fallback is unavailable until two matching FRAME_RENDER_PASS validations succeed; the current pawn m_EconGloves reapply path remains independent.");
     }
 
     if (status.viewmodel_factory_discovery_ran)
@@ -74659,9 +79552,7 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     if (status.client_entity_factory_requested && !status.client_entity_factory_resolved)
     {
         detail_lines.push_back(
-            status.applied_glove_count > 0
-                ? L"Wearable factory unresolved; using pawn glove fallback"
-                : L"Unavailable: wearable client entity factory not resolved");
+            L"wearable_factory_unavailable: waiting for validated CEconWearable factory");
     }
     if (detail_lines.empty())
     {
@@ -75178,4 +80069,3 @@ std::wstring nskinzcs2::runtime::ProbeBuildKnifeCarrierRuntimeReasonTextForTests
         factory_feasibility);
 }
 #endif
-

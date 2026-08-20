@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Cs2/Compatibility.hpp"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -24,17 +26,12 @@ struct GlobalResourceSwapperInstallResult
 inline constexpr GlobalResourceSwapperSignatureHint kGlobalResourceSwapperSignatureHints[] = {
     {
         "CResourceSystem::Query (offline reference)",
-        "48 83 EC 38 41 B1 01 C6 44 24 20 01 E8 ? ? ? ? 48 83 C4 38 C3",
+        compatibility::kResourceSystemQueryPattern,
         L"resourcesystem.dll",
     },
     {
         "CModelService::BindModel (offline reference)",
-        "48 8B C4 53 57 48 83 EC 68 48 89 70 18 41 0F B6 D8 4C 89 70 20 48 8B F9 4C 89 78 E8 4C 8B F2 48 8B 41 30 45 8B F9 48 85 C0 74 33",
-        L"client.dll",
-    },
-    {
-        "CGameSceneNode::SetMesh (offline reference)",
-        "40 53 48 83 EC 20 48 8B DA 48 8B 49 ? E8 ? ? ? ? 48 8B D3 48 83 C4 20 5B E9 ? ? ? ?",
+        compatibility::kBindModelPattern,
         L"client.dll",
     },
 };

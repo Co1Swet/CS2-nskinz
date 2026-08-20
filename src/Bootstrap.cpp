@@ -3,6 +3,7 @@
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
+#include "Cs2/Compatibility.hpp"
 #include "Cs2/Runtime.hpp"
 #include "UI/MainWindow.hpp"
 
@@ -521,6 +522,10 @@ DWORD BootstrapThreadImpl(void* instance)
     nskinzcs2::Logger::Initialize(g_base_directory.wstring());
     nskinzcs2::Logger::Info(L"nSkinzCS2 bootstrap starting (CrashGuard-SafeStart-v2).");
     nskinzcs2::Logger::Info(L"Bootstrap note: UI creation is deferred until Insert, and runtime hook attach is deferred until Update.");
+    for (const auto& line : nskinzcs2::compatibility::BuildRuntimeCompatibilityDiagnostics())
+    {
+        nskinzcs2::Logger::Info(line);
+    }
 
     std::wstringstream module_stream;
     module_stream << L"DLL directory: " << g_base_directory.wstring();

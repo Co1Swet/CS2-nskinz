@@ -1,5 +1,6 @@
 #include "Core/Config.hpp"
 #include "Cs2/Catalog.hpp"
+#include "Cs2/Compatibility.hpp"
 #include "Cs2/Runtime.hpp"
 #include "Runtime/GloveAppearance.hpp"
 #include "Runtime/KnifeAnimation.hpp"
@@ -19,6 +20,8 @@
 
 namespace
 {
+std::filesystem::path g_compatibility_cs2_root;
+
 template <typename Fn>
 void RunNamedTest(const char* name, Fn&& fn)
 {
@@ -38,6 +41,108 @@ void Expect(bool condition, const char* message)
     {
         throw std::runtime_error(message);
     }
+}
+
+void TestCompatibilityManifest()
+{
+    using namespace nskinzcs2::compatibility;
+    Expect(kFrameStageNotifyVtableIndex == 36, "HLAE 2.191.1 FrameStageNotify slot should remain explicit");
+    Expect(kFrameStartStage == 0, "HLAE 2.191.1 FRAME_START value should remain explicit");
+    Expect(kFrameRenderPassStage == 12, "HLAE 2.191.1 FRAME_RENDER_PASS value should remain explicit");
+    Expect(kEngineIsPlayingDemoVtableIndex == 42, "HLAE 2.191.1 IsPlayingDemo slot should remain explicit");
+    Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.191.1 GetDemoFilePath slot should remain explicit");
+    Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.191.1 GetLevelNameShort slot should remain explicit");
+    Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.191.1 GetDemoFile slot should remain explicit");
+    Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.191.1 demo tick slot should remain explicit");
+    Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.191.1 IDemoFile IsPlayingDemo slot should remain explicit");
+    Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.191.1 IDemoFile IsDemoPaused slot should remain explicit");
+    Expect(
+        IsHlae21911InterfaceCombination("Source2Client002", "ResourceSystem013", "VFileSystem017"),
+        "verified HLAE 2.191.1 interfaces should be accepted");
+    Expect(
+        !IsHlae21911InterfaceCombination("Source2Client001", "ResourceSystem013", "VFileSystem017"),
+        "an unverified Source2Client interface should be rejected");
+
+    const std::array<std::uint8_t, 12> bytes {
+        0x48, 0x83, 0xEC, 0x38, 0x41, 0xB1, 0x01, 0xCC, 0x48, 0x83, 0xEC, 0x38,
+    };
+    Expect(CountPatternMatches(bytes, "48 83 EC ?? 41 B1 01") == 1, "wildcard pattern should match once");
+    Expect(CountPatternMatches(bytes, "48 83 EC 38") == 2, "duplicate patterns should be observable");
+    Expect(CountPatternMatches(bytes, "DE AD BE EF") == 0, "missing patterns should be observable");
+
+    const auto has_obsolete_set_mesh = std::any_of(
+        kSignatureSpecs.begin(),
+        kSignatureSpecs.end(),
+        [](const SignatureSpec& spec) { return std::string_view(spec.name) == "set_mesh"; });
+    Expect(!has_obsolete_set_mesh, "obsolete SetMesh reference must not be a compatibility requirement");
+
+    const auto has_required_signature =
+        [](const std::string_view name)
+        {
+            return std::any_of(
+                kSignatureSpecs.begin(),
+                kSignatureSpecs.end(),
+                [name](const SignatureSpec& spec)
+                {
+                    return spec.required && std::string_view(spec.name) == name;
+                });
+        };
+    Expect(
+        has_required_signature("wearable_entity_factory_callsite"),
+        "the current CGameEntitySystem wearable factory callsite must be required");
+    Expect(
+        has_required_signature("wearable_entity_create_by_name"),
+        "the current formal client CreateEntityByName wrapper must be required");
+    Expect(
+        has_required_signature("wearable_entity_formal_create"),
+        "the current formal identity allocation/create path must be required");
+    Expect(
+        has_required_signature("wearable_entity_class_lookup"),
+        "the current client class descriptor lookup must be required");
+    Expect(
+        has_required_signature("wearable_definition_refresh_thunk"),
+        "the current CEconWearable definition refresh thunk must be required");
+    Expect(
+        has_required_signature("base_model_entity_set_model"),
+        "the current client C_BaseModelEntity::SetModel wrapper must be required");
+    const auto has_reference_model_provider_signature = std::any_of(
+        kSignatureSpecs.begin(),
+        kSignatureSpecs.end(),
+        [](const SignatureSpec& spec)
+        {
+            return !spec.required &&
+                std::string_view(spec.name) == "skeleton_instance_bind_model_reference";
+        });
+    Expect(
+        has_reference_model_provider_signature,
+        "the unverified model-provider entry must remain reference-only");
+}
+
+void TestInstalledCompatibilityIfRequested()
+{
+    if (g_compatibility_cs2_root.empty())
+    {
+        return;
+    }
+
+    const auto report = nskinzcs2::compatibility::ScanInstalledCs2(g_compatibility_cs2_root);
+    std::cout << "[COMPAT] ClientVersion=" << report.client_version
+        << " PatchVersion=" << report.patch_version
+        << " SourceRevision=" << report.source_revision << '\n';
+    for (const auto& result : report.signatures)
+    {
+        std::cout << "[COMPAT] " << result.name << " matches=" << result.match_count
+            << " size=" << result.file_size << " pe_timestamp=0x" << std::hex
+            << result.pe_timestamp << std::dec << '\n';
+    }
+    Expect(!report.install_root.empty(), "--cs2-root must resolve to a CS2 installation");
+    Expect(report.client_version == nskinzcs2::compatibility::kVerifiedClientVersion,
+        "installed CS2 ClientVersion differs from the verified baseline");
+    Expect(report.patch_version == nskinzcs2::compatibility::kVerifiedPatchVersion,
+        "installed CS2 PatchVersion differs from the verified baseline");
+    Expect(report.source_revision == nskinzcs2::compatibility::kVerifiedSourceRevision,
+        "installed CS2 SourceRevision differs from the verified baseline");
+    Expect(report.RequiredSignaturesUnique(), "all required installed CS2 signatures must match exactly once");
 }
 
 bool ContainsRefreshAttribute(
@@ -1469,8 +1574,11 @@ void TestKnifeRefreshCrashGuardPolicy()
             ShouldInstallRuntimeOwnedAttributeListForProfile(weapon_profile),
             "standard weapons should keep runtime-owned attribute-list installs enabled");
         Expect(
-            !ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile),
-            "standard weapon refresh helper attachments should still restore immediately after helper dispatch");
+            ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile),
+            "standard weapon refresh helper attachments should remain live for deferred material consumption");
+        Expect(
+            !ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(weapon_profile),
+            "standard weapon in-place attachments must not touch stale entity storage after seek detection");
 
         nskinzcs2::model::KeychainProfile keychain_profile;
         keychain_profile.base_item = weapon_profile.base_item;
@@ -1480,7 +1588,7 @@ void TestKnifeRefreshCrashGuardPolicy()
             "standard weapon keychain refresh helper attachments should promote to runtime-owned so the full keychain block survives cleanup");
         Expect(
             !ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(weapon_profile, &keychain_profile),
-            "standard weapon keychain promoted refresh helper attachments should not rewrite the original attribute vector during demo-seek cleanup");
+            "standard weapon promoted in-place attachments must be abandoned without stale entity writes");
     }
 
     Expect(
@@ -1752,6 +1860,96 @@ void TestRuntimeGloveBindingChoice()
             ResolveGloveApplyMode(profile) == GloveApplyMode::None,
             "non-glove profiles must not enter glove apply modes");
     }
+}
+
+void TestWearableFactoryConfirmation()
+{
+    using nskinzcs2::runtime::EvaluateWearableFactoryConfirmation;
+    using nskinzcs2::runtime::IsWearableModelSourceTypeReady;
+    using nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk;
+
+    const auto first_candidate = EvaluateWearableFactoryConfirmation({true, false, 0, 0});
+    Expect(
+        first_candidate.candidate_confirmations == 1 &&
+            !first_candidate.publish_available &&
+            !first_candidate.publish_unavailable,
+        "a first CEconWearable factory observation must remain pending");
+
+    const auto confirmed_candidate = EvaluateWearableFactoryConfirmation({true, true, 1, 0});
+    Expect(
+        confirmed_candidate.candidate_confirmations == 2 &&
+            confirmed_candidate.publish_available &&
+            !confirmed_candidate.publish_unavailable,
+        "two matching FRAME_RENDER_PASS factory observations should publish the factory");
+
+    const auto changed_candidate = EvaluateWearableFactoryConfirmation({true, false, 1, 0});
+    Expect(
+        changed_candidate.candidate_confirmations == 1 &&
+            !changed_candidate.publish_available,
+        "a changed client-class node or create function must restart confirmation");
+
+    const auto first_failure = EvaluateWearableFactoryConfirmation({false, false, 1, 0});
+    Expect(
+        first_failure.candidate_confirmations == 0 &&
+            first_failure.failure_confirmations == 1 &&
+            !first_failure.publish_unavailable,
+        "one transient GetAllClasses failure must not publish a callable address or a permanent failure");
+
+    const auto confirmed_failure = EvaluateWearableFactoryConfirmation({false, false, 0, 1});
+    Expect(
+        confirmed_failure.failure_confirmations == 2 &&
+            confirmed_failure.publish_unavailable &&
+            !confirmed_failure.publish_available,
+        "two consecutive GetAllClasses failures should fail the wearable factory closed");
+
+    const auto recovery_candidate = EvaluateWearableFactoryConfirmation({true, false, 0, 2});
+    Expect(
+        recovery_candidate.candidate_confirmations == 1 &&
+            recovery_candidate.failure_confirmations == 0 &&
+            !recovery_candidate.publish_unavailable,
+        "a valid candidate observation should clear pending failure confirmation state");
+
+    Expect(
+        !IsWearableModelSourceTypeReady(0) &&
+            !IsWearableModelSourceTypeReady(1) &&
+            IsWearableModelSourceTypeReady(2) &&
+            IsWearableModelSourceTypeReady(3) &&
+            IsWearableModelSourceTypeReady(4) &&
+            !IsWearableModelSourceTypeReady(5) &&
+            !IsWearableModelSourceTypeReady(6) &&
+            IsWearableModelSourceTypeReady(7) &&
+            IsWearableModelSourceTypeReady(8) &&
+            !IsWearableModelSourceTypeReady(9),
+        "wearable formal bind readiness must match the native model-source type dispatch");
+
+    const std::array<std::uint8_t, 27> refresh_thunk {
+        0x40, 0x53,
+        0x48, 0x83, 0xEC, 0x20,
+        0x48, 0x8B, 0xD9,
+        0xE8, 0x22, 0xAC, 0x99, 0xFF,
+        0x48, 0x8B, 0xCB,
+        0x48, 0x83, 0xC4, 0x20,
+        0x5B,
+        0xE9, 0x35, 0x0D, 0xFF, 0xFF};
+    Expect(
+        MatchesWearableDefinitionRefreshThunk(refresh_thunk.data(), refresh_thunk.size()),
+        "the verified CEconWearable client-think shape should be accepted");
+
+    auto wrong_prologue = refresh_thunk;
+    wrong_prologue[5] = 0x28;
+    Expect(
+        !MatchesWearableDefinitionRefreshThunk(wrong_prologue.data(), wrong_prologue.size()),
+        "a changed CEconWearable client-think prologue must fail closed");
+
+    auto missing_tail_jump = refresh_thunk;
+    missing_tail_jump[22] = 0xC3;
+    Expect(
+        !MatchesWearableDefinitionRefreshThunk(missing_tail_jump.data(), missing_tail_jump.size()),
+        "a CEconWearable callback without the verified refresh tail-call must fail closed");
+
+    Expect(
+        !MatchesWearableDefinitionRefreshThunk(refresh_thunk.data(), refresh_thunk.size() - 1),
+        "a truncated CEconWearable client-think body must fail closed");
 }
 
 void TestKnifeAppearanceModule()
@@ -3038,6 +3236,7 @@ void TestGloveAppearanceModule()
     using nskinzcs2::runtime::GloveSlotMode;
     using nskinzcs2::runtime::ResolveCanonicalGloveCarrierKind;
     using nskinzcs2::runtime::ResolveGloveSlotMode;
+    using nskinzcs2::runtime::SelectReusableWearableHandleSlot;
 
     {
         nskinzcs2::model::GloveProfile profile;
@@ -3076,12 +3275,31 @@ void TestGloveAppearanceModule()
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::FinishOnly, true, true) == GloveCarrierKind::PawnEconGloves,
         "finish-only should always resolve to pawn_econ_gloves when available");
     Expect(
-        ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, true) == GloveCarrierKind::Wearable,
-        "model-and-finish should resolve to the real wearable carrier when available");
+        ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, true) == GloveCarrierKind::PawnEconGloves,
+        "model-and-finish should prefer the current pawn econ-gloves carrier when available");
     Expect(
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, false, true) ==
-            GloveCarrierKind::PawnEconGlovesRenderFallback,
-        "model-and-finish should fall back to the pawn glove slot when no wearable carrier exists");
+            GloveCarrierKind::PawnEconGloves,
+        "model-and-finish should use pawn econ-gloves without requiring a wearable entity");
+    Expect(
+        ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, false) ==
+            GloveCarrierKind::Wearable,
+        "model-and-finish should retain the wearable compatibility fallback when pawn econ-gloves is unavailable");
+
+    {
+        nskinzcs2::runtime::GloveCompatibilityInputs inputs;
+        inputs.mode = GloveSlotMode::ModelAndFinish;
+        inputs.carrier_kind = GloveCarrierKind::PawnEconGloves;
+        inputs.current_definition_index = 5028;
+        inputs.requested_model_definition = 5030;
+        inputs.compatible_paint_definition = 5030;
+        inputs.carrier_valid = true;
+        inputs.target_model_known = true;
+        const auto compatibility = EvaluateGloveCompatibility(inputs);
+        Expect(
+            compatibility.compatible,
+            "model-and-finish should accept the current pawn econ-gloves reapply path");
+    }
 
     {
         nskinzcs2::runtime::GloveCompatibilityInputs inputs;
@@ -3220,16 +3438,94 @@ void TestGloveAppearanceModule()
         inputs.carrier_valid = true;
         inputs.render_binding_valid = false;
         inputs.allow_render_binding_after_apply = true;
-        inputs.first_person_arms_model_state_resolved = true;
-        inputs.first_person_arms_model_handle_resolved = true;
-        inputs.first_person_arms_skeleton_identity_resolved = true;
-        inputs.target_view_skeleton_identity_resolved = true;
-        inputs.target_view_matches_first_person_skeleton = true;
+        inputs.live_glove_model_state_resolved = false;
+        inputs.live_glove_model_handle_resolved = false;
+        inputs.live_glove_skeleton_identity_resolved = false;
+        inputs.first_person_arms_model_state_resolved = false;
+        inputs.first_person_arms_model_handle_resolved = false;
+        inputs.first_person_arms_skeleton_identity_resolved = false;
+        inputs.target_view_skeleton_identity_resolved = false;
+        inputs.target_view_matches_first_person_skeleton = false;
         inputs.target_model_known = true;
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
             compatibility.compatible,
-            "runtime-created model-and-finish should allow render binding to be verified after apply");
+            "runtime-created real wearables should establish render and model identity after apply");
+    }
+
+    {
+        nskinzcs2::runtime::GloveCompatibilityInputs inputs;
+        inputs.mode = GloveSlotMode::ModelAndFinish;
+        inputs.carrier_kind = GloveCarrierKind::Wearable;
+        inputs.current_definition_index = 5028;
+        inputs.requested_model_definition = 5032;
+        inputs.compatible_paint_definition = 5032;
+        inputs.carrier_valid = true;
+        inputs.render_binding_valid = false;
+        inputs.allow_render_binding_after_apply = true;
+        inputs.target_model_known = false;
+        const auto compatibility = EvaluateGloveCompatibility(inputs);
+        Expect(
+            !compatibility.compatible &&
+                compatibility.reason == GloveCompatibilityReason::MissingModelIdentity,
+            "runtime-created wearables must reject deferred model identity when the target model is unknown");
+    }
+
+    {
+        const std::array<std::uint32_t, 2> current_handles {0u, 0xC47A0000u};
+        Expect(
+            SelectReusableWearableHandleSlot(current_handles.data(), current_handles.size(), 0x8200u) == 0,
+            "wearable binding should reuse an existing entity-index-zero slot instead of appending past capacity");
+    }
+
+    {
+        const std::array<std::uint32_t, 2> current_handles {0x8101u, 0x8202u};
+        Expect(
+            SelectReusableWearableHandleSlot(current_handles.data(), current_handles.size(), 0x8303u) == -1,
+            "wearable binding must fail closed when every existing slot is occupied");
+        Expect(
+            SelectReusableWearableHandleSlot(nullptr, 0, 0x8303u) == -1,
+            "wearable binding must not invent an append slot for an empty vector");
+    }
+
+    {
+        using nskinzcs2::runtime::ShouldInitializeWearableModel;
+        Expect(
+            ShouldInitializeWearableModel(
+                GloveSlotMode::ModelAndFinish,
+                true,
+                512,
+                true,
+                0,
+                true),
+            "a real CEconWearable with an empty model handle should use the formal skeleton model binder");
+        Expect(
+            !ShouldInitializeWearableModel(
+                GloveSlotMode::ModelAndFinish,
+                false,
+                -2,
+                true,
+                0,
+                true),
+            "synthetic/Pawn render objects must never enter the formal wearable model path");
+        Expect(
+            !ShouldInitializeWearableModel(
+                GloveSlotMode::ModelAndFinish,
+                true,
+                512,
+                true,
+                0x1234,
+                false),
+            "an already initialized Wearable must not be force-rebound by the empty-model path");
+        Expect(
+            !ShouldInitializeWearableModel(
+                GloveSlotMode::ModelAndFinish,
+                true,
+                512,
+                true,
+                0,
+                false),
+            "formal wearable binding must fail closed when its scene/model context is unverified");
     }
 
     {
@@ -3254,8 +3550,27 @@ void TestGloveAppearanceModule()
         inputs.target_model_known = true;
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
-            compatibility.compatible,
-            "pawn glove render fallback should accept a fully resolved render binding");
+            !compatibility.compatible &&
+                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
+            "pawn glove model replacement must require a stable wearable instead of accepting carrier-only readback");
+    }
+
+    {
+        nskinzcs2::runtime::GloveCompatibilityInputs inputs;
+        inputs.mode = GloveSlotMode::ModelAndFinish;
+        inputs.carrier_kind = GloveCarrierKind::PawnEconGlovesRenderFallback;
+        inputs.current_definition_index = 5030;
+        inputs.requested_model_definition = 5030;
+        inputs.compatible_paint_definition = 5030;
+        inputs.carrier_valid = true;
+        inputs.render_binding_valid = true;
+        inputs.guarded_first_person_model_rebind_verified = true;
+        inputs.target_model_known = true;
+        const auto compatibility = EvaluateGloveCompatibility(inputs);
+        Expect(
+            !compatibility.compatible &&
+                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
+            "pawn glove model replacement must reject guarded first-person resource rebinds");
     }
 
     {
@@ -3281,7 +3596,7 @@ void TestGloveAppearanceModule()
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
             !compatibility.compatible &&
-                compatibility.reason == GloveCompatibilityReason::MissingRenderBinding,
+                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
             "pawn glove render fallback should still require a live render binding before apply");
     }
 
@@ -3298,8 +3613,9 @@ void TestGloveAppearanceModule()
         inputs.target_model_known = true;
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
-            compatibility.compatible,
-            "pawn glove render fallback should allow render binding to appear after apply");
+            !compatibility.compatible &&
+                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
+            "pawn glove model replacement must not destroy the live render object while waiting for a speculative rebuild");
     }
 
     {
@@ -3316,8 +3632,8 @@ void TestGloveAppearanceModule()
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
             !compatibility.compatible &&
-                compatibility.reason == GloveCompatibilityReason::MissingModelIdentity,
-            "pawn glove render fallback still needs a known target model before apply");
+                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
+            "pawn glove render fallback must fail closed before any model mutation");
     }
 
     {
@@ -3329,6 +3645,18 @@ void TestGloveAppearanceModule()
         Expect(
             verification.verified,
             "finish-only should verify from carrier readback plus reapply trigger");
+    }
+
+    {
+        nskinzcs2::runtime::GloveRenderVerificationInputs inputs;
+        inputs.mode = GloveSlotMode::ModelAndFinish;
+        inputs.pawn_econ_gloves_reapply_path = true;
+        inputs.carrier_field_readback_matched = true;
+        inputs.reapply_triggered = true;
+        const auto verification = EvaluateGloveRenderVerification(inputs);
+        Expect(
+            verification.verified,
+            "model-and-finish pawn econ-gloves should verify from definition/finish readback plus the native reapply trigger");
     }
 
     {
@@ -3647,6 +3975,7 @@ void TestWeaponRefreshTargetMaterialRefreshGate()
 
 void TestStandardWeaponRefreshModel()
 {
+    using nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey;
     using nskinzcs2::runtime::StandardWeaponNeedsItemIdHighReset;
     using nskinzcs2::runtime::UsesTemporaryWorldWeaponRefreshModel;
 
@@ -3670,6 +3999,28 @@ void TestStandardWeaponRefreshModel()
         Expect(
             !StandardWeaponNeedsItemIdHighReset(0u, true),
             "standard weapons with a fresh item_id_high do not need a reset transition");
+
+        nskinzcs2::model::CosmeticProfile cache_profile;
+        cache_profile.base_item = 9;
+        cache_profile.paint_kit = 756;
+        const auto gungnir_key =
+            BuildStandardWeaponMaterialCacheKey(cache_profile, 76561198271727979ull, 9);
+        Expect(
+            gungnir_key != 0 && gungnir_key != 0xFFFFFFFFu,
+            "standard weapon material cache keys must avoid reserved item-id values");
+        Expect(
+            gungnir_key == BuildStandardWeaponMaterialCacheKey(
+                cache_profile,
+                76561198271727979ull,
+                9),
+            "the same standard weapon appearance should produce a stable material cache key");
+        cache_profile.paint_kit = 344;
+        Expect(
+            gungnir_key != BuildStandardWeaponMaterialCacheKey(
+                cache_profile,
+                76561198271727979ull,
+                9),
+            "changing paint kit should change the standard weapon material cache key");
     }
 
     {
@@ -3816,6 +4167,8 @@ int RunAllTests()
 {
     try
     {
+        RunNamedTest("TestCompatibilityManifest", TestCompatibilityManifest);
+        RunNamedTest("TestInstalledCompatibilityIfRequested", TestInstalledCompatibilityIfRequested);
         RunNamedTest("TestConfigRoundTrip", TestConfigRoundTrip);
         RunNamedTest("TestProfileMatching", TestProfileMatching);
         RunNamedTest("TestKeychainConfigAndMatching", TestKeychainConfigAndMatching);
@@ -3833,7 +4186,8 @@ int RunAllTests()
         RunNamedTest("TestPreferredKnifeTargetXuid", TestPreferredKnifeTargetXuid);
         RunNamedTest("TestWatchedKnifeTargetResolutionFallback", TestWatchedKnifeTargetResolutionFallback);
         RunNamedTest("TestRuntimeGloveBindingChoice", TestRuntimeGloveBindingChoice);
-    RunNamedTest("TestKnifeAppearanceModule", TestKnifeAppearanceModule);
+        RunNamedTest("TestWearableFactoryConfirmation", TestWearableFactoryConfirmation);
+        RunNamedTest("TestKnifeAppearanceModule", TestKnifeAppearanceModule);
     RunNamedTest("TestKnifePhase2WorldOnlyModule", TestKnifePhase2WorldOnlyModule);
     RunNamedTest("TestKnifeExactWorldBindingModule", TestKnifeExactWorldBindingModule);
     RunNamedTest("TestKnifeHudAliasSyntheticProxyExperiment", TestKnifeHudAliasSyntheticProxyExperiment);
@@ -3859,8 +4213,26 @@ int RunAllTests()
 }
 }
 
-int main()
+void ParseArguments(const int argc, wchar_t** argv)
 {
+    for (int index = 1; index < argc; ++index)
+    {
+        const std::wstring_view argument(argv[index]);
+        constexpr std::wstring_view prefix = L"--cs2-root=";
+        if (argument.starts_with(prefix))
+        {
+            g_compatibility_cs2_root = std::wstring(argument.substr(prefix.size()));
+        }
+        else if (argument == L"--cs2-root" && index + 1 < argc)
+        {
+            g_compatibility_cs2_root = argv[++index];
+        }
+    }
+}
+
+int wmain(const int argc, wchar_t** argv)
+{
+    ParseArguments(argc, argv);
     __try
     {
         return RunAllTests();

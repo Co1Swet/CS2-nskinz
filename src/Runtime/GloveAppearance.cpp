@@ -24,14 +24,9 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     case GloveSlotMode::FinishOnly:
         return pawn_glove_available ? GloveCarrierKind::PawnEconGloves : GloveCarrierKind::None;
     case GloveSlotMode::ModelAndFinish:
-        if (stable_wearable_available)
-        {
-            return GloveCarrierKind::Wearable;
-        }
-
         return pawn_glove_available
-            ? GloveCarrierKind::PawnEconGlovesRenderFallback
-            : GloveCarrierKind::None;
+            ? GloveCarrierKind::PawnEconGloves
+            : (stable_wearable_available ? GloveCarrierKind::Wearable : GloveCarrierKind::None);
     case GloveSlotMode::None:
     default:
         return GloveCarrierKind::None;
@@ -49,6 +44,56 @@ GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::Glove
     request.seed = profile.seed;
     request.wear = profile.wear;
     return request;
+}
+
+int SelectReusableWearableHandleSlot(
+    const std::uint32_t* handles,
+    const std::size_t handle_count,
+    const std::uint32_t requested_handle) noexcept
+{
+    constexpr std::uint32_t invalid_handle = 0xFFFFFFFFu;
+    constexpr std::uint32_t entity_index_mask = 0x7FFFu;
+    if (handles == nullptr || handle_count == 0 ||
+        requested_handle == 0 || requested_handle == invalid_handle ||
+        (requested_handle & entity_index_mask) == 0)
+    {
+        return -1;
+    }
+
+    int reusable_slot = -1;
+    for (std::size_t index = 0; index < handle_count; ++index)
+    {
+        const auto handle = handles[index];
+        if (handle == requested_handle)
+        {
+            return static_cast<int>(index);
+        }
+
+        const auto slot_is_invalid =
+            handle == 0 || handle == invalid_handle || (handle & entity_index_mask) == 0;
+        if (reusable_slot < 0 && slot_is_invalid)
+        {
+            reusable_slot = static_cast<int>(index);
+        }
+    }
+
+    return reusable_slot;
+}
+
+bool ShouldInitializeWearableModel(
+    const GloveSlotMode mode,
+    const bool real_wearable,
+    const int wearable_entity_index,
+    const bool target_model_known,
+    const std::uint64_t live_model_handle,
+    const bool formal_bind_context_verified) noexcept
+{
+    return mode == GloveSlotMode::ModelAndFinish &&
+        real_wearable &&
+        wearable_entity_index >= 0 &&
+        target_model_known &&
+        live_model_handle == 0 &&
+        formal_bind_context_verified;
 }
 
 GloveCompatibilityResult EvaluateGloveCompatibility(const GloveCompatibilityInputs& inputs) noexcept
@@ -85,9 +130,28 @@ GloveCompatibilityResult EvaluateGloveCompatibility(const GloveCompatibilityInpu
         return {true, GloveCompatibilityReason::Compatible};
     }
 
-    const auto uses_render_fallback =
-        inputs.carrier_kind == GloveCarrierKind::PawnEconGlovesRenderFallback;
-    if (inputs.carrier_kind != GloveCarrierKind::Wearable && !uses_render_fallback)
+    if (inputs.carrier_kind == GloveCarrierKind::PawnEconGloves)
+    {
+        if (inputs.requested_model_definition == 0)
+        {
+            return {false, GloveCompatibilityReason::MissingModelDefinition};
+        }
+
+        if (inputs.compatible_paint_definition != 0 &&
+            inputs.compatible_paint_definition != inputs.requested_model_definition)
+        {
+            return {false, GloveCompatibilityReason::PaintIncompatible};
+        }
+
+        if (!inputs.target_model_known)
+        {
+            return {false, GloveCompatibilityReason::MissingModelIdentity};
+        }
+
+        return {true, GloveCompatibilityReason::Compatible};
+    }
+
+    if (inputs.carrier_kind != GloveCarrierKind::Wearable)
     {
         return {false, GloveCompatibilityReason::MissingCarrier};
     }
@@ -103,12 +167,22 @@ GloveCompatibilityResult EvaluateGloveCompatibility(const GloveCompatibilityInpu
         return {false, GloveCompatibilityReason::PaintIncompatible};
     }
 
-    if (!inputs.render_binding_valid && !inputs.allow_render_binding_after_apply)
+    const auto allow_wearable_identity_after_apply =
+        inputs.allow_render_binding_after_apply &&
+        inputs.carrier_kind == GloveCarrierKind::Wearable;
+
+    if (!inputs.render_binding_valid && !allow_wearable_identity_after_apply)
     {
         return {false, GloveCompatibilityReason::MissingRenderBinding};
     }
 
-    if (uses_render_fallback && inputs.allow_render_binding_after_apply)
+    // A freshly created, live CEconWearable has a valid entity identity and
+    // ItemView before CS2 has assigned its model state.  The definition write
+    // plus the normal pawn glove refresh is what establishes that model.  Only
+    // permit this deferred identity path for a real Wearable whose requested
+    // model is known; post-apply verification still requires the world and
+    // first-person model identities to match the requested glove family.
+    if (allow_wearable_identity_after_apply)
     {
         if (!inputs.target_model_known)
         {
@@ -158,7 +232,7 @@ const wchar_t* GloveCompatibilityReasonText(const GloveCompatibilityReason reaso
 
 GloveRenderVerificationResult EvaluateGloveRenderVerification(const GloveRenderVerificationInputs& inputs) noexcept
 {
-    if (inputs.mode == GloveSlotMode::FinishOnly)
+    if (inputs.mode == GloveSlotMode::FinishOnly || inputs.pawn_econ_gloves_reapply_path)
     {
         if (!inputs.carrier_field_readback_matched)
         {

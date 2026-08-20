@@ -117,6 +117,22 @@ struct RuntimeGloveBindingInputs
     bool client_factory_available = false;
 };
 
+struct WearableFactoryConfirmationInputs
+{
+    bool candidate_resolved = false;
+    bool candidate_matches_previous = false;
+    std::uint32_t previous_candidate_confirmations = 0;
+    std::uint32_t previous_failure_confirmations = 0;
+};
+
+struct WearableFactoryConfirmationResult
+{
+    std::uint32_t candidate_confirmations = 0;
+    std::uint32_t failure_confirmations = 0;
+    bool publish_available = false;
+    bool publish_unavailable = false;
+};
+
 struct CanonicalWeaponCarrierDecisionInputs
 {
     bool world_valid = false;
@@ -133,6 +149,15 @@ struct CanonicalWeaponCarrierDecisionInputs
 
 RuntimeRebuildDecision EvaluateRuntimeRebuildDecision(const RuntimeRebuildInputs& inputs) noexcept;
 RuntimeGloveBindingChoice EvaluateGloveBindingChoice(const RuntimeGloveBindingInputs& inputs) noexcept;
+WearableFactoryConfirmationResult EvaluateWearableFactoryConfirmation(
+    const WearableFactoryConfirmationInputs& inputs) noexcept;
+bool IsWearableModelSourceTypeReady(std::uint8_t model_type) noexcept;
+// Matches the current CEconWearable client-think override shape without
+// accepting a generic executable pointer. Runtime additionally validates both
+// relative targets and the exact reflected CEconWearable primary vtable.
+bool MatchesWearableDefinitionRefreshThunk(
+    const std::uint8_t* bytes,
+    std::size_t size) noexcept;
 GloveApplyMode ResolveGloveApplyMode(const nskinzcs2::model::CosmeticProfile& profile) noexcept;
 CanonicalWeaponCarrierKind ResolveCanonicalWeaponCarrierKind(const CanonicalWeaponCarrierDecisionInputs& inputs) noexcept;
 bool CanonicalWeaponCarrierDecisionIsShared(const CanonicalWeaponCarrierDecisionInputs& inputs) noexcept;
@@ -159,6 +184,10 @@ WeaponSkinRefreshTarget ResolveLinkedWeaponRefreshTarget(
     WeaponSkinRefreshTarget preferred_target) noexcept;
 bool UsesTemporaryWorldWeaponRefreshModel(const nskinzcs2::model::CosmeticProfile& profile) noexcept;
 bool StandardWeaponNeedsItemIdHighReset(std::uint32_t current_item_id_high, bool uses_temporary_world_refresh_model) noexcept;
+std::uint32_t BuildStandardWeaponMaterialCacheKey(
+    const nskinzcs2::model::CosmeticProfile& profile,
+    std::uint64_t xuid,
+    int current_definition_index) noexcept;
 std::vector<std::pair<std::uint16_t, float>> BuildWeaponRefreshAttributes(const nskinzcs2::model::CosmeticProfile& profile);
 std::vector<std::uint16_t> BuildMissingWeaponAttributeDefinitionIndices(
     const nskinzcs2::model::CosmeticProfile& profile,
@@ -592,6 +621,7 @@ private:
     std::atomic_bool hook_activation_requested_ {false};
     std::atomic_bool carrier_probe_requested_ {false};
     std::atomic_bool logged_unavailable_refresh_ {false};
+    HANDLE automation_refresh_event_ = nullptr;
     std::wstring global_swapper_early_reason_;
     std::wstring global_swapper_early_route_;
     std::wstring last_logged_status_;

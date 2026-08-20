@@ -50,6 +50,10 @@ using nskinzcs2::ui::UiTextId;
 
 constexpr wchar_t kWindowClassName[] = L"nSkinzCS2.ToolWindow";
 constexpr wchar_t kWindowTitle[] = L"nSkinzCS2";
+// Local regression automation can request the same runtime rebuild as Update
+// without stealing foreground input from another full-screen application.
+// This does not mutate the staged editor document or change the public UI.
+constexpr UINT kAutomatedRuntimeRefreshMessage = WM_APP + 0x153;
 
 const char* Ui(const UiTextId id) noexcept
 {
@@ -883,8 +887,20 @@ private:
         ImGui::StyleColorsDark();
         ApplyStyle();
 
-        ImGui_ImplWin32_Init(hwnd_);
-        ImGui_ImplDX11_Init(device_, device_context_);
+        if (!ImGui_ImplWin32_Init(hwnd_))
+        {
+            Logger::Error(L"ImGui Win32 backend initialization failed.");
+            Cleanup();
+            return false;
+        }
+        if (!ImGui_ImplDX11_Init(device_, device_context_))
+        {
+            Logger::Error(L"ImGui D3D11 backend initialization failed.");
+            ImGui_ImplWin32_Shutdown();
+            ImGui::DestroyContext();
+            Cleanup();
+            return false;
+        }
         imgui_initialized_ = true;
 
         ShowWindow(hwnd_, SW_HIDE);
@@ -1135,9 +1151,30 @@ private:
             return;
         }
 
+        if (!first_frame_started_)
+        {
+            first_frame_started_ = true;
+            Logger::Info(L"UI first frame begin.");
+        }
+
         ImGui_ImplDX11_NewFrame();
+        if (!first_dx11_frame_completed_)
+        {
+            first_dx11_frame_completed_ = true;
+            Logger::Info(L"UI first D3D11 backend frame completed.");
+        }
         ImGui_ImplWin32_NewFrame();
+        if (!first_win32_frame_completed_)
+        {
+            first_win32_frame_completed_ = true;
+            Logger::Info(L"UI first Win32 backend frame completed.");
+        }
         ImGui::NewFrame();
+        if (!first_imgui_frame_started_)
+        {
+            first_imgui_frame_started_ = true;
+            Logger::Info(L"UI first ImGui frame started.");
+        }
 
         DrawMainWindow();
 
@@ -1147,6 +1184,11 @@ private:
         device_context_->ClearRenderTargetView(render_target_view_, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         swap_chain_->Present(1, 0);
+        if (!first_frame_presented_)
+        {
+            first_frame_presented_ = true;
+            Logger::Info(L"UI first frame presented successfully.");
+        }
     }
 
     void DrawMainWindow()
@@ -2151,6 +2193,10 @@ private:
     {
         switch (message)
         {
+        case kAutomatedRuntimeRefreshMessage:
+            state_.RequestManualRefresh();
+            Logger::Info(L"Runtime Update requested by local regression automation.");
+            return 0;
         case WM_SIZE:
             if (device_ != nullptr && swap_chain_ != nullptr && wparam != SIZE_MINIMIZED)
             {
@@ -2193,6 +2239,11 @@ private:
     bool imgui_initialized_ = false;
     bool resources_created_ = false;
     bool window_class_registered_ = false;
+    bool first_frame_started_ = false;
+    bool first_dx11_frame_completed_ = false;
+    bool first_win32_frame_completed_ = false;
+    bool first_imgui_frame_started_ = false;
+    bool first_frame_presented_ = false;
 
     HWND hwnd_ = nullptr;
     ID3D11Device* device_ = nullptr;

@@ -12,7 +12,7 @@ if not exist "%EXE%" (
     exit /b 1
 )
 
-"%EXE%" > "%STDOUT_LOG%" 2> "%STDERR_LOG%"
+"%EXE%" %* > "%STDOUT_LOG%" 2> "%STDERR_LOG%"
 set "TEST_EXIT=%ERRORLEVEL%"
 
 if exist "%STDOUT_LOG%" type "%STDOUT_LOG%"

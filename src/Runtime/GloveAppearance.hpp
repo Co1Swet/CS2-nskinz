@@ -29,9 +29,10 @@ struct GloveAppearanceRequest
     GloveSlotMode mode = GloveSlotMode::None;
     int model_definition = 0;
     int paint_kit = 0;
+    bool explicit_vanilla_finish = false;
     int quality = 0;
     int seed = 0;
-    float wear = 0.0000001f;
+    float wear = model::kMinimumCosmeticWear;
 };
 
 struct ResolvedGloveCarrier
@@ -199,6 +200,10 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     bool stable_wearable_available,
     bool pawn_glove_available) noexcept;
 GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::GloveProfile& profile) noexcept;
+// CS2 team numbers: 2 = Terrorists, 3 = Counter-Terrorists. A glove paint kit
+// of zero means restore the stock team glove, not keep a special glove model
+// with an empty paint kit.
+int ResolveDefaultGloveDefinitionForTeam(int team_number) noexcept;
 // Returns an already matching slot or the first existing invalid slot. It
 // never selects an append position because CS2 owns capacity/allocator state.
 int SelectReusableWearableHandleSlot(

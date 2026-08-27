@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace
@@ -53,6 +54,7 @@ void TestCompatibilityManifest()
     Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.191.1 GetDemoFilePath slot should remain explicit");
     Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.191.1 GetLevelNameShort slot should remain explicit");
     Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.191.1 GetDemoFile slot should remain explicit");
+    Expect(kEngineExecuteClientCmdVtableIndex == 51, "HLAE 2.191.1 ExecuteClientCmd slot should remain explicit");
     Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.191.1 demo tick slot should remain explicit");
     Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.191.1 IDemoFile IsPlayingDemo slot should remain explicit");
     Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.191.1 IDemoFile IsDemoPaused slot should remain explicit");
@@ -159,6 +161,21 @@ bool ContainsRefreshAttribute(
             return attribute.first == definition_index;
         });
     return it != attributes.end() && std::fabs(it->second - expected_value) <= epsilon;
+}
+
+bool ContainsExactWearAttribute(
+    const std::vector<std::pair<std::uint16_t, float>>& attributes,
+    const float expected_value)
+{
+    const auto it = std::find_if(
+        attributes.begin(),
+        attributes.end(),
+        [](const auto& attribute)
+        {
+            return attribute.first == 8;
+        });
+    return it != attributes.end() &&
+        nskinzcs2::model::CosmeticWearMatchesExactly(it->second, expected_value);
 }
 
 bool ContainsDefinitionIndex(
@@ -725,7 +742,8 @@ void TestConfigRoundTrip()
     profile.xuid = 76561198000000000ULL;
     profile.base_item = 7;
     profile.override_item = 515;
-    profile.paint_kit = 344;
+    profile.paint_kit = 0;
+    profile.explicit_vanilla_finish = true;
     profile.quality = 12;
     profile.seed = 1337;
     profile.stat_trak = 42;
@@ -734,21 +752,126 @@ void TestConfigRoundTrip()
     profile.stickers[0].kit_id = 3;
     profile.stickers[0].rotation = 90.0f;
     document.profiles.push_back(profile);
+    nskinzcs2::model::KnifeProfile knife_profile;
+    knife_profile.explicit_vanilla_finish = true;
+    document.knife_profiles.push_back(knife_profile);
+    nskinzcs2::model::GloveProfile glove_profile;
+    glove_profile.explicit_vanilla_finish = true;
+    document.glove_profiles.push_back(glove_profile);
+    nskinzcs2::model::KeychainProfile keychain_profile;
+    keychain_profile.explicit_clear = true;
+    document.keychain_profiles.push_back(keychain_profile);
     document.experimental_allow_hud_alias_synthetic_proxy_model_write = true;
 
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 4, "config should round-trip version 4");
+    Expect(loaded.version == 5, "config should round-trip version 5");
     Expect(loaded.profiles.size() == 1, "config should contain one profile");
     Expect(loaded.profiles[0].name == "AK test", "profile name should round-trip");
     Expect(loaded.profiles[0].stickers[0].kit_id == 3, "sticker should round-trip");
+    Expect(loaded.profiles[0].explicit_vanilla_finish, "weapon vanilla intent should round-trip");
+    Expect(loaded.knife_profiles[0].explicit_vanilla_finish, "knife vanilla intent should round-trip");
+    Expect(loaded.glove_profiles[0].explicit_vanilla_finish, "glove vanilla intent should round-trip");
+    Expect(loaded.keychain_profiles[0].explicit_clear, "keychain clear intent should round-trip");
     Expect(!loaded.keychain_profiles.empty(), "config load should repair missing keychain profiles");
     Expect(
         loaded.experimental_allow_hud_alias_synthetic_proxy_model_write,
         "experimental HUD proxy write toggle should round-trip");
 
     fs::remove(temp_path);
+}
+
+void TestCosmeticWearPolicy()
+{
+    using nskinzcs2::model::CosmeticWearMatchesExactly;
+    using nskinzcs2::model::NormalizeCosmeticWear;
+    using nskinzcs2::model::kMaximumCosmeticWear;
+    using nskinzcs2::model::kMinimumCosmeticWear;
+
+    Expect(
+        CosmeticWearMatchesExactly(NormalizeCosmeticWear(0.0f), kMinimumCosmeticWear),
+        "zero wear should normalize to the shared cosmetic minimum");
+    Expect(
+        CosmeticWearMatchesExactly(NormalizeCosmeticWear(-0.5f), kMinimumCosmeticWear),
+        "negative wear should normalize to the shared cosmetic minimum");
+    Expect(
+        CosmeticWearMatchesExactly(NormalizeCosmeticWear(2.0f), kMaximumCosmeticWear),
+        "wear above one should normalize to the shared cosmetic maximum");
+    Expect(
+        CosmeticWearMatchesExactly(NormalizeCosmeticWear(0.25f), 0.25f),
+        "wear inside the supported range should be preserved");
+    Expect(
+        CosmeticWearMatchesExactly(
+            NormalizeCosmeticWear(std::numeric_limits<float>::quiet_NaN()),
+            kMinimumCosmeticWear),
+        "non-finite wear should normalize to the shared cosmetic minimum");
+    Expect(
+        !CosmeticWearMatchesExactly(0.0f, kMinimumCosmeticWear),
+        "exact wear comparison must distinguish zero from the configured minimum");
+    Expect(
+        !CosmeticWearMatchesExactly(
+            std::nextafter(kMinimumCosmeticWear, kMaximumCosmeticWear),
+            kMinimumCosmeticWear),
+        "exact wear comparison must distinguish adjacent float values");
+
+    namespace fs = std::filesystem;
+    const auto load_path = fs::temp_directory_path() / "nSkinzCS2.wear.load.test.json";
+    {
+        std::ofstream stream(load_path, std::ios::trunc);
+        stream << R"json({
+  "version": 4,
+  "profiles": [
+    { "name": "zero", "enabled": true, "xuid": 1, "base_item": 7, "wear": 0.0 },
+    { "name": "negative", "enabled": true, "xuid": 2, "base_item": 9, "wear": -0.5 },
+    { "name": "above", "enabled": true, "xuid": 3, "base_item": 16, "wear": 2.0 },
+    { "name": "inside", "enabled": true, "xuid": 4, "base_item": 17, "wear": 0.25 }
+  ],
+  "glove_profiles": [
+    { "name": "default gloves", "enabled": true, "xuid": 5, "mode": "model_and_finish", "model_definition": 5030, "paint_kit": 10018, "wear": 0.0 }
+  ]
+})json";
+    }
+
+    const auto loaded = nskinzcs2::ConfigStore::Load(load_path);
+    Expect(loaded.profiles.size() == 4, "wear policy config should preserve weapon profiles");
+    Expect(
+        CosmeticWearMatchesExactly(loaded.profiles[0].wear, kMinimumCosmeticWear),
+        "loaded zero weapon wear should clamp to the shared minimum");
+    Expect(
+        CosmeticWearMatchesExactly(loaded.profiles[1].wear, kMinimumCosmeticWear),
+        "loaded negative weapon wear should clamp to the shared minimum");
+    Expect(
+        CosmeticWearMatchesExactly(loaded.profiles[2].wear, kMaximumCosmeticWear),
+        "loaded weapon wear above one should clamp to the shared maximum");
+    Expect(
+        CosmeticWearMatchesExactly(loaded.profiles[3].wear, 0.25f),
+        "loaded weapon wear inside the supported range should be preserved");
+    Expect(
+        !loaded.glove_profiles.empty() &&
+            CosmeticWearMatchesExactly(loaded.glove_profiles[0].wear, kMinimumCosmeticWear),
+        "loaded zero glove wear should clamp to the shared minimum");
+    fs::remove(load_path);
+
+    const auto save_path = fs::temp_directory_path() / "nSkinzCS2.wear.save.test.json";
+    nskinzcs2::model::ConfigDocument unbounded_document;
+    nskinzcs2::model::CosmeticProfile unbounded_weapon;
+    unbounded_weapon.wear = 0.0f;
+    unbounded_document.profiles.push_back(unbounded_weapon);
+    nskinzcs2::model::GloveProfile unbounded_glove;
+    unbounded_glove.wear = 5.0f;
+    unbounded_document.glove_profiles.push_back(unbounded_glove);
+    Expect(nskinzcs2::ConfigStore::Save(save_path, unbounded_document), "wear policy config save should succeed");
+    const auto saved = nskinzcs2::ConfigStore::Load(save_path);
+    Expect(
+        !saved.profiles.empty() &&
+            CosmeticWearMatchesExactly(saved.profiles[0].wear, kMinimumCosmeticWear),
+        "saved weapon wear should be normalized");
+    Expect(
+        !saved.glove_profiles.empty() &&
+            CosmeticWearMatchesExactly(saved.glove_profiles[0].wear, kMaximumCosmeticWear),
+        "saved glove wear should be normalized");
+    fs::remove(save_path);
 }
 
 void TestProfileMatching()
@@ -805,7 +928,7 @@ void TestKeychainConfigAndMatching()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "keychain config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 4, "keychain config should round-trip version 4");
+    Expect(loaded.version == 5, "keychain config should round-trip version 5");
     const auto* ak_match = nskinzcs2::ConfigStore::FindMatchingKeychainProfile(loaded, 10, 7);
     Expect(ak_match != nullptr, "keychain profile lookup should find the configured weapon binding");
     Expect(ak_match->name == "AK Charm New", "duplicate keychain bindings should keep the last entry");
@@ -814,6 +937,20 @@ void TestKeychainConfigAndMatching()
     const auto* awp_match = nskinzcs2::ConfigStore::FindMatchingKeychainProfile(loaded, 10, 9);
     Expect(awp_match != nullptr, "keychain profile lookup should distinguish different weapons");
     Expect(awp_match->keychain_kit == 2001, "keychain lookup should preserve per-weapon bindings");
+
+    nskinzcs2::model::KeychainProfile no_op;
+    no_op.enabled = true;
+    no_op.xuid = 11;
+    no_op.base_item = 7;
+    auto matching_document = loaded;
+    matching_document.keychain_profiles.push_back(no_op);
+    Expect(
+        nskinzcs2::ConfigStore::FindMatchingKeychainProfile(matching_document, 11, 7) == nullptr,
+        "dash keychain intent should not create a runtime match");
+    matching_document.keychain_profiles.back().explicit_clear = true;
+    Expect(
+        nskinzcs2::ConfigStore::FindMatchingKeychainProfile(matching_document, 11, 7) != nullptr,
+        "explicit keychain clear intent should create a runtime match");
 
     fs::remove(temp_path);
 }
@@ -855,7 +992,7 @@ void TestGloveConfigAndMatching()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "glove config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 4, "glove config should round-trip version 4");
+    Expect(loaded.version == 5, "glove config should round-trip version 5");
     Expect(!loaded.glove_profiles.empty(), "glove config should contain glove profiles");
     Expect(loaded.glove_profiles[0].mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish, "glove mode should round-trip");
     Expect(loaded.glove_profiles[0].model_definition == 5030, "glove model should round-trip");
@@ -891,9 +1028,12 @@ void TestKnifeProfileConfigMigration()
     }
 
     auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(loaded.version == 4, "legacy knife config should migrate to version 4");
+    Expect(loaded.version == 5, "legacy knife config should migrate to version 5");
     Expect(loaded.profiles.size() == 1, "legacy knife entries should be removed from weapon profiles");
     Expect(loaded.profiles[0].base_item == 7, "non-knife weapon entries should remain after migration");
+    Expect(
+        !loaded.profiles[0].explicit_vanilla_finish,
+        "legacy paint_kit=0 entries should remain dash/no-modify rather than becoming vanilla intent");
 
     const auto* migrated_knife = nskinzcs2::ConfigStore::FindMatchingKnifeProfile(loaded, 11);
     Expect(migrated_knife != nullptr, "legacy knife profile should migrate into knife_profiles");
@@ -920,7 +1060,7 @@ void TestKnifeProfileConfigMigration()
     }
 
     loaded = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(loaded.version == 4, "explicit knife config should normalize to version 4");
+    Expect(loaded.version == 5, "explicit knife config should normalize to version 5");
     const auto* explicit_knife = nskinzcs2::ConfigStore::FindMatchingKnifeProfile(loaded, 20);
     Expect(explicit_knife != nullptr, "explicit knife profile should remain available");
     Expect(explicit_knife->name == "Explicit Knife", "explicit knife_profiles entry should beat legacy knife profiles");
@@ -1463,9 +1603,15 @@ void TestKnifeRefreshCrashGuardPolicy()
     using nskinzcs2::runtime::ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests;
     using nskinzcs2::runtime::RuntimeRebuildReason;
     using nskinzcs2::runtime::ShouldAllowAttributeListVectorMutationForProfile;
+    using nskinzcs2::runtime::ShouldAllowVerifiedInPlaceKnifeInitializationRefresh;
     using nskinzcs2::runtime::ShouldAllowWeaponRefreshHelperDispatch;
     using nskinzcs2::runtime::ShouldConsumeKnifeRefreshHelperEpoch;
+    using nskinzcs2::runtime::ShouldDispatchKnifeRefreshWithInPlaceAttributes;
+    using nskinzcs2::runtime::ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason;
+    using nskinzcs2::runtime::ShouldUseStableKnifeFinishFastPath;
+    using nskinzcs2::runtime::ShouldUseStableStandardWeaponMaterialFastPath;
     using nskinzcs2::runtime::ShouldInstallRuntimeOwnedAttributeListForProfile;
+    using nskinzcs2::runtime::ShouldUseKnifeVanillaTemporaryRefreshOverlay;
 
     Expect(
         !KnifeRefreshHelperPolicyArmsOnRebuildReason(
@@ -1519,6 +1665,19 @@ void TestKnifeRefreshCrashGuardPolicy()
         "entity-list changes must stay outside the knife refresh epoch");
 
     Expect(
+        ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(RuntimeRebuildReason::PauseResume),
+        "pause/resume should preserve verified weapon material signatures");
+    Expect(
+        ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(RuntimeRebuildReason::WatchedPlayerSwitch),
+        "spectator-target switches should preserve verified weapon material signatures");
+    Expect(
+        !ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(RuntimeRebuildReason::DemoSeek),
+        "demo seeks must invalidate weapon material signatures because entities can be replaced");
+    Expect(
+        !ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(RuntimeRebuildReason::ConfigChanged),
+        "configuration changes must invalidate weapon material signatures");
+
+    Expect(
         ShouldAllowWeaponRefreshHelperDispatch(false, KnifeRefreshHelperPolicy::Disabled, false),
         "standard weapon helper dispatch should stay enabled under the knife crash guard");
     Expect(
@@ -1547,6 +1706,68 @@ void TestKnifeRefreshCrashGuardPolicy()
         !ShouldConsumeKnifeRefreshHelperEpoch(false, true),
         "standard-weapon helper dispatches must not consume the knife epoch");
 
+    Expect(
+        ShouldDispatchKnifeRefreshWithInPlaceAttributes(true, true, true),
+        "a knife refresh should reuse verified in-place attributes without replacing its vector");
+    Expect(
+        !ShouldDispatchKnifeRefreshWithInPlaceAttributes(true, true, false),
+        "a knife refresh must not dispatch with incomplete in-place attributes");
+    Expect(
+        !ShouldDispatchKnifeRefreshWithInPlaceAttributes(false, true, true),
+        "standard weapons should retain their existing temporary/runtime-owned attachment path");
+
+    Expect(
+        ShouldUseKnifeVanillaTemporaryRefreshOverlay(true, true, false),
+        "an explicit vanilla knife with no paint attribute should use the scoped empty-vector refresh path");
+    Expect(
+        ShouldUseKnifeVanillaTemporaryRefreshOverlay(true, true, true),
+        "an explicit vanilla knife must clear an existing paint attribute instead of reusing it in place");
+    Expect(
+        !ShouldUseKnifeVanillaTemporaryRefreshOverlay(false, true, false),
+        "standard weapons must not enter the knife-only vanilla overlay path");
+
+    Expect(
+        ShouldAllowVerifiedInPlaceKnifeInitializationRefresh(true, true, true, false),
+        "a new knife entity with verified in-place attributes should receive one initialization refresh");
+    Expect(
+        !ShouldAllowVerifiedInPlaceKnifeInitializationRefresh(true, true, true, true),
+        "an already refreshed knife entity must not receive another automatic initialization refresh");
+    Expect(
+        !ShouldAllowVerifiedInPlaceKnifeInitializationRefresh(true, true, false, false),
+        "an incomplete knife attribute state must remain behind the manual refresh epoch");
+
+    Expect(
+        ShouldUseStableKnifeFinishFastPath(true, true, false, true, true, true),
+        "a refreshed finish-only knife with matching live state should skip the exact pipeline");
+    Expect(
+        !ShouldUseStableKnifeFinishFastPath(true, true, true, true, true, true),
+        "a knife model rebind request must never use the finish-only fast path");
+    Expect(
+        !ShouldUseStableKnifeFinishFastPath(true, true, false, true, true, false),
+        "a changed live knife attribute must invalidate the finish-only fast path");
+    Expect(
+        !ShouldUseStableKnifeFinishFastPath(true, true, false, false, true, true),
+        "a knife without a completed material refresh must run the exact pipeline");
+    Expect(
+        !ShouldUseStableKnifeFinishFastPath(true, true, false, true, false, true),
+        "a changed live knife definition must invalidate the finish-only fast path");
+
+    Expect(
+        ShouldUseStableStandardWeaponMaterialFastPath(true, true, true, true, true, true),
+        "a refreshed standard weapon with matching durable material state should skip another helper dispatch");
+    Expect(
+        !ShouldUseStableStandardWeaponMaterialFastPath(true, false, true, true, true, true),
+        "a standard weapon without a completed material refresh must run the exact pipeline");
+    Expect(
+        !ShouldUseStableStandardWeaponMaterialFastPath(true, true, true, false, true, true),
+        "a replaced standard-weapon attribute vector must invalidate the stable material path");
+    Expect(
+        !ShouldUseStableStandardWeaponMaterialFastPath(true, true, true, true, false, true),
+        "a changed render mesh mask must invalidate the stable material path");
+    Expect(
+        !ShouldUseStableStandardWeaponMaterialFastPath(false, true, true, true, true, true),
+        "knife profiles must stay outside the standard-weapon stable material policy");
+
     {
         nskinzcs2::model::CosmeticProfile knife_profile;
         knife_profile.base_item = 42;
@@ -1562,6 +1783,15 @@ void TestKnifeRefreshCrashGuardPolicy()
         Expect(
             ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(knife_profile),
             "knife promoted refresh helper attachments should restore on abandon-mode cleanup boundaries");
+
+        knife_profile.paint_kit = 0;
+        knife_profile.explicit_vanilla_finish = true;
+        Expect(
+            !ProbeKnifeRefreshAttachmentPromotionAllowedForTests(knife_profile),
+            "an explicit vanilla knife should not promote an attribute payload after its paint lists are cleared");
+        Expect(
+            !ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(knife_profile),
+            "an explicit vanilla knife has no promoted payload to restore after a seek");
     }
 
     {
@@ -1964,6 +2194,7 @@ void TestKnifeAppearanceModule()
     using nskinzcs2::runtime::KnifeProfileRequiresModelDefinition;
     using nskinzcs2::runtime::KnifeRenderVerificationInputs;
     using nskinzcs2::runtime::KnifeRenderVerificationReason;
+    using nskinzcs2::runtime::ResolveKnifeAppearancePipelineRoute;
     using nskinzcs2::runtime::ResolveKnifeSlotMode;
     using nskinzcs2::runtime::ShouldApplyKnifeModelDefinitionOverride;
     using nskinzcs2::runtime::KnifeSlotMode;
@@ -2008,6 +2239,18 @@ void TestKnifeAppearanceModule()
     Expect(finish_request.xuid == finish_only_profile.xuid, "knife request should preserve xuid");
     Expect(finish_request.mode == KnifeSlotMode::FinishOnly, "finish-only request should stay finish-only");
     Expect(model_request.mode == KnifeSlotMode::ModelAndFinish, "valid knife request should preserve model-and-finish");
+
+    auto vanilla_profile = finish_only_profile;
+    vanilla_profile.paint_kit = 0;
+    vanilla_profile.explicit_vanilla_finish = true;
+    const auto vanilla_request = BuildKnifeAppearanceRequest(vanilla_profile);
+    auto no_change_request = vanilla_request;
+    no_change_request.explicit_vanilla_finish = false;
+    Expect(vanilla_request.explicit_vanilla_finish, "knife request should preserve explicit vanilla intent");
+    Expect(
+        BuildKnifeProfileApplySignature(vanilla_request, vanilla_request.xuid, 42, 0x55ull) !=
+            BuildKnifeProfileApplySignature(no_change_request, no_change_request.xuid, 42, 0x55ull),
+        "knife signature should distinguish dash from explicit vanilla");
     Expect(model_request.model_definition == 507, "valid knife request should preserve the selected knife model");
     Expect(
         skeleton_model_request.mode == KnifeSlotMode::ModelAndFinish &&
@@ -2041,6 +2284,11 @@ void TestKnifeAppearanceModule()
     Expect(
         finish_gate.reason == KnifeApplyGateReason::ReadyForFinishOnly,
         "finish-only knife gate should report the stable finish-only path");
+    const auto finish_pipeline_route = ResolveKnifeAppearancePipelineRoute(finish_gate);
+    Expect(
+        finish_pipeline_route.use_exact_appearance_pipeline &&
+            !finish_pipeline_route.allow_model_rebind,
+        "finish-only knife profiles should use the exact carrier/material pipeline without allowing model rebinds");
     Expect(
         !ShouldApplyKnifeModelDefinitionOverride(finish_request, 42),
         "finish-only knife runtime should never request a knife definition override");
@@ -2066,6 +2314,11 @@ void TestKnifeAppearanceModule()
     Expect(
         model_gate.reason == KnifeApplyGateReason::ReadyForModelAndFinish,
         "fully satisfied knife model gate should enter the model-and-finish path");
+    const auto model_pipeline_route = ResolveKnifeAppearancePipelineRoute(model_gate);
+    Expect(
+        model_pipeline_route.use_exact_appearance_pipeline &&
+            model_pipeline_route.allow_model_rebind,
+        "model-and-finish knife profiles should retain the exact pipeline model-rebind route");
     Expect(
         ShouldApplyKnifeModelDefinitionOverride(model_request, 42),
         "model-and-finish knife runtime should request a definition override when the target differs");
@@ -2201,11 +2454,16 @@ void TestKnifeAppearanceModule()
     missing_first_person_inputs.context.first_person_owner_kind = KnifeFirstPersonOwnerKind::None;
     const auto missing_first_person_gate = EvaluateKnifeApplyGate(missing_first_person_inputs);
     Expect(
-        !missing_first_person_gate.allow_finish_writes &&
-            missing_first_person_gate.resolved_mode == KnifeSlotMode::None &&
+        missing_first_person_gate.allow_finish_writes &&
+            missing_first_person_gate.resolved_mode == KnifeSlotMode::FinishOnly &&
             !missing_first_person_gate.allow_animation_remap &&
             missing_first_person_gate.reason == KnifeApplyGateReason::MissingFirstPersonBinding,
-        "world-only knife evidence without a safe first-person owner should now fail closed");
+        "world-only knife evidence should allow carrier finish writes while model and animation writes remain closed");
+    const auto blocked_pipeline_route = ResolveKnifeAppearancePipelineRoute(missing_first_person_gate);
+    Expect(
+        blocked_pipeline_route.use_exact_appearance_pipeline &&
+            !blocked_pipeline_route.allow_model_rebind,
+        "world-only knife profiles should use the exact finish route without entering model rebind");
 
     KnifeApplyGateInputs unsafe_finish_only_inputs = finish_inputs;
     unsafe_finish_only_inputs.context.watched_target = true;
@@ -2216,10 +2474,10 @@ void TestKnifeAppearanceModule()
     unsafe_finish_only_inputs.context.direct_first_person_render_valid = false;
     const auto unsafe_finish_only_gate = EvaluateKnifeApplyGate(unsafe_finish_only_inputs);
     Expect(
-        !unsafe_finish_only_gate.allow_finish_writes &&
-            unsafe_finish_only_gate.resolved_mode == KnifeSlotMode::None &&
-            unsafe_finish_only_gate.reason == KnifeApplyGateReason::MissingFirstPersonBinding,
-        "finish-only watched knife paths should now fail closed even when watched-target ownership is present but no safe first-person evidence is available");
+        unsafe_finish_only_gate.allow_finish_writes &&
+            unsafe_finish_only_gate.resolved_mode == KnifeSlotMode::FinishOnly &&
+            unsafe_finish_only_gate.reason == KnifeApplyGateReason::ReadyForFinishOnly,
+        "finish-only watched knife paths should accept authoritative carrier writes without requiring a first-person model owner");
 
     KnifeApplyGateInputs direct_render_only_inputs = model_inputs;
     direct_render_only_inputs.context.viewmodel_carrier_valid = false;
@@ -2246,11 +2504,11 @@ void TestKnifeAppearanceModule()
     blocked_direct_render_inputs.context.hud_proxy_fallback_allowed = false;
     const auto blocked_direct_render_gate = EvaluateKnifeApplyGate(blocked_direct_render_inputs);
     Expect(
-        !blocked_direct_render_gate.allow_finish_writes &&
-            blocked_direct_render_gate.resolved_mode == KnifeSlotMode::None &&
+        blocked_direct_render_gate.allow_finish_writes &&
+            blocked_direct_render_gate.resolved_mode == KnifeSlotMode::FinishOnly &&
             !blocked_direct_render_gate.allow_model_writes &&
             blocked_direct_render_gate.reason == KnifeApplyGateReason::MissingFirstPersonBinding,
-        "direct-render-only knife evidence must now fail closed unless HUD fallback is explicitly allowed");
+        "direct-render-only knife evidence without HUD fallback should retain carrier finish writes while model writes fail closed");
 
     KnifeApplyGateInputs observer_invalid_inputs = model_inputs;
     observer_invalid_inputs.context.observer_chain_present = true;
@@ -3235,8 +3493,19 @@ void TestGloveAppearanceModule()
     using nskinzcs2::runtime::GloveRenderVerificationReason;
     using nskinzcs2::runtime::GloveSlotMode;
     using nskinzcs2::runtime::ResolveCanonicalGloveCarrierKind;
+    using nskinzcs2::runtime::ResolveDefaultGloveDefinitionForTeam;
     using nskinzcs2::runtime::ResolveGloveSlotMode;
     using nskinzcs2::runtime::SelectReusableWearableHandleSlot;
+
+    Expect(
+        ResolveDefaultGloveDefinitionForTeam(2) == 5028,
+        "T-side vanilla gloves should resolve to the stock Terrorist definition");
+    Expect(
+        ResolveDefaultGloveDefinitionForTeam(3) == 5029,
+        "CT-side vanilla gloves should resolve to the stock Counter-Terrorist definition");
+    Expect(
+        ResolveDefaultGloveDefinitionForTeam(0) == 0,
+        "unknown teams must not guess a stock glove definition");
 
     {
         nskinzcs2::model::GloveProfile profile;
@@ -3256,6 +3525,7 @@ void TestGloveAppearanceModule()
         profile.mode = nskinzcs2::model::GloveProfileMode::ModelAndFinish;
         profile.model_definition = 5030;
         profile.paint_kit = 10018;
+        profile.explicit_vanilla_finish = true;
         profile.quality = 3;
         profile.seed = 7;
         profile.wear = 0.15f;
@@ -3265,7 +3535,23 @@ void TestGloveAppearanceModule()
         Expect(request.mode == GloveSlotMode::ModelAndFinish, "glove request should preserve mode");
         Expect(request.model_definition == 5030, "glove request should preserve model definition");
         Expect(request.paint_kit == 10018, "glove request should preserve paint");
+        Expect(request.explicit_vanilla_finish, "glove request should preserve explicit finish intent");
         Expect(GloveProfileRequiresModelDefinition(request.mode), "model-and-finish mode requires a model definition");
+    }
+
+    {
+        nskinzcs2::model::GloveProfile profile;
+        profile.mode = nskinzcs2::model::GloveProfileMode::ModelAndFinish;
+        profile.model_definition = 5032;
+        profile.paint_kit = 10009;
+        profile.wear = 0.0f;
+
+        const auto request = BuildGloveAppearanceRequest(profile);
+        Expect(
+            nskinzcs2::model::CosmeticWearMatchesExactly(
+                request.wear,
+                nskinzcs2::model::kMinimumCosmeticWear),
+            "glove requests below the supported wear floor should use exact minimum wear");
     }
 
     Expect(
@@ -3299,6 +3585,21 @@ void TestGloveAppearanceModule()
         Expect(
             compatibility.compatible,
             "model-and-finish should accept the current pawn econ-gloves reapply path");
+    }
+
+    {
+        nskinzcs2::runtime::GloveCompatibilityInputs inputs;
+        inputs.mode = GloveSlotMode::ModelAndFinish;
+        inputs.carrier_kind = GloveCarrierKind::PawnEconGloves;
+        inputs.current_definition_index = 5029;
+        inputs.requested_model_definition = 5032;
+        inputs.compatible_paint_definition = 5032;
+        inputs.carrier_valid = true;
+        inputs.target_model_known = true;
+        const auto compatibility = EvaluateGloveCompatibility(inputs);
+        Expect(
+            compatibility.compatible,
+            "model-and-finish should accept the default Counter-Terrorist pawn glove definition");
     }
 
     {
@@ -3733,6 +4034,35 @@ void TestBuildWeaponRefreshAttributes()
 
     {
         nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        profile.paint_kit = 180;
+        profile.wear = 0.0f;
+
+        const auto attributes = nskinzcs2::runtime::BuildWeaponRefreshAttributes(profile);
+        Expect(
+            ContainsExactWearAttribute(attributes, nskinzcs2::model::kMinimumCosmeticWear),
+            "a default-skinned weapon request below the supported wear floor should emit exact minimum wear");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 42;
+        profile.override_item = 0;
+        profile.paint_kit = 0;
+        profile.explicit_vanilla_finish = true;
+        profile.wear = 0.01f;
+
+        const auto attributes = nskinzcs2::runtime::BuildWeaponRefreshAttributes(profile);
+        Expect(
+            ContainsRefreshAttribute(attributes, 6, 0.0f),
+            "a finish-only vanilla knife request should explicitly clear an existing paint attribute");
+        Expect(
+            ContainsExactWearAttribute(attributes, 0.01f),
+            "a finish-only vanilla knife request should preserve its configured wear payload");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
         profile.base_item = 42;
         profile.override_item = 507;
         profile.stickers[0].kit_id = 3;
@@ -4014,6 +4344,23 @@ void TestStandardWeaponRefreshModel()
                 76561198271727979ull,
                 9),
             "the same standard weapon appearance should produce a stable material cache key");
+        cache_profile.wear = 0.0f;
+        Expect(
+            gungnir_key == BuildStandardWeaponMaterialCacheKey(
+                cache_profile,
+                76561198271727979ull,
+                9),
+            "wear below the supported floor should normalize to the minimum material cache identity");
+        cache_profile.wear = std::nextafter(
+            nskinzcs2::model::kMinimumCosmeticWear,
+            nskinzcs2::model::kMaximumCosmeticWear);
+        Expect(
+            gungnir_key != BuildStandardWeaponMaterialCacheKey(
+                cache_profile,
+                76561198271727979ull,
+                9),
+            "adjacent supported wear values should produce distinct material cache identities");
+        cache_profile.wear = nskinzcs2::model::kMinimumCosmeticWear;
         cache_profile.paint_kit = 344;
         Expect(
             gungnir_key != BuildStandardWeaponMaterialCacheKey(
@@ -4120,6 +4467,74 @@ void TestWeaponAppearanceModule()
     {
         nskinzcs2::model::CosmeticProfile profile;
         profile.base_item = 7;
+        profile.paint_kit = 180;
+        profile.wear = 0.0f;
+
+        const auto payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(
+            nskinzcs2::model::CosmeticWearMatchesExactly(
+                payload.fallback_wear,
+                nskinzcs2::model::kMinimumCosmeticWear),
+            "default-skinned weapon fallback wear should normalize to the exact minimum");
+        Expect(
+            ContainsExactWearAttribute(
+                payload.temporary_attributes,
+                nskinzcs2::model::kMinimumCosmeticWear),
+            "default-skinned weapon payload should carry exact minimum wear in attribute 8");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        profile.paint_kit = 0;
+        profile.seed = 777;
+        profile.wear = 0.77f;
+        const auto payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(
+            !ContainsRefreshAttribute(payload.temporary_attributes, 6, 0.0f),
+            "dash standard-weapon profile should not write paint 0");
+        Expect(!payload.needs_refresh, "dash standard-weapon profile should not rebuild materials");
+        Expect(
+            !ContainsRefreshAttribute(payload.temporary_attributes, 7, 777.0f) &&
+                !ContainsRefreshAttribute(payload.temporary_attributes, 8, 0.77f),
+            "dash standard-weapon profile should not write seed or wear");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        profile.paint_kit = 0;
+        profile.explicit_vanilla_finish = true;
+
+        const auto payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(
+            ContainsRefreshAttribute(payload.temporary_attributes, 6, 0.0f),
+            "an explicit vanilla standard-weapon profile should carry paint 0");
+        Expect(
+            payload.needs_refresh,
+            "an explicit vanilla standard-weapon profile should rebuild the cached material");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 42;
+        profile.paint_kit = 0;
+
+        auto payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(
+            !ContainsRefreshAttribute(payload.temporary_attributes, 6, 0.0f),
+            "dash knife profile should not write paint 0");
+
+        profile.explicit_vanilla_finish = true;
+        payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(
+            ContainsRefreshAttribute(payload.temporary_attributes, 6, 0.0f),
+            "explicit vanilla knife profile should carry paint 0");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
         nskinzcs2::model::KeychainProfile keychain_profile;
         keychain_profile.xuid = 10;
         keychain_profile.base_item = 7;
@@ -4129,6 +4544,22 @@ void TestWeaponAppearanceModule()
         Expect(payload.temporary_attributes.size() == 7, "payload should include the full keychain slot 0 attribute block");
         ExpectContainsKeychainSlotZeroAttributes(payload.temporary_attributes, 101.0f);
         Expect(!payload.needs_refresh, "keychain-only payload should stay off the refresh helper path");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        nskinzcs2::model::KeychainProfile keychain_profile;
+        keychain_profile.xuid = 10;
+        keychain_profile.base_item = 7;
+
+        auto payload = BuildWeaponAppearancePayload(profile, 123u, &keychain_profile);
+        Expect(payload.temporary_attributes.empty(), "dash keychain profile should not write attributes");
+
+        keychain_profile.explicit_clear = true;
+        payload = BuildWeaponAppearancePayload(profile, 123u, &keychain_profile);
+        Expect(payload.temporary_attributes.size() == 7, "explicit keychain clear should write slot zero");
+        ExpectContainsKeychainSlotZeroAttributes(payload.temporary_attributes, 0.0f);
     }
 
     {
@@ -4170,6 +4601,7 @@ int RunAllTests()
         RunNamedTest("TestCompatibilityManifest", TestCompatibilityManifest);
         RunNamedTest("TestInstalledCompatibilityIfRequested", TestInstalledCompatibilityIfRequested);
         RunNamedTest("TestConfigRoundTrip", TestConfigRoundTrip);
+        RunNamedTest("TestCosmeticWearPolicy", TestCosmeticWearPolicy);
         RunNamedTest("TestProfileMatching", TestProfileMatching);
         RunNamedTest("TestKeychainConfigAndMatching", TestKeychainConfigAndMatching);
         RunNamedTest("TestGloveConfigAndMatching", TestGloveConfigAndMatching);

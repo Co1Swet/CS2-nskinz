@@ -23,6 +23,8 @@ constexpr std::array<std::uint8_t, 10> kExpectedLibraryHooksWPrologue{
     0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x20};
 constexpr std::array<std::uint8_t, 5> kExpectedRenderHookPatch{
     0xc3, 0x90, 0x90, 0x90, 0x90};
+constexpr std::array<std::uint8_t, 5> kExpectedOriginalRenderHook{
+    0xe9, 0x88, 0x09, 0x01, 0x00};
 
 struct UniqueHandle {
     HANDLE value = nullptr;
@@ -80,8 +82,9 @@ bool ValidateHookFile(const std::wstring& path) {
     }
     if (!ReadExact(file.value, kRenderHookPatchRawOffset, renderPatch.data(),
                    static_cast<DWORD>(renderPatch.size())) ||
-        renderPatch != kExpectedRenderHookPatch) {
-        std::wcerr << L"Render hook bypass validation failed.\n";
+        (renderPatch != kExpectedRenderHookPatch &&
+         renderPatch != kExpectedOriginalRenderHook)) {
+        std::wcerr << L"Render hook validation failed.\n";
         return false;
     }
     return true;
@@ -190,7 +193,7 @@ bool InvokeLibraryHooksW(
 
 int wmain(int argc, wchar_t** argv) {
     if (argc != 3) {
-        std::wcerr << L"Usage: HlaeLateModuleInit.exe <cs2-pid> <patched-AfxHookSource2.dll>\n";
+        std::wcerr << L"Usage: HlaeLateModuleInit.exe <cs2-pid> <AfxHookSource2.dll>\n";
         return 2;
     }
 
@@ -201,7 +204,8 @@ int wmain(int argc, wchar_t** argv) {
 
     auto modules = ReadModules(processId);
     const auto processIt = modules.find(L"cs2.exe");
-    const auto hookIt = modules.find(L"afxhooksource2.nskinz-test.dll");
+    const auto hookModuleName = Lower(std::filesystem::path(hookPath).filename().wstring());
+    const auto hookIt = modules.find(hookModuleName);
     if (processIt == modules.end() || hookIt == modules.end()) {
         std::wcerr << L"Expected CS2 and patched HLAE modules are not both loaded.\n";
         return 4;

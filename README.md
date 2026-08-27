@@ -4,48 +4,42 @@
 
 This repository is the standalone `nSkinzCS2` project snapshot from the larger local workspace. It contains the Visual Studio solution, first-party source code, helper tools, vendored dependencies, and a codebase map suitable for publishing on GitHub.
 
-## Snapshot
+## Release Snapshot (v0.4.0)
 
-- Primary target: `nSkinzCS2.dll`
+- English target: `nSkinzCS2.dll`
+- Simplified Chinese target: `nSkinzCS2.zh-CN.dll`
 - Platform: Windows x64
 - Language: C++20
 - UI stack: Win32 + D3D11 + Dear ImGui
 - Hooking/runtime support: MinHook
 - Config format: JSON (`nSkinzCS2.json`)
-- First-party source files: 26
-- First-party source lines: about 77,788
-
-Largest first-party translation units:
-
-- `src/Cs2/Runtime.cpp`: 59,347 lines
-- `src/Cs2/GlobalResourceSwapper.cpp`: 8,093 lines
-- `src/Tests/Main.cpp`: 3,203 lines
-- `src/UI/MainWindow.cpp`: 1,715 lines
-- `src/Cs2/Catalog.cpp`: 1,577 lines
+- Runtime library: statically linked (`/MT`); no separate Visual C++ runtime install is required
 
 ## Current Feature Scope
 
-This release currently supports only:
+Implemented and demo-tested:
 
 - Dedicated Win32 + D3D11 + Dear ImGui tool window
 - Versioned JSON config load/save
 - XUID-targeted regular weapon skin replacement during demo playback
-- Glove model and glove skin replacement for the watched demo player
+- Knife finish replacement while preserving the player's existing knife model
+- Glove model and glove skin replacement
+- Explicit `Vanilla (No Finish)` selection, distinct from `- (Do not modify)`, for weapons, knives, gloves, and keychains
+- XUID-isolated multi-player profiles, including simultaneous different finishes and seeds
+- English and Simplified Chinese builds; the Chinese build loads CS2's `csgo_schinese.txt` catalog so skin names follow the installed game data
 - Runtime environment detection for CS2, HLAE, interfaces, schema binding, entity-system binding, and hook install state
 - Catalog parsing from installed CS2 files for weapons, gloves, paint kits, qualities, and visual metadata
 - Guarded rebinding after demo tick seeks and watched-player changes
 - Validation and regression-style native tests for config parsing, catalog parsing, duplicate detection, helper logic, and runtime decision probes
 
-Not available in the current release:
+Limited or experimental:
 
-- Knife skin replacement
-- Knife model replacement
-- Keychain/charm replacement
-- Sticker replacement
 - Agent replacement
+- Knife model replacement and some animation-remap edge cases
+- Keychain creation when the demo weapon does not already have a live keychain module; modifying or clearing an existing module is supported
 - Fully live item-schema walking instead of preferring installed game data
 
-Knife, keychain/charm, and sticker-related code or configuration fields may still be present for ongoing development, but they are not release-supported and should be treated as non-functional.
+Known limitation: a knife that already owns a compiled custom material in the demo may keep that old first-person material when `Vanilla (No Finish)` is selected. Positive knife paint kits are verified; this specific stale-material reset remains under investigation and is not claimed as fixed in v0.4.0.
 
 ## Build Requirements
 
@@ -60,7 +54,9 @@ Knife, keychain/charm, and sticker-related code or configuration fields may stil
 
 This snapshot is verified against:
 
-- CS2 Client/Server build `2000885`, patch `1.41.7.6`, Source revision `10924896` (August 19, 2026)
+- Steam app build ID `24957633`
+- CS2 ClientVersion `2000897`, patch `1.41.7.8`, Source revision `10942762` (August 26, 2026)
+- `client.dll` SHA-256 `84BCAE9DB379BED5ACB3D81228ABEF86FBD61B6CDB2B3ACCDC5DD0F32E8F89F9`
 - HLAE `2.191.1` / AfxHookSource2 `0.40.1`
 - `Source2Client002`, `ResourceSystem013`, and `VFileSystem017`
 - `Source2Client002::FrameStageNotify` vtable slot 36, with executable-target and module-owner validation
@@ -72,12 +68,13 @@ The DLL logs the installed CS2 identity, PE timestamps/sizes, required signature
 ### Visual Studio
 
 1. Open `nSkinzCS2.sln`.
-2. Select `Release | x64`.
+2. Select `Release | x64` for English or `ReleaseZhCn | x64` for Simplified Chinese.
 3. Build the solution.
 
 Outputs:
 
 - DLL: `build/Release/nSkinzCS2.dll`
+- Chinese DLL: `build/Release/nSkinzCS2.zh-CN.dll`
 - Test runner: `build/Release/nSkinzCS2.Tests.exe`
 
 ### Command Scripts
@@ -97,7 +94,7 @@ The scripts keep all outputs and logs under `build/Release`. The build wrapper a
 
 ## Runtime Usage
 
-1. Build `nSkinzCS2.dll` for `x64`.
+1. Download either `nSkinzCS2.dll` or `nSkinzCS2.zh-CN.dll`. No compiler, SDK, Python, or Visual C++ redistributable is required for the release DLL.
 2. Start CS2 through HLAE 2.191.1 with `-insecure`. Do not use this DLL on VAC or online servers.
 3. Load the DLL:
 
@@ -105,9 +102,15 @@ The scripts keep all outputs and logs under `build/Release`. The build wrapper a
 mirv_loadlibrary "C:\Path\To\nSkinzCS2.dll"
 ```
 
+Chinese build:
+
+```text
+mirv_loadlibrary "C:\Path\To\nSkinzCS2.zh-CN.dll"
+```
+
 4. Press `Insert` to show or hide the tool window.
 5. Open a CS2 demo.
-6. Configure regular weapon skin and glove profiles. Knife, keychain/charm, and sticker replacement is not available in this release.
+6. Configure weapon, knife, glove, or keychain profiles.
 7. Press `Update` to request a runtime refresh.
 
 Runtime diagnostics are written beside the loaded DLL as `nSkinzCS2.log`.
@@ -115,8 +118,12 @@ Runtime diagnostics are written beside the loaded DLL as `nSkinzCS2.log`.
 Behavior notes:
 
 - Weapon profiles are keyed by watched-player XUID and base item definition.
+- Weapon and glove wear is taken only from the configured profile and clamped to `0.0000001`-`1.0`; the demo item's original wear never caps the replacement.
+- Default-skinned weapons are valid replacement carriers. Default T/CT gloves (`5028`/`5029`) can be replaced with a target glove model and finish through `model_and_finish`.
 - Glove profiles support glove model and finish replacement through the watched pawn's current `m_EconGloves` item view on the verified compatibility baseline.
-- Knife skins/models, keychains/charms, and stickers are not functional in this release, even if related UI or configuration fields are visible.
+- Knife `finish_only` preserves the live knife definition and changes only the finish fields. Positive paint kits have been verified on Skeleton Knife, M9 Bayonet, Butterfly Knife, and Karambit demo entities.
+- `- (Do not modify)` leaves the current value untouched. `Vanilla (No Finish)` is an explicit clear request.
+- The Chinese DLL reads Simplified Chinese item and paint-kit names directly from the installed CS2 VPK.
 - Unsupported live layouts are rejected with a diagnostic instead of writing through an uncertain binding.
 - Demo pause/resume, tick seeks, watched-player switches, and repeated Update requests trigger guarded runtime rebinding.
 - Legacy glove entries under `profiles` with `base_item = 5028` are ignored at runtime; use `glove_profiles`.

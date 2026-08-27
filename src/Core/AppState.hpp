@@ -1,7 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -12,6 +15,24 @@
 
 namespace nskinzcs2::model
 {
+inline constexpr float kMinimumCosmeticWear = 0.0000001f;
+inline constexpr float kMaximumCosmeticWear = 1.0f;
+
+inline float NormalizeCosmeticWear(const float wear) noexcept
+{
+    if (!std::isfinite(wear))
+    {
+        return kMinimumCosmeticWear;
+    }
+
+    return std::clamp(wear, kMinimumCosmeticWear, kMaximumCosmeticWear);
+}
+
+inline bool CosmeticWearMatchesExactly(const float actual, const float expected) noexcept
+{
+    return std::bit_cast<std::uint32_t>(actual) == std::bit_cast<std::uint32_t>(expected);
+}
+
 struct StickerProfile
 {
     int kit_id = 0;
@@ -28,10 +49,13 @@ struct CosmeticProfile
     int base_item = 7;
     int override_item = 0;
     int paint_kit = 0;
+    // Persisted intent bit: paint_kit=0 by itself means "do not modify the
+    // finish"; paint_kit=0 plus this bit means "remove the finish".
+    bool explicit_vanilla_finish = false;
     int quality = 0;
     int seed = 0;
     int stat_trak = 0;
-    float wear = 0.0000001f;
+    float wear = kMinimumCosmeticWear;
     std::string custom_name;
     std::array<StickerProfile, 5> stickers {};
 };
@@ -50,6 +74,7 @@ struct KnifeProfile
     KnifeProfileMode mode = KnifeProfileMode::FinishOnly;
     int model_definition = 0;
     int paint_kit = 0;
+    bool explicit_vanilla_finish = false;
     int quality = 0;
     int seed = 0;
     int stat_trak = 0;
@@ -71,9 +96,10 @@ struct GloveProfile
     GloveProfileMode mode = GloveProfileMode::FinishOnly;
     int model_definition = 0;
     int paint_kit = 0;
+    bool explicit_vanilla_finish = false;
     int quality = 0;
     int seed = 0;
-    float wear = 0.0000001f;
+    float wear = kMinimumCosmeticWear;
 };
 
 struct KeychainProfile
@@ -83,6 +109,7 @@ struct KeychainProfile
     std::uint64_t xuid = 0;
     int base_item = 7;
     int keychain_kit = 0;
+    bool explicit_clear = false;
 };
 
 struct DemoMirvPlayerEntry
@@ -93,7 +120,7 @@ struct DemoMirvPlayerEntry
 
 struct ConfigDocument
 {
-    int version = 4;
+    int version = 5;
     std::vector<CosmeticProfile> profiles;
     std::vector<KnifeProfile> knife_profiles;
     std::vector<GloveProfile> glove_profiles;

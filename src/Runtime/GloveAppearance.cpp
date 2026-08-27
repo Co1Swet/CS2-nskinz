@@ -40,10 +40,24 @@ GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::Glove
     request.mode = ResolveGloveSlotMode(profile);
     request.model_definition = profile.model_definition;
     request.paint_kit = profile.paint_kit;
+    request.explicit_vanilla_finish = profile.explicit_vanilla_finish;
     request.quality = profile.quality;
     request.seed = profile.seed;
-    request.wear = profile.wear;
+    request.wear = nskinzcs2::model::NormalizeCosmeticWear(profile.wear);
     return request;
+}
+
+int ResolveDefaultGloveDefinitionForTeam(const int team_number) noexcept
+{
+    switch (team_number)
+    {
+    case 2:
+        return 5028;
+    case 3:
+        return 5029;
+    default:
+        return 0;
+    }
 }
 
 int SelectReusableWearableHandleSlot(

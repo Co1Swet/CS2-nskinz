@@ -166,6 +166,8 @@ bool ShouldQueuePrimaryWeaponMaterialRefresh(bool watched_weapon_xuid, bool acti
 bool KnifeRefreshHelperPolicyArmsOnRebuildReason(
     KnifeRefreshHelperPolicy policy,
     RuntimeRebuildReason reason) noexcept;
+bool ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(
+    RuntimeRebuildReason reason) noexcept;
 bool ShouldAllowWeaponRefreshHelperDispatch(
     bool knife_request,
     KnifeRefreshHelperPolicy policy,
@@ -173,6 +175,34 @@ bool ShouldAllowWeaponRefreshHelperDispatch(
 bool ShouldConsumeKnifeRefreshHelperEpoch(
     bool dispatched_knife_request,
     bool helper_succeeded) noexcept;
+bool ShouldDispatchKnifeRefreshWithInPlaceAttributes(
+    bool knife_request,
+    bool needs_skin_refresh,
+    bool live_attribute_values_match) noexcept;
+bool ShouldUseKnifeVanillaTemporaryRefreshOverlay(
+    bool knife_request,
+    bool explicit_vanilla_finish,
+    bool paint_attribute_present) noexcept;
+bool ShouldAllowVerifiedInPlaceKnifeInitializationRefresh(
+    bool knife_request,
+    bool needs_skin_refresh,
+    bool live_attribute_values_match,
+    bool refresh_signature_matches) noexcept;
+
+bool ShouldUseStableKnifeFinishFastPath(
+    bool knife_request,
+    bool exact_appearance_pipeline,
+    bool allow_model_rebind,
+    bool refresh_signature_matches,
+    bool definition_state_matches,
+    bool attribute_state_matches) noexcept;
+bool ShouldUseStableStandardWeaponMaterialFastPath(
+    bool standard_weapon_request,
+    bool refresh_signature_matches,
+    bool definition_state_matches,
+    bool attribute_state_matches,
+    bool render_mesh_state_matches,
+    bool hud_mesh_state_matches) noexcept;
 bool ShouldAllowAttributeListVectorMutationForProfile(
     const nskinzcs2::model::CosmeticProfile& profile) noexcept;
 bool ShouldInstallRuntimeOwnedAttributeListForProfile(
@@ -622,6 +652,7 @@ private:
     std::atomic_bool carrier_probe_requested_ {false};
     std::atomic_bool logged_unavailable_refresh_ {false};
     HANDLE automation_refresh_event_ = nullptr;
+    HANDLE automation_demo_command_event_ = nullptr;
     std::wstring global_swapper_early_reason_;
     std::wstring global_swapper_early_route_;
     std::wstring last_logged_status_;

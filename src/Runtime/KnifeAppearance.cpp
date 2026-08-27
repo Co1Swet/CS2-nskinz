@@ -107,6 +107,7 @@ KnifeAppearanceRequest BuildKnifeAppearanceRequest(const nskinzcs2::model::Knife
         ? ResolveKnifeRuntimeModelDefinition(profile)
         : 0;
     request.paint_kit = profile.paint_kit;
+    request.explicit_vanilla_finish = profile.explicit_vanilla_finish;
     request.quality = profile.quality;
     request.seed = profile.seed;
     request.stat_trak = profile.stat_trak;
@@ -155,13 +156,6 @@ KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) 
     const bool has_model_write_first_person_binding_evidence =
         has_real_viewmodel_binding_evidence ||
         has_resource_query_model_swap_evidence;
-    const bool has_safe_finish_only_first_person_evidence =
-        has_first_person_binding_evidence &&
-        inputs.context.first_person_source_valid &&
-        (inputs.context.providee_carrier_valid ||
-         inputs.context.viewmodel_carrier_valid ||
-         inputs.context.direct_first_person_render_valid);
-
     if (inputs.request.mode == KnifeSlotMode::None || inputs.request.xuid == 0)
     {
         result.reason = KnifeApplyGateReason::MissingWatchedKnife;
@@ -185,9 +179,15 @@ KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) 
         return result;
     }
 
-    const bool ready_for_finish_only =
-        has_world_binding_evidence &&
-        has_safe_finish_only_first_person_evidence;
+    // Finish-only writes target the authoritative world-carried CEconItemView
+    // and do not touch the model, viewmodel ownership, or animation state.  A
+    // demo observer can expose that carrier one render pass before its
+    // first-person providee/viewmodel chain is discoverable.  Requiring the
+    // latter blocked safe paint-only updates exactly while the watched player
+    // was deploying the knife.  Keep first-person evidence mandatory below for
+    // model/animation writes, but let the authoritative carrier accept finishes
+    // immediately.
+    const bool ready_for_finish_only = has_world_binding_evidence;
 
     if (!ready_for_finish_only)
     {
@@ -280,6 +280,20 @@ KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) 
     result.allow_animation_remap = true;
     result.reason = KnifeApplyGateReason::ReadyForModelAndFinish;
     return result;
+}
+
+KnifeAppearancePipelineRoute ResolveKnifeAppearancePipelineRoute(
+    const KnifeApplyGateResult& gate) noexcept
+{
+    KnifeAppearancePipelineRoute route;
+    route.allow_model_rebind =
+        gate.allow_finish_writes &&
+        gate.allow_model_writes &&
+        gate.resolved_mode == KnifeSlotMode::ModelAndFinish;
+    route.use_exact_appearance_pipeline =
+        gate.allow_finish_writes &&
+        (gate.resolved_mode == KnifeSlotMode::FinishOnly || route.allow_model_rebind);
+    return route;
 }
 
 KnifeRenderVerificationResult EvaluateKnifeRenderVerification(const KnifeRenderVerificationInputs& inputs) noexcept
@@ -384,6 +398,7 @@ std::uint64_t BuildKnifeProfileApplySignature(
     HashCombine(signature, static_cast<std::uint64_t>(
         request.mode == KnifeSlotMode::ModelAndFinish ? request.model_definition : 0));
     HashCombine(signature, static_cast<std::uint64_t>(request.paint_kit));
+    HashCombine(signature, static_cast<std::uint64_t>(request.explicit_vanilla_finish ? 1 : 0));
     HashCombine(signature, static_cast<std::uint64_t>(request.quality));
     HashCombine(signature, static_cast<std::uint64_t>(request.seed));
     HashCombine(signature, static_cast<std::uint64_t>(request.stat_trak));

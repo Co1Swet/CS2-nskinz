@@ -110,29 +110,54 @@ nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppea
     const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
     WeaponAppearancePayload payload {};
+    const auto effective_wear =
+        profile.base_item == 42 || profile.base_item == 5028
+            ? profile.wear
+            : nskinzcs2::model::NormalizeCosmeticWear(profile.wear);
     payload.fallback_paint_kit = profile.paint_kit;
     payload.fallback_seed = profile.seed;
-    payload.fallback_wear = profile.wear;
+    payload.fallback_wear = effective_wear;
     payload.fallback_stat_trak = profile.stat_trak;
     payload.quality = std::clamp(profile.quality, 0, 255);
     payload.account_id = account_id;
     payload.writes_custom_name = !profile.custom_name.empty();
     payload.custom_name = profile.custom_name;
     payload.temporary_attributes.reserve(32);
+    const auto writes_finish =
+        profile.paint_kit != 0 || profile.explicit_vanilla_finish;
 
-    if (profile.paint_kit != 0)
+    // paint_kit=0 is ambiguous in the game data, so only append attribute 6
+    // when the persisted UI intent explicitly requests the vanilla finish.
+    // The ordinary zero selection means "do not modify" and stays off this
+    // path, including profiles synthesized solely for keychain work.
+    const auto explicit_vanilla_knife_finish =
+        profile.base_item == 42 &&
+        profile.override_item == 0 &&
+        profile.paint_kit == 0 &&
+        profile.explicit_vanilla_finish;
+    const auto explicit_vanilla_standard_weapon_finish =
+        profile.base_item != 0 &&
+        profile.base_item != 42 &&
+        profile.base_item != 5028 &&
+        profile.override_item == 0 &&
+        profile.paint_kit == 0 &&
+        profile.explicit_vanilla_finish;
+    if (writes_finish && (profile.paint_kit != 0 ||
+        explicit_vanilla_knife_finish ||
+        explicit_vanilla_standard_weapon_finish))
     {
         payload.temporary_attributes.emplace_back(kAttributePaintKit, static_cast<float>(profile.paint_kit));
     }
 
-    if (profile.paint_kit != 0 || profile.seed != 0)
+    if (writes_finish && (profile.paint_kit != 0 || profile.seed != 0))
     {
         payload.temporary_attributes.emplace_back(kAttributeSeed, static_cast<float>(profile.seed));
     }
 
-    if (profile.paint_kit != 0 || std::fabs(profile.wear - kDefaultWear) > 0.0000001f)
+    if (writes_finish &&
+        (profile.paint_kit != 0 || std::fabs(effective_wear - kDefaultWear) > 0.0000001f))
     {
-        payload.temporary_attributes.emplace_back(kAttributeWear, profile.wear);
+        payload.temporary_attributes.emplace_back(kAttributeWear, effective_wear);
     }
 
     if (profile.stat_trak != 0)
@@ -155,7 +180,8 @@ nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppea
         payload.temporary_attributes.emplace_back(static_cast<std::uint16_t>(base + kAttributeStickerRotation), sticker.rotation);
     }
 
-    if (keychain_profile != nullptr)
+    if (keychain_profile != nullptr &&
+        (keychain_profile->keychain_kit != 0 || keychain_profile->explicit_clear))
     {
         AppendKeychainSlotZeroAttributes(payload.temporary_attributes, *keychain_profile);
     }

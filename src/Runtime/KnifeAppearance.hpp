@@ -67,6 +67,7 @@ struct KnifeAppearanceRequest
     KnifeSlotMode mode = KnifeSlotMode::None;
     int model_definition = 0;
     int paint_kit = 0;
+    bool explicit_vanilla_finish = false;
     int quality = 0;
     int seed = 0;
     int stat_trak = 0;
@@ -164,6 +165,12 @@ struct KnifeApplyGateResult
     KnifeApplyGateReason reason = KnifeApplyGateReason::MissingWatchedKnife;
 };
 
+struct KnifeAppearancePipelineRoute
+{
+    bool use_exact_appearance_pipeline = false;
+    bool allow_model_rebind = false;
+};
+
 struct KnifeRenderVerificationInputs
 {
     bool world_render_state_resolved = false;
@@ -201,6 +208,8 @@ KnifeSlotMode ResolveKnifeSlotMode(const nskinzcs2::model::KnifeProfile& profile
 bool KnifeProfileRequiresModelDefinition(KnifeSlotMode mode) noexcept;
 KnifeAppearanceRequest BuildKnifeAppearanceRequest(const nskinzcs2::model::KnifeProfile& profile) noexcept;
 KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) noexcept;
+KnifeAppearancePipelineRoute ResolveKnifeAppearancePipelineRoute(
+    const KnifeApplyGateResult& gate) noexcept;
 KnifeRenderVerificationResult EvaluateKnifeRenderVerification(const KnifeRenderVerificationInputs& inputs) noexcept;
 bool IsDefaultKnifeDefinition(int definition_index) noexcept;
 bool ShouldApplyKnifeModelDefinitionOverride(

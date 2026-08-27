@@ -2173,6 +2173,43 @@ bool SafeInvokeMethod1Void(void* instance, const std::size_t index, Arg1 arg1)
     }
 }
 
+template <typename Arg1, typename Arg2, typename Arg3>
+bool SafeInvokeMethod3Void(
+    void* instance,
+    const std::size_t index,
+    Arg1 arg1,
+    Arg2 arg2,
+    Arg3 arg3)
+{
+    if (instance == nullptr)
+    {
+        return false;
+    }
+
+    void** vtable = nullptr;
+    if (!SafeReadValue(instance, vtable) || vtable == nullptr)
+    {
+        return false;
+    }
+
+    using Method = void(__fastcall*)(void*, Arg1, Arg2, Arg3);
+    void* method_address = nullptr;
+    if (!SafeReadValue(vtable + index, method_address) || method_address == nullptr)
+    {
+        return false;
+    }
+
+    __try
+    {
+        reinterpret_cast<Method>(method_address)(instance, arg1, arg2, arg3);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 struct NativeConsoleColor
 {
     std::uint8_t r = 255;
@@ -9927,6 +9964,7 @@ struct WeaponSkinRefreshBinding
     void* function = nullptr;
     void* offset_patch_address = nullptr;
     std::uint16_t original_offset = 0;
+    std::uint16_t original_companion_offset = 0;
     std::uint16_t patched_offset = 0;
     bool offset_patched = false;
     std::array<std::uint8_t, 2> patch_prefix {};
@@ -10114,6 +10152,8 @@ struct RuntimeEntityManager
     void* last_entity_list = nullptr;
     std::uint64_t last_watched_xuid = 0;
     std::uint32_t watched_xuid_missing_confirmations = 0;
+    std::uint64_t pending_watched_xuid = 0;
+    std::uint32_t pending_watched_xuid_confirmations = 0;
     std::wstring last_rebuild_reason;
     RuntimeFeatureAvailability client_entity_factory = RuntimeFeatureAvailability::Unknown;
     RuntimeFeatureAvailability knife_animation_hook = RuntimeFeatureAvailability::Unknown;
@@ -11599,6 +11639,7 @@ struct ClientSchemaOffsets
     std::ptrdiff_t weapon_services_active_weapon = 0;
     std::ptrdiff_t weapon_services_my_weapons = 0;
     std::ptrdiff_t base_entity_health = 0;
+    std::ptrdiff_t base_entity_team_num = 0;
     std::ptrdiff_t base_owner_entity = 0;
     std::ptrdiff_t base_old_move_parent = 0;
     std::ptrdiff_t econ_entity_attribute_manager = 0;
@@ -11621,6 +11662,9 @@ struct ClientSchemaOffsets
     std::ptrdiff_t anim_graph_controller_sequence_finished = 0;
     std::ptrdiff_t weapon_gameplay_anim_state = 0;
     std::ptrdiff_t weapon_gameplay_anim_state_timestamp = 0;
+    std::ptrdiff_t weapon_clear_weapon_identifying_ugc = 0;
+    std::ptrdiff_t weapon_visuals_data_set = 0;
+    std::ptrdiff_t weapon_custom_econ_reload_event_id = 0;
     std::ptrdiff_t weapon_inspect_cancel_complete_time = 0;
     std::ptrdiff_t weapon_inspect_pending = 0;
     std::ptrdiff_t weapon_inspect_should_loop = 0;
@@ -11630,13 +11674,26 @@ struct ClientSchemaOffsets
     std::ptrdiff_t viewmodel_services_viewmodel = 0;
     std::ptrdiff_t viewmodel_weapon = 0;
     std::ptrdiff_t attribute_container_item = 0;
+    std::ptrdiff_t attribute_container_external_item_provider_registered_token = 0;
+    std::ptrdiff_t attribute_container_registered_as_item_id = 0;
     std::ptrdiff_t item_view_definition_index = 0;
     std::ptrdiff_t item_view_entity_quality = 0;
     std::ptrdiff_t item_view_item_id_high = 0;
     std::ptrdiff_t item_view_item_id_low = 0;
     std::ptrdiff_t item_view_account_id = 0;
     std::ptrdiff_t item_view_initialized = 0;
+    std::ptrdiff_t item_view_disallow_soc = 0;
     std::ptrdiff_t item_view_restore_custom_material_after_precache = 0;
+    std::ptrdiff_t item_view_composite_materials = 0;
+    NetworkVectorOperationFn item_view_composite_materials_operation = nullptr;
+    std::size_t item_view_composite_materials_element_size = 0;
+    std::string item_view_composite_materials_type_name;
+    std::string item_view_composite_materials_owner_type_name;
+    std::ptrdiff_t item_view_composite_material_assembly_procedures = 0;
+    NetworkVectorOperationFn item_view_composite_material_assembly_procedures_operation = nullptr;
+    std::size_t item_view_composite_material_assembly_procedures_element_size = 0;
+    std::string item_view_composite_material_assembly_procedures_type_name;
+    std::string item_view_composite_material_assembly_procedures_owner_type_name;
     std::ptrdiff_t item_view_attribute_list = 0;
     std::ptrdiff_t item_view_dynamic_attribute_list = 0;
     std::ptrdiff_t item_view_custom_name = 0;
@@ -11790,6 +11847,8 @@ struct TemporaryAttributeListAttachment
     bool restore_custom_material_written = false;
     bool replaced_existing_vector = false;
     bool restore_on_abandon_when_promoted = true;
+    bool uses_dynamic_attribute_list = false;
+    bool uses_explicit_vanilla_paint_zero_trigger = false;
 };
 
 constexpr std::uint16_t kAttributePaintKit = 6;
@@ -12028,6 +12087,7 @@ struct HookState
     std::atomic_bool console_player_capture_ready {false};
     std::atomic_bool console_player_query_inflight {false};
     std::atomic_bool console_player_refresh_requested {false};
+    std::atomic_bool local_demo_command_requested {false};
     std::atomic<std::uint64_t> console_player_query_started_millis {0};
     std::atomic<std::uint64_t> console_player_query_completed_millis {0};
     std::atomic<std::uint64_t> console_player_query_not_before_millis {0};
@@ -12053,6 +12113,7 @@ struct HookState
     int last_applied_demo_tick = -1;
     std::uint64_t last_applied_config_revision = 0;
     std::unordered_map<int, std::uint64_t> applied_weapon_signatures;
+    std::unordered_map<int, std::uint64_t> refreshed_weapon_signatures;
     std::unordered_map<int, std::uint64_t> applied_glove_signatures;
     std::unordered_map<int, std::uint64_t> transient_glove_signatures;
     std::unordered_map<int, std::uint64_t> applied_preview_weapon_signatures;
@@ -12119,6 +12180,8 @@ struct HookState
     std::string console_player_capture_buffer;
     std::wstring last_console_player_detail;
     std::wstring last_console_player_issue;
+    std::mutex local_demo_command_mutex;
+    std::string local_demo_command;
     std::wstring level_name;
     std::wstring last_runtime_issue;
     std::wstring last_rebuild_reason;
@@ -12318,6 +12381,94 @@ bool TryDispatchConsoleCommand(void* command, const char* command_text, std::wst
     }
 
     return true;
+}
+
+void DispatchPendingLocalDemoCommandAtFrameRenderPass()
+{
+    if (!g_hook_state.local_demo_command_requested.exchange(false, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    std::string command_text;
+    {
+        std::lock_guard<std::mutex> lock(g_hook_state.local_demo_command_mutex);
+        command_text = g_hook_state.local_demo_command;
+        g_hook_state.local_demo_command.clear();
+    }
+
+    command_text = TrimAsciiWhitespaceRuntime(command_text);
+
+    const auto first_non_space = command_text.find_first_not_of(" \t\r\n");
+    if (first_non_space == std::string::npos)
+    {
+        nskinzcs2::Logger::Warn(L"Ignored an empty local demo automation command.");
+        return;
+    }
+
+    const auto command_name_end = command_text.find_first_of(" \t\r\n", first_non_space);
+    const auto command_name = command_text.substr(
+        first_non_space,
+        command_name_end == std::string::npos
+            ? std::string::npos
+            : command_name_end - first_non_space);
+
+    if (SafeInvokeMethod3Void(
+            g_hook_state.engine_to_client,
+            nskinzcs2::compatibility::kEngineExecuteClientCmdVtableIndex,
+            0,
+            command_text.c_str(),
+            true))
+    {
+        nskinzcs2::Logger::Info(
+            L"Local demo automation dispatched '" + NarrowToWide(command_text) +
+            L"' through Source2EngineToClient001::ExecuteClientCmd slot " +
+            std::to_wstring(nskinzcs2::compatibility::kEngineExecuteClientCmdVtableIndex) + L".");
+        return;
+    }
+
+    void* command = nullptr;
+    std::size_t resolved_index = kInvalidConsoleMethodIndex;
+    std::wstring issue;
+    if (!TryFindConsoleCommand(
+            g_hook_state.engine_cvar,
+            command_name.c_str(),
+            command,
+            resolved_index,
+            issue))
+    {
+        nskinzcs2::Logger::Warn(
+            L"Local demo automation command lookup failed for '" +
+            NarrowToWide(command_text) + L"': " + issue);
+        return;
+    }
+
+    if (!TryDispatchConsoleCommand(command, command_text.c_str(), issue))
+    {
+        nskinzcs2::Logger::Warn(
+            L"Local demo automation dispatch failed for '" +
+            NarrowToWide(command_text) + L"': " + issue);
+        return;
+    }
+
+    nskinzcs2::Logger::Info(
+        L"Local demo automation dispatched '" + NarrowToWide(command_text) +
+        L"' through VEngineCvar007 slot " + std::to_wstring(resolved_index) + L".");
+}
+
+bool DispatchPendingLocalDemoCommandAtFrameRenderPassGuarded() noexcept
+{
+    __try
+    {
+        DispatchPendingLocalDemoCommandAtFrameRenderPass();
+        return true;
+    }
+    __except (LogStructuredThreadException(
+        L"Local demo automation command",
+        GetExceptionInformation()))
+    {
+        return false;
+    }
 }
 
 bool EnsureConsolePlayerCaptureInstalled(std::wstring& issue)
@@ -14246,6 +14397,50 @@ bool CollectSchemaFieldsUnsafe(
                 continue;
             }
 
+            const auto material_schema_type =
+                std::strstr(type->name, "CompositeMaterial") != nullptr ||
+                std::strcmp(type->name, "C_CSWeaponBase") == 0 ||
+                std::strcmp(type->name, "C_EconEntity") == 0 ||
+                std::strcmp(type->name, "C_AttributeContainer") == 0 ||
+                std::strcmp(type->name, "C_EconItemView") == 0 ||
+                std::strcmp(type->name, "C_BaseModelEntity") == 0;
+            if (material_schema_type)
+            {
+                std::wstringstream stream;
+                stream << L"Schema material-path type: name="
+                    << NarrowToWide(type->name)
+                    << L", size=0x" << std::hex << std::uppercase << type->size
+                    << std::dec << std::nouppercase
+                    << L", fields=";
+                for (std::uint16_t field_index = 0;
+                     field_index < type->field_count && field_index < 64;
+                     ++field_index)
+                {
+                    const auto& field = type->fields[field_index];
+                    if (field_index != 0)
+                    {
+                        stream << L" | ";
+                    }
+
+                    const char* field_type_name = nullptr;
+                    const auto field_type_read =
+                        field.type != nullptr &&
+                        SafeReadField(field.type, 0x8, field_type_name) &&
+                        IsReadableAscii(field_type_name);
+                    stream
+                        << (IsReadableAscii(field.name)
+                                ? NarrowToWide(field.name)
+                                : L"<unreadable>")
+                        << L"@0x" << std::hex << std::uppercase << field.offset
+                        << std::dec << std::nouppercase
+                        << L":"
+                        << (field_type_read
+                                ? NarrowToWide(field_type_name)
+                                : L"?");
+                }
+                nskinzcs2::Logger::Info(stream.str());
+            }
+
             auto& type_fields = fields[type->name];
             // CSchemaClassInfo::m_nSize remains the instance size at +0x20.
             // The 16-bit value at +0x28 is the static-metadata count, not an
@@ -14262,6 +14457,43 @@ bool CollectSchemaFieldsUnsafe(
                 }
 
                 type_fields[field.name] = static_cast<std::ptrdiff_t>(field.offset);
+
+                constexpr std::array<std::uint32_t, 12> kMaterialGeneratorOffsets {{
+                    0x608,
+                    0xAA8,
+                    0xAC0,
+                    0x1180,
+                    0x1848,
+                    0x1860,
+                    0x1868,
+                    0x1898,
+                    0x18B0,
+                    0x18B8,
+                    0x18C0,
+                    0x18E8,
+                }};
+                if (std::find(
+                        kMaterialGeneratorOffsets.begin(),
+                        kMaterialGeneratorOffsets.end(),
+                        field.offset) != kMaterialGeneratorOffsets.end())
+                {
+                    const char* field_type_name = nullptr;
+                    const auto field_type_read =
+                        SafeReadField(field.type, 0x8, field_type_name) &&
+                        IsReadableAscii(field_type_name);
+                    std::wstringstream stream;
+                    stream << L"Schema material-generator offset cross-reference: class="
+                        << NarrowToWide(type->name)
+                        << L", class_size=0x" << std::hex << std::uppercase << type->size
+                        << L", field=" << NarrowToWide(field.name)
+                        << L", offset=0x" << field.offset
+                        << std::dec << std::nouppercase
+                        << L", field_type="
+                        << (field_type_read
+                                ? NarrowToWide(field_type_name)
+                                : L"?");
+                    nskinzcs2::Logger::Info(stream.str());
+                }
 
                 if (std::strcmp(type->name, "C_BaseCombatCharacter") == 0 &&
                     std::strcmp(field.name, "m_hMyWearables") == 0)
@@ -14313,6 +14545,61 @@ bool CollectSchemaFieldsUnsafe(
                             offsets.attribute_list_attributes_operation =
                                 reinterpret_cast<NetworkVectorOperationFn>(vector_operation);
                             offsets.attribute_list_attributes_element_size =
+                                static_cast<std::size_t>(element_size);
+                        }
+                    }
+                }
+
+                if (std::strcmp(field.name, "m_vecCompositeMaterials") == 0 ||
+                    std::strcmp(field.name, "m_vecCompositeMaterialAssemblyProcedures") == 0)
+                {
+                    const char* field_type_name = nullptr;
+                    void* vector_operation = nullptr;
+                    std::uint64_t element_size = 0;
+                    std::string vector_type_name;
+                    if (SafeReadField(field.type, 0x8, field_type_name) &&
+                        IsReadableAscii(field_type_name))
+                    {
+                        SafeReadCString(field_type_name, vector_type_name, 512);
+                    }
+
+                    const auto operation_metadata_read =
+                        SafeReadField(field.type, 0x38, vector_operation) &&
+                        SafeReadField(field.type, 0x40, element_size);
+                    const auto client_span = GetModuleSpan(GetModuleHandleW(L"client.dll"));
+                    const auto operation_verified = operation_metadata_read &&
+                        client_span.has_value() &&
+                        PointerInModule(*client_span, vector_operation) &&
+                        IsExecutablePointer(vector_operation) &&
+                        element_size > 0 && element_size <= 0x100;
+
+                    if (std::strcmp(field.name, "m_vecCompositeMaterials") == 0)
+                    {
+                        offsets.item_view_composite_materials =
+                            static_cast<std::ptrdiff_t>(field.offset);
+                        offsets.item_view_composite_materials_owner_type_name = type->name;
+                        offsets.item_view_composite_materials_type_name = std::move(vector_type_name);
+                        if (operation_verified)
+                        {
+                            offsets.item_view_composite_materials_operation =
+                                reinterpret_cast<NetworkVectorOperationFn>(vector_operation);
+                            offsets.item_view_composite_materials_element_size =
+                                static_cast<std::size_t>(element_size);
+                        }
+                    }
+                    else
+                    {
+                        offsets.item_view_composite_material_assembly_procedures =
+                            static_cast<std::ptrdiff_t>(field.offset);
+                        offsets.item_view_composite_material_assembly_procedures_owner_type_name =
+                            type->name;
+                        offsets.item_view_composite_material_assembly_procedures_type_name =
+                            std::move(vector_type_name);
+                        if (operation_verified)
+                        {
+                            offsets.item_view_composite_material_assembly_procedures_operation =
+                                reinterpret_cast<NetworkVectorOperationFn>(vector_operation);
+                            offsets.item_view_composite_material_assembly_procedures_element_size =
                                 static_cast<std::size_t>(element_size);
                         }
                     }
@@ -14504,6 +14791,7 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
     success = success && lookup("CPlayer_WeaponServices", "m_hActiveWeapon", offsets.weapon_services_active_weapon);
     success = success && lookup("CPlayer_WeaponServices", "m_hMyWeapons", offsets.weapon_services_my_weapons);
     lookup("C_BaseEntity", "m_iHealth", offsets.base_entity_health);
+    lookup("C_BaseEntity", "m_iTeamNum", offsets.base_entity_team_num);
     success = success && lookup("C_BaseEntity", "m_hOwnerEntity", offsets.base_owner_entity);
     lookup("C_BaseEntity", "m_hOldMoveParent", offsets.base_old_move_parent);
     lookup("C_BaseEntity", "m_pGameSceneNode", offsets.base_entity_game_scene_node);
@@ -14540,6 +14828,15 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
         offsets.weapon_gameplay_anim_state_timestamp);
     lookup(
         "C_CSWeaponBase",
+        "m_bClearWeaponIdentifyingUGC",
+        offsets.weapon_clear_weapon_identifying_ugc);
+    lookup("C_CSWeaponBase", "m_bVisualsDataSet", offsets.weapon_visuals_data_set);
+    lookup(
+        "C_CSWeaponBase",
+        "m_nCustomEconReloadEventId",
+        offsets.weapon_custom_econ_reload_event_id);
+    lookup(
+        "C_CSWeaponBase",
         "m_flInspectCancelCompleteTime",
         offsets.weapon_inspect_cancel_complete_time);
     lookup("C_CSWeaponBase", "m_bInspectPending", offsets.weapon_inspect_pending);
@@ -14573,16 +14870,30 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
         {"C_BaseViewModel", "C_CSGOViewModel"},
         "m_hWeapon");
     success = success && lookup("C_AttributeContainer", "m_Item", offsets.attribute_container_item);
+    lookup(
+        "C_AttributeContainer",
+        "m_iExternalItemProviderRegisteredToken",
+        offsets.attribute_container_external_item_provider_registered_token);
+    lookup(
+        "C_AttributeContainer",
+        "m_ullRegisteredAsItemID",
+        offsets.attribute_container_registered_as_item_id);
     success = success && lookup("C_EconItemView", "m_iItemDefinitionIndex", offsets.item_view_definition_index);
     success = success && lookup("C_EconItemView", "m_iEntityQuality", offsets.item_view_entity_quality);
     success = success && lookup("C_EconItemView", "m_iItemIDHigh", offsets.item_view_item_id_high);
     lookup("C_EconItemView", "m_iItemIDLow", offsets.item_view_item_id_low);
     success = success && lookup("C_EconItemView", "m_iAccountID", offsets.item_view_account_id);
     lookup("C_EconItemView", "m_bInitialized", offsets.item_view_initialized);
+    lookup("C_EconItemView", "m_bDisallowSOC", offsets.item_view_disallow_soc);
     lookup(
         "C_EconItemView",
         "m_bRestoreCustomMaterialAfterPrecache",
         offsets.item_view_restore_custom_material_after_precache);
+    lookup("C_EconItemView", "m_vecCompositeMaterials", offsets.item_view_composite_materials);
+    lookup(
+        "C_EconItemView",
+        "m_vecCompositeMaterialAssemblyProcedures",
+        offsets.item_view_composite_material_assembly_procedures);
     success = success && lookup("C_EconItemView", "m_AttributeList", offsets.item_view_attribute_list);
     success = success && lookup("C_EconItemView", "m_NetworkedDynamicAttributes", offsets.item_view_dynamic_attribute_list);
     success = success && lookup("C_EconItemView", "m_szCustomName", offsets.item_view_custom_name);
@@ -14634,6 +14945,16 @@ void* ResolveWeaponItemView(void* weapon_entity, const ClientSchemaOffsets& offs
 
     auto* attribute_manager = reinterpret_cast<std::uint8_t*>(weapon_entity) + offsets.econ_entity_attribute_manager;
     return attribute_manager + offsets.attribute_container_item;
+}
+
+void* ResolveWeaponAttributeContainer(void* weapon_entity, const ClientSchemaOffsets& offsets)
+{
+    if (weapon_entity == nullptr || offsets.econ_entity_attribute_manager == 0)
+    {
+        return nullptr;
+    }
+
+    return reinterpret_cast<std::uint8_t*>(weapon_entity) + offsets.econ_entity_attribute_manager;
 }
 
 int ResolveEntityIndexFromPointer(const std::vector<void*>& entity_cache, void* entity)
@@ -15651,6 +15972,13 @@ bool IsKnifeProfile(const nskinzcs2::model::CosmeticProfile& profile)
     return IsKnifeBaseItem(profile.base_item);
 }
 
+bool IsExplicitVanillaKnifeFinishProfile(const nskinzcs2::model::CosmeticProfile& profile) noexcept
+{
+    return IsKnifeProfile(profile) &&
+        profile.paint_kit == 0 &&
+        profile.explicit_vanilla_finish;
+}
+
 bool IsGloveProfile(const nskinzcs2::model::CosmeticProfile& profile)
 {
     return IsGloveBaseItem(profile.base_item);
@@ -15698,8 +16026,9 @@ bool ShouldPromoteWeaponRefreshAttachmentToRuntimeOwned(
     // paint/seed/wear vector immediately leaves the fallback scalar fields
     // readable but lets the later render consumer rebuild the original skin.
     // Standard weapons already permit runtime-owned attribute storage; retain
-    // that storage for the entity lifetime.  Knife promotion remains governed
-    // by its stricter crash guard below.
+    // that storage for the entity lifetime. Explicit vanilla knives now clear
+    // their engine-owned paint lists and force the native entity refresh with
+    // no paint record, so they have no temporary payload to promote.
     return UsesTemporaryWorldWeaponRefreshModel(profile) ||
         (IsKnifeProfile(profile) &&
             nskinzcs2::runtime::ShouldInstallRuntimeOwnedAttributeListForProfile(profile));
@@ -15713,8 +16042,11 @@ bool ShouldRestorePromotedWeaponRefreshAttachmentOnAbandon(
     // Standard weapons use the entity-owned attribute storage in place.  A
     // demo seek can invalidate the old entity before the first observable tick
     // discontinuity, so abandon cleanup must never write that storage.  Knife
-    // attachments retain their existing explicit restore policy.
-    return IsKnifeProfile(profile);
+    // attachments retain their existing explicit restore policy. The vanilla
+    // knife overlay is safe to abandon on a seek because only existing record
+    // bytes were changed; touching those bytes after the entity is invalidated
+    // would be the dangerous operation.
+    return IsKnifeProfile(profile) && !IsExplicitVanillaKnifeFinishProfile(profile);
 }
 
 bool StandardWeaponNeedsItemIdHighResetImpl(
@@ -16162,10 +16494,15 @@ std::uint64_t BuildProfileApplySignature(
     HashCombine(signature, static_cast<std::uint64_t>(profile.base_item));
     HashCombine(signature, static_cast<std::uint64_t>(profile.override_item));
     HashCombine(signature, static_cast<std::uint64_t>(profile.paint_kit));
+    HashCombine(signature, static_cast<std::uint64_t>(profile.explicit_vanilla_finish ? 1 : 0));
     HashCombine(signature, static_cast<std::uint64_t>(profile.quality));
     HashCombine(signature, static_cast<std::uint64_t>(profile.seed));
     HashCombine(signature, static_cast<std::uint64_t>(profile.stat_trak));
-    HashCombine(signature, static_cast<std::uint64_t>(FloatBits(profile.wear)));
+    const auto effective_wear =
+        IsStandardWeaponProfile(profile)
+            ? nskinzcs2::model::NormalizeCosmeticWear(profile.wear)
+            : profile.wear;
+    HashCombine(signature, static_cast<std::uint64_t>(FloatBits(effective_wear)));
     HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string> {}(profile.custom_name)));
 
     for (const auto& sticker : profile.stickers)
@@ -16181,6 +16518,7 @@ std::uint64_t BuildProfileApplySignature(
         HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->xuid));
         HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->base_item));
         HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->keychain_kit));
+        HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->explicit_clear ? 1 : 0));
     }
 
     return signature;
@@ -16200,9 +16538,13 @@ std::uint64_t BuildGloveProfileApplySignature(
     HashCombine(signature, static_cast<std::uint64_t>(profile.mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish ? 2 : 1));
     HashCombine(signature, static_cast<std::uint64_t>(profile.model_definition));
     HashCombine(signature, static_cast<std::uint64_t>(profile.paint_kit));
+    HashCombine(signature, static_cast<std::uint64_t>(profile.explicit_vanilla_finish ? 1 : 0));
     HashCombine(signature, static_cast<std::uint64_t>(profile.quality));
     HashCombine(signature, static_cast<std::uint64_t>(profile.seed));
-    HashCombine(signature, static_cast<std::uint64_t>(FloatBits(profile.wear)));
+    HashCombine(
+        signature,
+        static_cast<std::uint64_t>(
+            FloatBits(nskinzcs2::model::NormalizeCosmeticWear(profile.wear))));
     HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string> {}(profile.name)));
     return signature;
 }
@@ -16222,6 +16564,7 @@ nskinzcs2::model::CosmeticProfile BuildKnifeRuntimeWeaponProfile(
             request,
             live_definition_index);
     profile.paint_kit = request.paint_kit;
+    profile.explicit_vanilla_finish = request.explicit_vanilla_finish;
     profile.quality = request.quality;
     profile.seed = request.seed;
     profile.stat_trak = request.stat_trak;
@@ -21867,6 +22210,7 @@ std::uint64_t BuildDemoKeychainProfileSignature(
         HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->xuid));
         HashCombine(signature, static_cast<std::uint64_t>(static_cast<std::uint32_t>(keychain_profile->base_item)));
         HashCombine(signature, static_cast<std::uint64_t>(static_cast<std::uint32_t>(keychain_profile->keychain_kit)));
+        HashCombine(signature, static_cast<std::uint64_t>(keychain_profile->explicit_clear ? 1 : 0));
         HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string> {}(keychain_profile->name)));
     }
     return signature;
@@ -22121,7 +22465,8 @@ AttributeBindingReleaseMode ResolveKnifeModelPathReleaseModeForReset(
 
 void ResetAppliedStateCaches(
     const AttributeBindingReleaseMode attribute_binding_release_mode = AttributeBindingReleaseMode::RestoreOriginal,
-    const AttributeBindingReleaseMode knife_model_path_release_mode = AttributeBindingReleaseMode::RestoreOriginal)
+    const AttributeBindingReleaseMode knife_model_path_release_mode = AttributeBindingReleaseMode::RestoreOriginal,
+    const bool preserve_weapon_appearance_signatures = false)
 {
     g_hook_state.pending_runtime_reset_after_seek.store(false);
     g_hook_state.last_applied_demo_tick = -1;
@@ -22132,7 +22477,11 @@ void ResetAppliedStateCaches(
         attribute_binding_release_mode,
         L"reset");
     ReleaseRuntimeOwnedAttributeListBindings(attribute_binding_release_mode);
-    g_hook_state.applied_weapon_signatures.clear();
+    if (!preserve_weapon_appearance_signatures)
+    {
+        g_hook_state.applied_weapon_signatures.clear();
+        g_hook_state.refreshed_weapon_signatures.clear();
+    }
     g_hook_state.applied_glove_signatures.clear();
     g_hook_state.transient_glove_signatures.clear();
     g_hook_state.applied_preview_weapon_signatures.clear();
@@ -22184,6 +22533,34 @@ bool TryInvokeNetworkVectorOperation(
     }
 }
 
+bool TryInvokeNetworkVectorElementMutation(
+    const NetworkVectorOperationFn operation,
+    void* vector,
+    const std::int32_t index,
+    void* expected_element) noexcept
+{
+    if (operation == nullptr || vector == nullptr || index < 0 || expected_element == nullptr)
+    {
+        return false;
+    }
+
+    // Schema's network-vector callback uses operation 2 for mutable element
+    // access.  Unlike operation 1 (plain element lookup), operation 2 first
+    // calls the vector's NetworkStateChanged path and then returns the element
+    // address.  Raw CEconItemAttribute writes without this notification leave
+    // the attribute manager/material generator free to reuse its old cached
+    // value even though direct readback sees the new paint kit.
+    __try
+    {
+        const auto mutable_element = operation(2, vector, index, 0);
+        return mutable_element == reinterpret_cast<std::uintptr_t>(expected_element);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 void RestoreAppliedCosmeticStateForOriginalFrameStage(
     const AttributeBindingReleaseMode mode = AttributeBindingReleaseMode::RestoreOriginal,
     const wchar_t* reason = nullptr)
@@ -22202,6 +22579,7 @@ void RestoreAppliedCosmeticStateForOriginalFrameStage(
     ClearKnifeRefreshHelperEpoch();
     ResetWeaponSkinRefreshAttemptWindowForRebuild();
     g_hook_state.applied_weapon_signatures.clear();
+    g_hook_state.refreshed_weapon_signatures.clear();
     g_hook_state.applied_glove_signatures.clear();
     g_hook_state.transient_glove_signatures.clear();
     g_hook_state.applied_preview_weapon_signatures.clear();
@@ -22326,6 +22704,7 @@ void PrepareAppliedCosmeticStateForDemoSeekBeforeOriginalFrameStage(const wchar_
     ClearKnifeRefreshHelperEpoch();
     ResetWeaponSkinRefreshAttemptWindowForRebuild();
     g_hook_state.applied_weapon_signatures.clear();
+    g_hook_state.refreshed_weapon_signatures.clear();
     g_hook_state.applied_glove_signatures.clear();
     g_hook_state.transient_glove_signatures.clear();
     g_hook_state.applied_preview_weapon_signatures.clear();
@@ -22381,13 +22760,15 @@ void ClearRuntimeEntityManager(
 void ResetRuntimeState(
     const std::wstring& reason,
     const AttributeBindingReleaseMode attribute_binding_release_mode = AttributeBindingReleaseMode::RestoreOriginal,
-    const bool invalidate_wearable_factory = false)
+    const bool invalidate_wearable_factory = false,
+    const bool preserve_weapon_appearance_signatures = false)
 {
     const auto knife_model_path_release_mode =
         ResolveKnifeModelPathReleaseModeForReset(reason, attribute_binding_release_mode);
     ResetAppliedStateCaches(
         attribute_binding_release_mode,
-        knife_model_path_release_mode);
+        knife_model_path_release_mode,
+        preserve_weapon_appearance_signatures);
     ClearKnifeRefreshHelperEpoch();
     ResetWeaponSkinRefreshAttemptWindowForRebuild();
     ClearRuntimeEntityManager(reason, knife_model_path_release_mode);
@@ -24433,6 +24814,74 @@ std::wstring BuildWeaponApplyReadback(
         }
     }
 
+    if (offsets.item_view_disallow_soc != 0)
+    {
+        bool disallow_soc = false;
+        stream << L", disallow_soc=";
+        if (SafeReadField(item_view, offsets.item_view_disallow_soc, disallow_soc))
+        {
+            stream << (disallow_soc ? 1 : 0);
+        }
+        else
+        {
+            stream << L"?";
+        }
+    }
+
+    if (offsets.item_view_restore_custom_material_after_precache != 0)
+    {
+        bool restore_custom_material = false;
+        stream << L", restore_custom_material=";
+        if (SafeReadField(
+                item_view,
+                offsets.item_view_restore_custom_material_after_precache,
+                restore_custom_material))
+        {
+            stream << (restore_custom_material ? 1 : 0);
+        }
+        else
+        {
+            stream << L"?";
+        }
+    }
+
+    auto* attribute_container = ResolveWeaponAttributeContainer(econ_entity, offsets);
+    if (attribute_container != nullptr &&
+        offsets.attribute_container_external_item_provider_registered_token != 0)
+    {
+        std::uint32_t provider_token = 0;
+        stream << L", provider_token=";
+        if (SafeReadField(
+                attribute_container,
+                offsets.attribute_container_external_item_provider_registered_token,
+                provider_token))
+        {
+            stream << provider_token;
+        }
+        else
+        {
+            stream << L"?";
+        }
+    }
+
+    if (attribute_container != nullptr &&
+        offsets.attribute_container_registered_as_item_id != 0)
+    {
+        std::uint64_t registered_item_id = 0;
+        stream << L", registered_item_id=";
+        if (SafeReadField(
+                attribute_container,
+                offsets.attribute_container_registered_as_item_id,
+                registered_item_id))
+        {
+            stream << registered_item_id;
+        }
+        else
+        {
+            stream << L"?";
+        }
+    }
+
     if (offsets.econ_entity_initialized != 0 && econ_entity != nullptr)
     {
         bool initialized = false;
@@ -25400,7 +25849,42 @@ bool VerifyAttributeValues(
     {
         float actual_value = 0.0f;
         if (!TryReadAttributeValue(item_view, offsets, definition_index, actual_value) ||
-            std::fabs(actual_value - expected_value) > 0.0001f)
+            (definition_index == kAttributeWear
+                ? !nskinzcs2::model::CosmeticWearMatchesExactly(actual_value, expected_value)
+                : std::fabs(actual_value - expected_value) > 0.0001f))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool VerifyKnifeFinishRefreshAttributeValues(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr)
+{
+    const auto desired_attributes = BuildWeaponRefreshAttributesImpl(profile, keychain_profile);
+    for (const auto& [definition_index, expected_value] : desired_attributes)
+    {
+        float actual_value = 0.0f;
+        const auto present =
+            TryReadAttributeValue(item_view, offsets, definition_index, actual_value);
+        if (profile.paint_kit == 0 && definition_index == kAttributePaintKit)
+        {
+            if (present && std::fabs(actual_value) > 0.0001f)
+            {
+                return false;
+            }
+            continue;
+        }
+
+        if (!present ||
+            (definition_index == kAttributeWear
+                ? !nskinzcs2::model::CosmeticWearMatchesExactly(actual_value, expected_value)
+                : std::fabs(actual_value - expected_value) > 0.0001f))
         {
             return false;
         }
@@ -25424,7 +25908,9 @@ bool VerifyAttributeValuesInList(
     {
         float actual_value = 0.0f;
         if (!TryReadAttributeValueInList(item_view, item_list_offset, offsets, definition_index, actual_value) ||
-            std::fabs(actual_value - expected_value) > 0.0001f)
+            (definition_index == kAttributeWear
+                ? !nskinzcs2::model::CosmeticWearMatchesExactly(actual_value, expected_value)
+                : std::fabs(actual_value - expected_value) > 0.0001f))
         {
             return false;
         }
@@ -25677,9 +26163,12 @@ bool PromoteTemporaryWeaponRefreshAttachmentToRuntimeOwned(
         attachment.in_place_address != nullptr &&
         !attachment.in_place_original_bytes.empty() &&
         attachment.in_place_original_bytes.size() == attachment.in_place_installed_bytes.size();
+    const auto flag_only_attachment =
+        attachment.vector_address == nullptr &&
+        attachment.restore_custom_material_written;
     if (attachment.item_view == nullptr ||
-        attachment.vector_address == nullptr ||
-        (!in_place_attachment &&
+        (!flag_only_attachment && attachment.vector_address == nullptr) ||
+        (!flag_only_attachment && !in_place_attachment &&
             (attachment.allocated_block == nullptr ||
                 attachment.allocated_size < sizeof(RefreshEconItemAttribute))))
     {
@@ -27150,6 +27639,274 @@ bool TryUpdateExistingAttributeValue(
     return updated;
 }
 
+bool TryNotifyAndRewriteWeaponRefreshAttributes(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const std::vector<std::pair<std::uint16_t, float>>& desired_attributes,
+    std::size_t& notified_slot_count)
+{
+    notified_slot_count = 0;
+    if (item_view == nullptr ||
+        desired_attributes.empty() ||
+        offsets.attribute_list_attributes_operation == nullptr ||
+        offsets.attribute_list_attributes_schema_tail_span < 0x18 ||
+        !ShouldAllowDirectAttributeListWrites(offsets))
+    {
+        return false;
+    }
+
+    const auto attribute_stride = ResolveEconItemAttributeStride(offsets);
+    if (attribute_stride == 0 ||
+        offsets.attribute_list_attributes_element_size != attribute_stride)
+    {
+        return false;
+    }
+
+    std::unordered_set<std::uint16_t> notified_definitions;
+    notified_definitions.reserve(desired_attributes.size());
+    auto notify_list = [&](const std::ptrdiff_t list_offset)
+    {
+        if (list_offset == 0)
+        {
+            return true;
+        }
+
+        auto* vector_address =
+            reinterpret_cast<std::uint8_t*>(item_view) +
+            list_offset + offsets.attribute_list_attributes;
+        NetworkVectorView vector_view {};
+        if (!TryReadNetworkVectorView(vector_address, vector_view) ||
+            (vector_view.size != 0 && vector_view.data == nullptr))
+        {
+            return false;
+        }
+
+        for (std::size_t index = 0; index < static_cast<std::size_t>(vector_view.size); ++index)
+        {
+            auto* attribute = vector_view.data + index * attribute_stride;
+            std::uint16_t definition_index = 0;
+            if (!SafeReadField(
+                    attribute,
+                    offsets.econ_item_attribute_definition_index,
+                    definition_index))
+            {
+                return false;
+            }
+
+            const auto desired = std::find_if(
+                desired_attributes.begin(),
+                desired_attributes.end(),
+                [definition_index](const auto& entry)
+                {
+                    return entry.first == definition_index;
+                });
+            if (desired == desired_attributes.end())
+            {
+                continue;
+            }
+
+            if (index > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+                !TryInvokeNetworkVectorElementMutation(
+                    offsets.attribute_list_attributes_operation,
+                    vector_address,
+                    static_cast<std::int32_t>(index),
+                    attribute) ||
+                !SafeWriteField(
+                    attribute,
+                    offsets.econ_item_attribute_definition_index,
+                    desired->first) ||
+                !SafeWriteField(
+                    attribute,
+                    offsets.econ_item_attribute_value,
+                    desired->second) ||
+                (offsets.econ_item_attribute_initial_value != 0 &&
+                    !SafeWriteField(
+                        attribute,
+                        offsets.econ_item_attribute_initial_value,
+                        desired->second)))
+            {
+                return false;
+            }
+
+            notified_definitions.insert(definition_index);
+            ++notified_slot_count;
+        }
+
+        return true;
+    };
+
+    if (!notify_list(offsets.item_view_attribute_list) ||
+        !notify_list(offsets.item_view_dynamic_attribute_list))
+    {
+        return false;
+    }
+
+    return std::all_of(
+        desired_attributes.begin(),
+        desired_attributes.end(),
+        [&notified_definitions](const auto& entry)
+        {
+            return notified_definitions.find(entry.first) != notified_definitions.end();
+        });
+}
+
+bool TryEnsureKnifeRefreshStaticAttributeMirror(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const std::vector<std::pair<std::uint16_t, float>>& desired_attributes,
+    std::uint64_t& previous_static_count,
+    std::uint64_t& current_static_count)
+{
+    previous_static_count = 0;
+    current_static_count = 0;
+    if (item_view == nullptr || desired_attributes.empty() ||
+        offsets.item_view_attribute_list == 0 ||
+        offsets.attribute_list_attributes == 0 ||
+        offsets.attribute_list_attributes_operation == nullptr ||
+        !ShouldAllowDirectAttributeListWrites(offsets))
+    {
+        return false;
+    }
+
+    const auto attribute_stride = ResolveEconItemAttributeStride(offsets);
+    if (attribute_stride == 0 ||
+        offsets.attribute_list_attributes_element_size != attribute_stride ||
+        desired_attributes.size() > static_cast<std::size_t>(
+            std::numeric_limits<std::int32_t>::max()))
+    {
+        return false;
+    }
+
+    auto* static_vector_address =
+        reinterpret_cast<std::uint8_t*>(item_view) +
+        offsets.item_view_attribute_list + offsets.attribute_list_attributes;
+    NetworkVectorView before {};
+    if (!TryReadNetworkVectorView(static_vector_address, before) ||
+        before.size > 128 || (before.size != 0 && before.data == nullptr))
+    {
+        return false;
+    }
+
+    previous_static_count = before.size;
+    if (before.size != 0)
+    {
+        current_static_count = before.size;
+        return true;
+    }
+
+    // v0.2.0 merged the static and dynamic econ attributes into a temporary
+    // static vector before patching RegenerateWeaponSkins' material gate. In
+    // current CS2 the vector owns a larger allocator tail, so replacing its
+    // old 16-byte prefix with external storage is unsafe. Ask the Schema
+    // vector operation to construct engine-owned static records instead, then
+    // mirror only paint/seed/wear into those records while preserving their
+    // vtable, owner and allocator metadata. The dynamic records remain the
+    // authoritative networked attributes and both lists carry identical
+    // values during deferred material generation.
+    const auto append_count = static_cast<std::int32_t>(desired_attributes.size());
+    if (!TryInvokeNetworkVectorOperation(
+            offsets.attribute_list_attributes_operation,
+            4,
+            static_vector_address,
+            0,
+            append_count))
+    {
+        return false;
+    }
+
+    NetworkVectorView mirrored {};
+    if (!TryReadNetworkVectorView(static_vector_address, mirrored) ||
+        mirrored.size != desired_attributes.size() || mirrored.data == nullptr)
+    {
+        TryInvokeNetworkVectorOperation(
+            offsets.attribute_list_attributes_operation,
+            5,
+            static_vector_address,
+            0,
+            append_count);
+        return false;
+    }
+
+    for (std::size_t index = 0; index < desired_attributes.size(); ++index)
+    {
+        auto* attribute = mirrored.data + index * attribute_stride;
+        const auto& [definition_index, value] = desired_attributes[index];
+        if (!TryInvokeNetworkVectorElementMutation(
+                offsets.attribute_list_attributes_operation,
+                static_vector_address,
+                static_cast<std::int32_t>(index),
+                attribute) ||
+            !SafeWriteField(
+                attribute,
+                offsets.econ_item_attribute_definition_index,
+                definition_index) ||
+            !SafeWriteField(
+                attribute,
+                offsets.econ_item_attribute_value,
+                value) ||
+            (offsets.econ_item_attribute_initial_value != 0 &&
+                !SafeWriteField(
+                    attribute,
+                    offsets.econ_item_attribute_initial_value,
+                    value)))
+        {
+            TryInvokeNetworkVectorOperation(
+                offsets.attribute_list_attributes_operation,
+                5,
+                static_vector_address,
+                0,
+                append_count);
+            return false;
+        }
+    }
+
+    NetworkVectorView verified {};
+    if (!TryReadNetworkVectorView(static_vector_address, verified) ||
+        verified.size != desired_attributes.size() || verified.data == nullptr)
+    {
+        TryInvokeNetworkVectorOperation(
+            offsets.attribute_list_attributes_operation,
+            5,
+            static_vector_address,
+            0,
+            append_count);
+        return false;
+    }
+
+    for (std::size_t index = 0; index < desired_attributes.size(); ++index)
+    {
+        auto* attribute = verified.data + index * attribute_stride;
+        std::uint16_t definition_index = 0;
+        float value = 0.0f;
+        const auto& [expected_definition_index, expected_value] =
+            desired_attributes[index];
+        if (!SafeReadField(
+                attribute,
+                offsets.econ_item_attribute_definition_index,
+                definition_index) ||
+            definition_index != expected_definition_index ||
+            !SafeReadField(
+                attribute,
+                offsets.econ_item_attribute_value,
+                value) ||
+            (definition_index == kAttributeWear
+                ? !nskinzcs2::model::CosmeticWearMatchesExactly(value, expected_value)
+                : std::fabs(value - expected_value) > 0.0001f))
+        {
+            TryInvokeNetworkVectorOperation(
+                offsets.attribute_list_attributes_operation,
+                5,
+                static_vector_address,
+                0,
+                append_count);
+            return false;
+        }
+    }
+
+    current_static_count = verified.size;
+    return true;
+}
+
 bool TryUpdateExistingAttributeValueInPlaceOnly(
     void* item_view,
     const ClientSchemaOffsets& offsets,
@@ -27172,6 +27929,169 @@ bool TryUpdateExistingAttributeValueInPlaceOnly(
                   value) ||
         updated;
     return updated;
+}
+
+bool TryDisableExistingAttributeInList(
+    void* item_view,
+    const std::ptrdiff_t item_list_offset,
+    const ClientSchemaOffsets& offsets,
+    const std::uint16_t attribute_definition_index)
+{
+    if (item_view == nullptr ||
+        item_list_offset == 0 ||
+        offsets.attribute_list_attributes == 0 ||
+        !ShouldAllowDirectAttributeListWrites(offsets))
+    {
+        return false;
+    }
+
+    const auto attribute_stride = ResolveEconItemAttributeStride(offsets);
+    NetworkVectorView vector_view {};
+    if (attribute_stride == 0 ||
+        !TryReadNetworkVectorView(
+            reinterpret_cast<const std::uint8_t*>(item_view) +
+                item_list_offset + offsets.attribute_list_attributes,
+            vector_view) ||
+        vector_view.size == 0 ||
+        vector_view.data == nullptr)
+    {
+        return false;
+    }
+
+    bool disabled = false;
+    for (std::size_t index = 0; index < static_cast<std::size_t>(vector_view.size); ++index)
+    {
+        auto* attribute = vector_view.data + index * attribute_stride;
+        std::uint16_t current_definition_index = 0;
+        if (!SafeReadField(
+                attribute,
+                offsets.econ_item_attribute_definition_index,
+                current_definition_index) ||
+            current_definition_index != attribute_definition_index)
+        {
+            continue;
+        }
+
+        const auto value_cleared =
+            SafeWriteField(attribute, offsets.econ_item_attribute_value, 0.0f);
+        const auto initial_value_cleared =
+            offsets.econ_item_attribute_initial_value == 0 ||
+            SafeWriteField(attribute, offsets.econ_item_attribute_initial_value, 0.0f);
+        const auto definition_disabled =
+            SafeWriteField(
+                attribute,
+                offsets.econ_item_attribute_definition_index,
+                static_cast<std::uint16_t>(0));
+        disabled =
+            (value_cleared && initial_value_cleared && definition_disabled) || disabled;
+    }
+
+    return disabled;
+}
+
+bool TryActivateEmptyAttributeInList(
+    void* item_view,
+    const std::ptrdiff_t item_list_offset,
+    const ClientSchemaOffsets& offsets,
+    const std::uint16_t attribute_definition_index,
+    const float value)
+{
+    if (item_view == nullptr ||
+        item_list_offset == 0 ||
+        offsets.attribute_list_attributes == 0 ||
+        !ShouldAllowDirectAttributeListWrites(offsets))
+    {
+        return false;
+    }
+
+    const auto attribute_stride = ResolveEconItemAttributeStride(offsets);
+    NetworkVectorView vector_view {};
+    if (attribute_stride == 0 ||
+        !TryReadNetworkVectorView(
+            reinterpret_cast<const std::uint8_t*>(item_view) +
+                item_list_offset + offsets.attribute_list_attributes,
+            vector_view) ||
+        vector_view.size == 0 ||
+        vector_view.data == nullptr)
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < static_cast<std::size_t>(vector_view.size); ++index)
+    {
+        auto* attribute = vector_view.data + index * attribute_stride;
+        std::uint16_t current_definition_index = 0;
+        if (!SafeReadField(
+                attribute,
+                offsets.econ_item_attribute_definition_index,
+                current_definition_index) ||
+            current_definition_index != 0)
+        {
+            continue;
+        }
+
+        const auto value_written =
+            SafeWriteField(attribute, offsets.econ_item_attribute_value, value);
+        const auto initial_value_written =
+            offsets.econ_item_attribute_initial_value == 0 ||
+            SafeWriteField(attribute, offsets.econ_item_attribute_initial_value, value);
+        const auto definition_activated =
+            SafeWriteField(
+                attribute,
+                offsets.econ_item_attribute_definition_index,
+                attribute_definition_index);
+        return value_written && initial_value_written && definition_activated;
+    }
+
+    return false;
+}
+
+bool TryWriteKnifePaintAttributeInPlaceOnly(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const float paint_kit)
+{
+    if (std::fabs(paint_kit) <= 0.0001f)
+    {
+        bool disabled = false;
+        disabled =
+            TryDisableExistingAttributeInList(
+                item_view,
+                offsets.item_view_dynamic_attribute_list,
+                offsets,
+                kAttributePaintKit) ||
+            disabled;
+        disabled =
+            TryDisableExistingAttributeInList(
+                item_view,
+                offsets.item_view_attribute_list,
+                offsets,
+                kAttributePaintKit) ||
+            disabled;
+        return disabled;
+    }
+
+    if (TryUpdateExistingAttributeValueInPlaceOnly(
+            item_view,
+            offsets,
+            kAttributePaintKit,
+            paint_kit))
+    {
+        return true;
+    }
+
+    return TryActivateEmptyAttributeInList(
+               item_view,
+               offsets.item_view_dynamic_attribute_list,
+               offsets,
+               kAttributePaintKit,
+               paint_kit) ||
+        TryActivateEmptyAttributeInList(
+               item_view,
+               offsets.item_view_attribute_list,
+               offsets,
+               kAttributePaintKit,
+               paint_kit);
 }
 
 bool TryReadAttributeValueInList(
@@ -27285,6 +28205,12 @@ bool IsKeychainOnlyApplyRequest(
             {
                 return IsDefaultStickerProfile(sticker);
             });
+}
+
+bool ProfileHasExplicitPaintIntent(
+    const nskinzcs2::model::CosmeticProfile& profile) noexcept
+{
+    return profile.paint_kit != 0 || profile.explicit_vanilla_finish;
 }
 
 bool TryBuildLiveStandardWeaponProfile(
@@ -34685,6 +35611,1750 @@ bool TryInvokeWearableSetModelAtFrameRenderPass(
     return verified;
 }
 
+bool TryInvalidateKnifeVisualsData(
+    const int entity_index,
+    void* entity,
+    const ClientSchemaOffsets& offsets,
+    const std::uint64_t signature,
+    const std::uint64_t xuid)
+{
+    if (entity == nullptr || entity_index < 0 ||
+        !g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        return false;
+    }
+
+    if (offsets.weapon_visuals_data_set == 0 ||
+        offsets.weapon_custom_econ_reload_event_id == 0)
+    {
+        return false;
+    }
+
+    bool before_visuals_data_set = false;
+    bool after_visuals_data_set = true;
+    const auto before_read = SafeReadField(
+        entity,
+        offsets.weapon_visuals_data_set,
+        before_visuals_data_set);
+    const auto written = before_read && SafeWriteField(
+        entity,
+        offsets.weapon_visuals_data_set,
+        false);
+    const auto verified = written && SafeReadField(
+        entity,
+        offsets.weapon_visuals_data_set,
+        after_visuals_data_set) &&
+        !after_visuals_data_set;
+
+    std::int32_t previous_reload_event_id = 0;
+    std::int32_t observed_reload_event_id = 0;
+    const auto reload_event_read = SafeReadField(
+        entity,
+        offsets.weapon_custom_econ_reload_event_id,
+        previous_reload_event_id);
+    const auto next_reload_event_id =
+        previous_reload_event_id == std::numeric_limits<std::int32_t>::max()
+            ? 0
+            : previous_reload_event_id + 1;
+    const auto reload_event_written = reload_event_read && SafeWriteField(
+        entity,
+        offsets.weapon_custom_econ_reload_event_id,
+        next_reload_event_id);
+    const auto reload_event_verified = reload_event_written && SafeReadField(
+        entity,
+        offsets.weapon_custom_econ_reload_event_id,
+        observed_reload_event_id) &&
+        observed_reload_event_id == next_reload_event_id;
+
+    std::wstringstream stream;
+    stream << L"Knife visuals-data invalidation for XUID " << xuid
+        << L": entity=" << entity_index
+        << L", offset=0x" << std::hex << std::uppercase
+        << offsets.weapon_visuals_data_set << std::dec << std::nouppercase
+        << L", before=" << (before_visuals_data_set ? 1 : 0)
+        << L", after=" << (after_visuals_data_set ? 1 : 0)
+        << L", written=" << (written ? 1 : 0)
+        << L", visuals_verified=" << (verified ? 1 : 0)
+        << L", reload_event_offset=0x" << std::hex << std::uppercase
+        << offsets.weapon_custom_econ_reload_event_id << std::dec << std::nouppercase
+        << L", reload_event_previous=" << previous_reload_event_id
+        << L", reload_event_next=" << observed_reload_event_id
+        << L", reload_event_verified=" << (reload_event_verified ? 1 : 0) << L".";
+    if (verified && reload_event_verified)
+    {
+        LogProfileDiagnosticOnce(signature ^ 0x56414E5345544D4Full, stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(signature ^ 0x56414E5345544641ull, stream.str());
+    }
+    return verified && reload_event_verified;
+}
+
+bool TryResetExplicitVanillaKnifeGeneratorPayload(
+    const PendingWeaponRefreshRequest& request,
+    const ClientSchemaOffsets& offsets)
+{
+    constexpr std::size_t kGeneratorPayloadSize = 0xA0;
+    constexpr std::size_t kGeneratorPayloadInitializedOffset = 0x98;
+    constexpr std::ptrdiff_t kPayloadToVisualsFlagSpan = 0xA1;
+    if (!IsExplicitVanillaKnifeFinishProfile(request.profile) ||
+        request.econ_entity == nullptr || request.entity_index < 0 ||
+        offsets.weapon_visuals_data_set < kPayloadToVisualsFlagSpan ||
+        !g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        return false;
+    }
+
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_text = GetTextSectionSpan(client_module);
+    const auto client_span = GetModuleSpan(client_module);
+    if (client_module == nullptr || !client_text.has_value() ||
+        !client_span.has_value())
+    {
+        return false;
+    }
+
+    // These are the two adjacent functions used by the verified current
+    // RegenerateWeaponSkins body immediately before it fills +0x1848: the
+    // 0xA0 move-assignment/reset and its matching destructor. Resolve both by
+    // complete, unique prologues instead of storing build-specific RVAs.
+    constexpr char kGeneratorPayloadMoveAssignPattern[] =
+        "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 "
+        "48 8B 02 48 8B DA 48 89 01 48 8B F9 48 8B 42 08 48 89 41 08 "
+        "0F B6 42 10 88 41 10 48 83 79 18 00 48 8B 6A 18";
+    constexpr char kGeneratorPayloadDestructorPattern[] =
+        "48 83 EC 28 48 89 5C 24 30 48 89 74 24 38 48 8B F1 48 83 E9 80 "
+        "48 89 7C 24 40 E8 ?? ?? ?? ?? 48 83 7E 70 00";
+    auto* move_assign = FindUniquePattern(
+        *client_text,
+        kGeneratorPayloadMoveAssignPattern);
+    auto* destroy = FindUniquePattern(
+        *client_text,
+        kGeneratorPayloadDestructorPattern);
+    if (move_assign == nullptr || destroy == nullptr ||
+        !PointerInModule(*client_span, move_assign) ||
+        !PointerInModule(*client_span, destroy) ||
+        !IsExecutablePointer(move_assign) || !IsExecutablePointer(destroy))
+    {
+        return false;
+    }
+
+    auto* destination =
+        reinterpret_cast<std::uint8_t*>(request.econ_entity) +
+        offsets.weapon_visuals_data_set - kPayloadToVisualsFlagSpan;
+    std::array<std::uint8_t, kGeneratorPayloadSize> before {};
+    if (!SafeReadBytes(destination, before.data(), before.size()))
+    {
+        return false;
+    }
+
+    // This exactly mirrors the generator's local construction sequence:
+    // memset(0, 0xA0), then set byte +0x98 before move-assignment. The
+    // assignment swaps the destination's owned members into this temporary;
+    // its matching destructor then releases those old allocations safely.
+    alignas(16) std::array<std::uint8_t, kGeneratorPayloadSize> empty_payload {};
+    empty_payload[kGeneratorPayloadInitializedOffset] = 1;
+    const auto expected_payload = empty_payload;
+    const auto assigned = SafeInvokeVoidFunctionPointer(
+        move_assign,
+        destination,
+        empty_payload.data());
+    const auto destroyed = assigned && SafeInvokeVoidFunctionPointer(
+        destroy,
+        empty_payload.data());
+
+    std::array<std::uint8_t, kGeneratorPayloadSize> after {};
+    const auto after_read =
+        SafeReadBytes(destination, after.data(), after.size());
+    const auto verified = assigned && destroyed && after_read &&
+        after == expected_payload;
+    const auto before_hash = HashFlattenedIdentity(std::string(
+        reinterpret_cast<const char*>(before.data()),
+        before.size()));
+    const auto after_hash = after_read
+        ? HashFlattenedIdentity(std::string(
+            reinterpret_cast<const char*>(after.data()),
+            after.size()))
+        : 0;
+
+    std::wstringstream stream;
+    stream << L"Explicit vanilla knife reset the private material-generator payload "
+        << L"through the current client's move-assignment/destructor pair"
+        << L": entity=" << request.entity_index
+        << L", destination=" << FormatPointer(destination)
+        << L", move_assign=" << FormatClientRelativeCodePointer(move_assign)
+        << L", destroy=" << FormatClientRelativeCodePointer(destroy)
+        << L", before_hash=0x" << std::hex << std::uppercase << before_hash
+        << L", after_hash=0x" << after_hash
+        << std::dec << std::nouppercase
+        << L", assigned=" << (assigned ? 1 : 0)
+        << L", destroyed=" << (destroyed ? 1 : 0)
+        << L", verified=" << (verified ? 1 : 0) << L".";
+    if (verified)
+    {
+        LogProfileDiagnosticOnce(
+            request.desired_signature ^ 0x56414E5041594C44ull,
+            stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(
+            request.desired_signature ^ 0x56414E5041594641ull,
+            stream.str());
+    }
+    return verified;
+}
+
+struct ExplicitVanillaKnifeMaterialAssignment
+{
+    std::int32_t material_index = 0;
+    std::uint32_t reserved = 0;
+    void* material = nullptr;
+};
+static_assert(sizeof(ExplicitVanillaKnifeMaterialAssignment) == 0x10);
+
+struct ExplicitVanillaKnifeMaterialGroupRestore
+{
+    int entity_index = -1;
+    void* entity = nullptr;
+    void* model_container = nullptr;
+    std::int32_t object_index = -1;
+    std::size_t group_index = 0;
+    void* model_object = nullptr;
+    void* material_group = nullptr;
+    std::vector<ExplicitVanillaKnifeMaterialAssignment> assignments;
+    std::vector<void*> material_records;
+};
+
+struct ExplicitVanillaKnifeMeshRestoreSnapshot
+{
+    bool active = false;
+    int entity_index = -1;
+    std::uint64_t desired_signature = 0;
+    void* econ_entity = nullptr;
+    void* model_container = nullptr;
+    void* get_model_object = nullptr;
+    void* update_model_object = nullptr;
+    void* render_notifier = nullptr;
+    void* render_notify_method = nullptr;
+    void* scene_notifier = nullptr;
+    void* scene_notify_method = nullptr;
+    std::vector<ExplicitVanillaKnifeMaterialGroupRestore> groups;
+};
+
+bool TryRestoreExplicitVanillaKnifeMeshBaseMaterials(
+    const PendingWeaponRefreshRequest& request,
+    const WeaponSkinRefreshBinding& binding,
+    void* material_changed,
+    ExplicitVanillaKnifeMeshRestoreSnapshot* snapshot_out)
+{
+    if (snapshot_out != nullptr)
+    {
+        *snapshot_out = {};
+    }
+    if (request.econ_entity == nullptr || material_changed == nullptr ||
+        binding.original_offset == 0)
+    {
+        return false;
+    }
+
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_span = GetModuleSpan(client_module);
+    if (client_module == nullptr || !client_span.has_value())
+    {
+        return false;
+    }
+
+    const auto resolve_relative_call =
+        [&](std::uint8_t* instruction) -> void*
+        {
+            std::uint8_t opcode = 0;
+            std::int32_t displacement = 0;
+            if (instruction == nullptr ||
+                !SafeReadValue(instruction, opcode) || opcode != 0xE8 ||
+                !SafeReadValue(instruction + 1, displacement))
+            {
+                return nullptr;
+            }
+            auto* target = instruction + 5 + displacement;
+            return PointerInModule(*client_span, target) &&
+                    IsExecutablePointer(target)
+                ? target
+                : nullptr;
+        };
+
+    // These calls are inside the already signature-validated current C_Knife
+    // material-changed virtual: +0x69 resolves the model-object lookup and
+    // +0xE7 resolves the full mesh rebind. The latter's +0x36C call is the
+    // native model-container update issued after a material assignment.
+    auto* const material_changed_code =
+        static_cast<std::uint8_t*>(material_changed);
+    auto* const get_model_object = resolve_relative_call(
+        material_changed_code + 0x69);
+    auto* const full_mesh_rebind = resolve_relative_call(
+        material_changed_code + 0xE7);
+    auto* const update_model_object = full_mesh_rebind != nullptr
+        ? resolve_relative_call(
+            static_cast<std::uint8_t*>(full_mesh_rebind) + 0x36C)
+        : nullptr;
+    constexpr std::array<std::uint8_t, 11> kExpectedFullMeshRebindPrologue {
+        0x48, 0x8B, 0xC4, 0x55, 0x56, 0x41, 0x55, 0x48, 0x8D, 0x68, 0xA1,
+    };
+    std::array<std::uint8_t, kExpectedFullMeshRebindPrologue.size()>
+        full_mesh_rebind_prologue {};
+    if (get_model_object == nullptr || full_mesh_rebind == nullptr ||
+        update_model_object == nullptr ||
+        !SafeReadBytes(
+            full_mesh_rebind,
+            full_mesh_rebind_prologue.data(),
+            full_mesh_rebind_prologue.size()) ||
+        full_mesh_rebind_prologue != kExpectedFullMeshRebindPrologue)
+    {
+        return false;
+    }
+
+    const auto resolve_rip_interface =
+        [&](const std::size_t instruction_offset,
+            const std::size_t method_slot,
+            void*& interface_pointer,
+            void*& method) noexcept
+        {
+            interface_pointer = nullptr;
+            method = nullptr;
+            auto* instruction =
+                static_cast<std::uint8_t*>(full_mesh_rebind) +
+                instruction_offset;
+            std::array<std::uint8_t, 3> prefix {};
+            std::int32_t displacement = 0;
+            if (!SafeReadBytes(instruction, prefix.data(), prefix.size()) ||
+                prefix != std::array<std::uint8_t, 3> {0x48, 0x8B, 0x0D} ||
+                !SafeReadValue(instruction + 3, displacement))
+            {
+                return false;
+            }
+            auto* global_storage = instruction + 7 + displacement;
+            void** vtable = nullptr;
+            return PointerInModule(*client_span, global_storage) &&
+                SafeReadValue(global_storage, interface_pointer) &&
+                interface_pointer != nullptr &&
+                SafeReadValue(interface_pointer, vtable) &&
+                vtable != nullptr &&
+                SafeReadValue(vtable + method_slot, method) &&
+                method != nullptr && IsExecutablePointer(method);
+        };
+
+    void* render_notifier = nullptr;
+    void* render_notify_method = nullptr;
+    void* scene_notifier = nullptr;
+    void* scene_notify_method = nullptr;
+    if (!resolve_rip_interface(
+            0x409,
+            0xD8 / sizeof(void*),
+            render_notifier,
+            render_notify_method) ||
+        !resolve_rip_interface(
+            0x420,
+            0x3F0 / sizeof(void*),
+            scene_notifier,
+            scene_notify_method))
+    {
+        return false;
+    }
+
+    RefreshAttributeVector custom_materials {};
+    if (!SafeReadValue(
+            reinterpret_cast<std::uint8_t*>(request.econ_entity) +
+                binding.original_offset,
+            custom_materials) ||
+        custom_materials.size == 0 || custom_materials.size > 16 ||
+        custom_materials.ptr == 0)
+    {
+        return false;
+    }
+
+    std::string current_model_name;
+    std::uint64_t current_model_handle = 0;
+    std::string default_material_name;
+    std::uint64_t default_material_handle = 0;
+    std::wstring default_material_source;
+    std::wstring default_material_reason;
+    const auto current_model_ready = TryReadEntityModelNameString(
+            request.econ_entity,
+            g_hook_state.schema_offsets,
+            current_model_name) &&
+        !current_model_name.empty() &&
+        TryReadEntityModelHandle(
+            request.econ_entity,
+            g_hook_state.schema_offsets,
+            current_model_handle) &&
+        current_model_handle != 0;
+    if (current_model_ready)
+    {
+        const auto slash = current_model_name.find_last_of('/');
+        const auto dot = current_model_name.find_last_of('.');
+        if (slash != std::string::npos && dot != std::string::npos &&
+            dot > slash + 1)
+        {
+            default_material_name = current_model_name.substr(0, slash + 1) +
+                "materials/" +
+                current_model_name.substr(slash + 1, dot - slash - 1) +
+                ".vmat";
+        }
+    }
+    const auto default_material_loaded =
+        !default_material_name.empty() &&
+        TryResolveGloveDirectRenderModelHandleAtSafePoint(
+            default_material_name,
+            current_model_name,
+            current_model_handle,
+            request.profile.xuid,
+            default_material_handle,
+            default_material_source,
+            default_material_reason,
+            true) &&
+        default_material_handle != 0 &&
+        IsReadablePointer(reinterpret_cast<void*>(default_material_handle));
+    auto* const default_material = default_material_loaded
+        ? reinterpret_cast<void*>(default_material_handle)
+        : nullptr;
+
+    struct MaterialPair
+    {
+        void* custom = nullptr;
+        void* base = nullptr;
+        void* composite_base = nullptr;
+    };
+    std::vector<MaterialPair> material_pairs;
+    material_pairs.reserve(static_cast<std::size_t>(custom_materials.size));
+    for (std::uint64_t index = 0; index < custom_materials.size; ++index)
+    {
+        void* custom_material = nullptr;
+        void* material_instance = nullptr;
+        void** material_vtable = nullptr;
+        void* get_base_material = nullptr;
+        if (!SafeReadValue(
+                reinterpret_cast<void* const*>(custom_materials.ptr) + index,
+                custom_material) ||
+            custom_material == nullptr ||
+            !SafeReadValue(custom_material, material_instance) ||
+            material_instance == nullptr ||
+            !SafeReadValue(material_instance, material_vtable) ||
+            material_vtable == nullptr ||
+            !SafeReadValue(material_vtable + 0xE0 / sizeof(void*), get_base_material) ||
+            get_base_material == nullptr ||
+            !IsExecutablePointer(get_base_material))
+        {
+            return false;
+        }
+
+        void* base_material = nullptr;
+        void* returned_handle = nullptr;
+        const auto base_resolved = SafeInvokeFunctionPointer(
+            get_base_material,
+            returned_handle,
+            material_instance,
+            &base_material);
+        if (!base_resolved || returned_handle != &base_material ||
+            base_material == nullptr || !IsReadablePointer(base_material))
+        {
+            return false;
+        }
+        material_pairs.push_back({
+            custom_material,
+            default_material != nullptr ? default_material : base_material,
+            base_material,
+        });
+    }
+
+    void* model_container = nullptr;
+    constexpr std::ptrdiff_t kEconEntityModelContainerOffset = 0x338;
+    std::int32_t model_object_count = 0;
+    if (!SafeReadField(
+            request.econ_entity,
+            kEconEntityModelContainerOffset,
+            model_container) ||
+        model_container == nullptr ||
+        !SafeReadValue(
+            reinterpret_cast<std::uint8_t*>(model_container) + 0x38,
+            model_object_count) ||
+        model_object_count <= 0 || model_object_count > 128)
+    {
+        return false;
+    }
+
+    std::size_t matching_material_slots = 0;
+    std::size_t owner_matched_material_slots = 0;
+    std::size_t default_forced_material_slots = 0;
+    std::size_t updated_material_groups = 0;
+    std::size_t notified_model_objects = 0;
+    std::size_t verified_material_slots = 0;
+    std::size_t scanned_model_entities = 1;
+    std::size_t scanned_related_model_objects = 0;
+    std::unordered_set<int> matched_consumer_entities;
+    matched_consumer_entities.insert(request.entity_index);
+    bool all_updates_succeeded = true;
+    ExplicitVanillaKnifeMeshRestoreSnapshot captured_snapshot;
+    captured_snapshot.entity_index = request.entity_index;
+    captured_snapshot.desired_signature = request.desired_signature;
+    captured_snapshot.econ_entity = request.econ_entity;
+    captured_snapshot.model_container = model_container;
+    captured_snapshot.get_model_object = get_model_object;
+    captured_snapshot.update_model_object = update_model_object;
+    captured_snapshot.render_notifier = render_notifier;
+    captured_snapshot.render_notify_method = render_notify_method;
+    captured_snapshot.scene_notifier = scene_notifier;
+    captured_snapshot.scene_notify_method = scene_notify_method;
+    std::vector<std::wstring> pair_descriptions;
+    pair_descriptions.reserve(material_pairs.size());
+    for (const auto& pair : material_pairs)
+    {
+        void* composite_base_vtable = nullptr;
+        void* selected_base_vtable = nullptr;
+        SafeReadValue(pair.composite_base, composite_base_vtable);
+        SafeReadValue(pair.base, selected_base_vtable);
+        pair_descriptions.push_back(
+            FormatPointer(pair.custom) + L"->composite=" +
+            FormatPointer(pair.composite_base) + L"{" +
+            FormatModuleOwnerWithOffset(composite_base_vtable) + L"}->selected=" +
+            FormatPointer(pair.base) + L"{" +
+            FormatModuleOwnerWithOffset(selected_base_vtable) + L"}");
+    }
+
+    for (std::int32_t object_index = 0;
+         object_index < model_object_count;
+         ++object_index)
+    {
+        void* model_object = nullptr;
+        if (!SafeInvokeFunctionPointer(
+                get_model_object,
+                model_object,
+                model_container,
+                object_index) ||
+            model_object == nullptr)
+        {
+            continue;
+        }
+
+        std::uint64_t object_flags = 0;
+        void* material_group = nullptr;
+        if (!SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(model_object) + 0x78,
+                object_flags) ||
+            (object_flags & 0x2) == 0 ||
+            !SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(model_object) + 0x10,
+                material_group))
+        {
+            continue;
+        }
+
+        std::unordered_set<void*> visited_groups;
+        bool model_object_updated = false;
+        for (std::size_t group_index = 0;
+             material_group != nullptr && group_index < 128;
+             ++group_index)
+        {
+            if (!visited_groups.insert(material_group).second)
+            {
+                all_updates_succeeded = false;
+                break;
+            }
+
+            void* material_layout = nullptr;
+            if (!SafeReadValue(
+                    reinterpret_cast<std::uint8_t*>(material_group) + 0x20,
+                    material_layout) ||
+                material_layout == nullptr)
+            {
+                SafeReadValue(
+                    reinterpret_cast<std::uint8_t*>(material_group) + 0x18,
+                    material_layout);
+            }
+
+            std::vector<ExplicitVanillaKnifeMaterialAssignment> assignments;
+            std::vector<void*> material_records_for_assignments;
+            if (material_layout != nullptr)
+            {
+                std::int32_t material_count = 0;
+                std::uint32_t material_layout_flags = 0;
+                void* material_records = nullptr;
+                if (SafeReadValue(
+                        reinterpret_cast<std::uint8_t*>(material_layout) + 0x18,
+                        material_count) &&
+                    SafeReadValue(
+                        reinterpret_cast<std::uint8_t*>(material_layout) + 0x1C,
+                        material_layout_flags) &&
+                    material_count > 0 && material_count <= 128 &&
+                    (material_layout_flags & 0x7FFFFFFFu) != 0 &&
+                    SafeReadValue(
+                        reinterpret_cast<std::uint8_t*>(material_layout) + 0x20,
+                        material_records) &&
+                    material_records != nullptr)
+                {
+                    assignments.reserve(static_cast<std::size_t>(material_count));
+                    for (std::int32_t material_index = 0;
+                         material_index < material_count;
+                         ++material_index)
+                    {
+                        auto* material_record =
+                            static_cast<std::uint8_t*>(material_records) +
+                            static_cast<std::size_t>(material_index) * 0x118;
+                        void* current_material = nullptr;
+                        if (!SafeReadValue(
+                                material_record + 0x110,
+                                current_material) ||
+                            current_material == nullptr)
+                        {
+                            continue;
+                        }
+
+                        const auto pair = std::find_if(
+                            material_pairs.begin(),
+                            material_pairs.end(),
+                            [&](const MaterialPair& value)
+                            {
+                                return value.custom == current_material;
+                            });
+                        if (pair != material_pairs.end())
+                        {
+                            assignments.push_back(
+                                {material_index, 0, pair->base});
+                            material_records_for_assignments.push_back(
+                                material_record);
+                            ++owner_matched_material_slots;
+                        }
+                        else if (default_material != nullptr)
+                        {
+                            // Spectated first-person knives can expose a second
+                            // render object whose composite clone is not stored
+                            // in CCompositeMaterialOwner's primary vector. The
+                            // current VMDL's canonical VMAT is authoritative for
+                            // explicit vanilla, so cover that sibling object too.
+                            assignments.push_back(
+                                {material_index, 0, default_material});
+                            material_records_for_assignments.push_back(
+                                material_record);
+                            ++default_forced_material_slots;
+                        }
+                    }
+                }
+            }
+
+            if (!assignments.empty())
+            {
+                void** group_vtable = nullptr;
+                void* assign_materials = nullptr;
+                const auto assigned =
+                    SafeReadValue(material_group, group_vtable) &&
+                    group_vtable != nullptr &&
+                    SafeReadValue(group_vtable, assign_materials) &&
+                    assign_materials != nullptr &&
+                    IsExecutablePointer(assign_materials) &&
+                    SafeInvokeVoidFunctionPointer(
+                        assign_materials,
+                        material_group,
+                        assignments.data(),
+                        static_cast<std::int32_t>(assignments.size()));
+                const auto updated = assigned && SafeInvokeVoidFunctionPointer(
+                    update_model_object,
+                    model_container,
+                    material_group);
+                all_updates_succeeded =
+                    all_updates_succeeded && assigned && updated;
+                if (assigned && updated)
+                {
+                    matching_material_slots += assignments.size();
+                    ++updated_material_groups;
+                    model_object_updated = true;
+                    bool group_readback_verified =
+                        material_records_for_assignments.size() == assignments.size();
+                    for (std::size_t assignment_index = 0;
+                         assignment_index < assignments.size();
+                         ++assignment_index)
+                    {
+                        void* material_after = nullptr;
+                        const auto readback_verified =
+                            group_readback_verified &&
+                            SafeReadValue(
+                                static_cast<std::uint8_t*>(
+                                    material_records_for_assignments[assignment_index]) +
+                                    0x110,
+                                material_after) &&
+                            material_after == assignments[assignment_index].material;
+                        group_readback_verified =
+                            group_readback_verified && readback_verified;
+                        if (readback_verified)
+                        {
+                            ++verified_material_slots;
+                        }
+                    }
+                    captured_snapshot.groups.push_back({
+                        request.entity_index,
+                        request.econ_entity,
+                        model_container,
+                        object_index,
+                        group_index,
+                        model_object,
+                        material_group,
+                        assignments,
+                        material_records_for_assignments,
+                    });
+                    const auto dirty_flags = object_flags | 0x100000000ull;
+                    SafeWriteValue(
+                        reinterpret_cast<std::uint8_t*>(model_object) + 0x78,
+                        dirty_flags);
+                }
+            }
+
+            void* next_group = nullptr;
+            if (!SafeReadValue(
+                    reinterpret_cast<std::uint8_t*>(material_group) + 0x40,
+                    next_group))
+            {
+                all_updates_succeeded = false;
+                break;
+            }
+            material_group = next_group;
+        }
+
+        if (model_object_updated)
+        {
+            const auto render_notified = SafeInvokeVoidFunctionPointer(
+                render_notify_method,
+                render_notifier,
+                model_object);
+            const auto scene_notified = render_notified &&
+                SafeInvokeVoidFunctionPointer(
+                    scene_notify_method,
+                    scene_notifier,
+                    model_object);
+            all_updates_succeeded =
+                all_updates_succeeded && render_notified && scene_notified;
+            if (render_notified && scene_notified)
+            {
+                ++notified_model_objects;
+            }
+        }
+    }
+
+    // Demo spectator rendering may keep a first-person scene/model object on a
+    // different live model entity while retaining the exact strong material
+    // handle produced by the world knife's CCompositeMaterialOwner.  The knife
+    // owner callback above only walks request.econ_entity+0x338.  Find other
+    // live model containers that still consume one of those exact handles and
+    // apply the same canonical VMAT through their native material-group API.
+    // Exact pointer identity is required; unrelated materials are never
+    // rewritten merely because their model or paint resembles the target.
+    auto* const entity_list = g_hook_state.runtime_entities.last_entity_list;
+    const auto highest_entity_index = std::max(
+        g_hook_state.highest_live_entity_index.load(),
+        g_hook_state.runtime_entities.highest_live_entity_index);
+    if (entity_list != nullptr && highest_entity_index >= 0)
+    {
+        for (int entity_index = 0; entity_index <= highest_entity_index; ++entity_index)
+        {
+            void* entity = nullptr;
+            if (!TryGetEntityFromIndex(entity_list, entity_index, entity) ||
+                entity == nullptr || entity == request.econ_entity)
+            {
+                continue;
+            }
+
+            std::string entity_model_name;
+            if (!TryReadEntityModelNameString(
+                    entity,
+                    g_hook_state.schema_offsets,
+                    entity_model_name) ||
+                entity_model_name.empty())
+            {
+                continue;
+            }
+
+            void* related_model_container = nullptr;
+            std::int32_t related_model_object_count = 0;
+            if (!SafeReadField(
+                    entity,
+                    kEconEntityModelContainerOffset,
+                    related_model_container) ||
+                related_model_container == nullptr ||
+                related_model_container == model_container ||
+                !SafeReadValue(
+                    reinterpret_cast<std::uint8_t*>(related_model_container) + 0x38,
+                    related_model_object_count) ||
+                related_model_object_count <= 0 || related_model_object_count > 128)
+            {
+                continue;
+            }
+            ++scanned_model_entities;
+            scanned_related_model_objects +=
+                static_cast<std::size_t>(related_model_object_count);
+
+            for (std::int32_t object_index = 0;
+                 object_index < related_model_object_count;
+                 ++object_index)
+            {
+                void* model_object = nullptr;
+                std::uint64_t object_flags = 0;
+                void* material_group = nullptr;
+                if (!SafeInvokeFunctionPointer(
+                        get_model_object,
+                        model_object,
+                        related_model_container,
+                        object_index) ||
+                    model_object == nullptr ||
+                    !SafeReadValue(
+                        reinterpret_cast<std::uint8_t*>(model_object) + 0x78,
+                        object_flags) ||
+                    (object_flags & 0x2) == 0 ||
+                    !SafeReadValue(
+                        reinterpret_cast<std::uint8_t*>(model_object) + 0x10,
+                        material_group))
+                {
+                    continue;
+                }
+
+                std::unordered_set<void*> visited_groups;
+                bool model_object_updated = false;
+                for (std::size_t group_index = 0;
+                     material_group != nullptr && group_index < 128;
+                     ++group_index)
+                {
+                    if (!visited_groups.insert(material_group).second)
+                    {
+                        break;
+                    }
+
+                    void* material_layout = nullptr;
+                    if (!SafeReadValue(
+                            reinterpret_cast<std::uint8_t*>(material_group) + 0x20,
+                            material_layout) ||
+                        material_layout == nullptr)
+                    {
+                        SafeReadValue(
+                            reinterpret_cast<std::uint8_t*>(material_group) + 0x18,
+                            material_layout);
+                    }
+
+                    std::vector<ExplicitVanillaKnifeMaterialAssignment> assignments;
+                    std::vector<void*> material_records_for_assignments;
+                    if (material_layout != nullptr)
+                    {
+                        std::int32_t material_count = 0;
+                        std::uint32_t material_layout_flags = 0;
+                        void* material_records = nullptr;
+                        if (SafeReadValue(
+                                reinterpret_cast<std::uint8_t*>(material_layout) + 0x18,
+                                material_count) &&
+                            SafeReadValue(
+                                reinterpret_cast<std::uint8_t*>(material_layout) + 0x1C,
+                                material_layout_flags) &&
+                            material_count > 0 && material_count <= 128 &&
+                            (material_layout_flags & 0x7FFFFFFFu) != 0 &&
+                            SafeReadValue(
+                                reinterpret_cast<std::uint8_t*>(material_layout) + 0x20,
+                                material_records) &&
+                            material_records != nullptr)
+                        {
+                            for (std::int32_t material_index = 0;
+                                 material_index < material_count;
+                                 ++material_index)
+                            {
+                                auto* material_record =
+                                    static_cast<std::uint8_t*>(material_records) +
+                                    static_cast<std::size_t>(material_index) * 0x118;
+                                void* current_material = nullptr;
+                                if (!SafeReadValue(
+                                        material_record + 0x110,
+                                        current_material) ||
+                                    current_material == nullptr)
+                                {
+                                    continue;
+                                }
+
+                                const auto pair = std::find_if(
+                                    material_pairs.begin(),
+                                    material_pairs.end(),
+                                    [&](const MaterialPair& value)
+                                    {
+                                        return value.custom == current_material;
+                                    });
+                                if (pair != material_pairs.end())
+                                {
+                                    assignments.push_back(
+                                        {material_index, 0, pair->base});
+                                    material_records_for_assignments.push_back(
+                                        material_record);
+                                }
+                            }
+                        }
+                    }
+
+                    if (!assignments.empty())
+                    {
+                        void** group_vtable = nullptr;
+                        void* assign_materials = nullptr;
+                        const auto assigned =
+                            SafeReadValue(material_group, group_vtable) &&
+                            group_vtable != nullptr &&
+                            SafeReadValue(group_vtable, assign_materials) &&
+                            assign_materials != nullptr &&
+                            IsExecutablePointer(assign_materials) &&
+                            SafeInvokeVoidFunctionPointer(
+                                assign_materials,
+                                material_group,
+                                assignments.data(),
+                                static_cast<std::int32_t>(assignments.size()));
+                        const auto updated = assigned && SafeInvokeVoidFunctionPointer(
+                            update_model_object,
+                            related_model_container,
+                            material_group);
+                        all_updates_succeeded =
+                            all_updates_succeeded && assigned && updated;
+                        if (assigned && updated)
+                        {
+                            matching_material_slots += assignments.size();
+                            owner_matched_material_slots += assignments.size();
+                            ++updated_material_groups;
+                            model_object_updated = true;
+                            matched_consumer_entities.insert(entity_index);
+                            captured_snapshot.groups.push_back({
+                                entity_index,
+                                entity,
+                                related_model_container,
+                                object_index,
+                                group_index,
+                                model_object,
+                                material_group,
+                                assignments,
+                                material_records_for_assignments,
+                            });
+                            SafeWriteValue(
+                                reinterpret_cast<std::uint8_t*>(model_object) + 0x78,
+                                object_flags | 0x100000000ull);
+                        }
+                    }
+
+                    void* next_group = nullptr;
+                    if (!SafeReadValue(
+                            reinterpret_cast<std::uint8_t*>(material_group) + 0x40,
+                            next_group))
+                    {
+                        break;
+                    }
+                    material_group = next_group;
+                }
+
+                if (model_object_updated)
+                {
+                    const auto render_notified = SafeInvokeVoidFunctionPointer(
+                        render_notify_method,
+                        render_notifier,
+                        model_object);
+                    const auto scene_notified = render_notified &&
+                        SafeInvokeVoidFunctionPointer(
+                            scene_notify_method,
+                            scene_notifier,
+                            model_object);
+                    all_updates_succeeded =
+                        all_updates_succeeded && render_notified && scene_notified;
+                    if (render_notified && scene_notified)
+                    {
+                        ++notified_model_objects;
+                    }
+                }
+            }
+        }
+    }
+
+    const auto verified = all_updates_succeeded &&
+        matching_material_slots > 0 && updated_material_groups > 0 &&
+        notified_model_objects > 0;
+    captured_snapshot.active =
+        matching_material_slots > 0 && updated_material_groups > 0 &&
+        !captured_snapshot.groups.empty();
+    if (snapshot_out != nullptr && captured_snapshot.active)
+    {
+        *snapshot_out = std::move(captured_snapshot);
+    }
+    std::wstringstream stream;
+    stream << L"Explicit vanilla knife directly restored mesh base materials "
+        << L"from the live composite entries"
+        << L": entity=" << request.entity_index
+        << L", custom_count=" << custom_materials.size
+        << L", model_objects=" << model_object_count
+        << L", scanned_model_entities=" << scanned_model_entities
+        << L", scanned_related_model_objects=" << scanned_related_model_objects
+        << L", matched_consumer_entities=" << matched_consumer_entities.size()
+        << L", matched_slots=" << matching_material_slots
+        << L", owner_matched_slots=" << owner_matched_material_slots
+        << L", default_forced_slots=" << default_forced_material_slots
+        << L", readback_slots=" << verified_material_slots
+        << L", updated_groups=" << updated_material_groups
+        << L", notified_objects=" << notified_model_objects
+        << L", get_object="
+        << FormatClientRelativeCodePointer(get_model_object)
+        << L", full_rebind="
+        << FormatClientRelativeCodePointer(full_mesh_rebind)
+        << L", update_object="
+        << FormatClientRelativeCodePointer(update_model_object)
+        << L", render_notify="
+        << FormatClientRelativeCodePointer(render_notify_method)
+        << L", scene_notify="
+        << FormatClientRelativeCodePointer(scene_notify_method)
+        << L", default_material=" << NarrowToWide(default_material_name)
+        << L", default_material_handle="
+        << FormatPointer(reinterpret_cast<void*>(default_material_handle))
+        << L", default_material_loaded=" << (default_material_loaded ? 1 : 0)
+        << L", default_material_source=" << default_material_source
+        << L", default_material_reason=" << default_material_reason
+        << L", pairs=";
+    for (std::size_t index = 0; index < pair_descriptions.size(); ++index)
+    {
+        if (index != 0)
+        {
+            stream << L" | ";
+        }
+        stream << pair_descriptions[index];
+    }
+    stream << L", verified=" << (verified ? 1 : 0) << L".";
+    if (verified)
+    {
+        LogProfileDiagnosticOnce(
+            request.desired_signature ^ 0x56414E4D45534842ull,
+            stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(
+            request.desired_signature ^ 0x56414E4D45534641ull,
+            stream.str());
+    }
+    return verified;
+}
+
+bool TryApplyCapturedExplicitVanillaKnifeMeshBaseMaterials(
+    const ExplicitVanillaKnifeMeshRestoreSnapshot& snapshot,
+    const wchar_t* stage)
+{
+    if (!snapshot.active || snapshot.entity_index < 0 ||
+        snapshot.econ_entity == nullptr || snapshot.model_container == nullptr ||
+        snapshot.get_model_object == nullptr ||
+        snapshot.update_model_object == nullptr ||
+        snapshot.render_notifier == nullptr ||
+        snapshot.render_notify_method == nullptr ||
+        snapshot.scene_notifier == nullptr ||
+        snapshot.scene_notify_method == nullptr ||
+        snapshot.groups.empty())
+    {
+        return false;
+    }
+
+    bool all_updates_succeeded = true;
+    std::size_t assigned_slots = 0;
+    std::size_t readback_slots = 0;
+    std::size_t updated_groups = 0;
+    std::size_t notified_objects = 0;
+    std::unordered_set<void*> updated_model_objects;
+    std::vector<std::wstring> slot_descriptions;
+    constexpr std::ptrdiff_t kEconEntityModelContainerOffset = 0x338;
+    auto* const entity_list = g_hook_state.runtime_entities.last_entity_list;
+
+    for (const auto& group : snapshot.groups)
+    {
+        if (group.object_index < 0 || group.assignments.empty())
+        {
+            all_updates_succeeded = false;
+            continue;
+        }
+
+        void* current_entity = group.entity;
+        if (entity_list != nullptr && group.entity_index >= 0)
+        {
+            void* indexed_entity = nullptr;
+            if (TryGetEntityFromIndex(
+                    entity_list,
+                    group.entity_index,
+                    indexed_entity) &&
+                indexed_entity != nullptr)
+            {
+                current_entity = indexed_entity;
+            }
+        }
+        void* current_model_container = group.model_container;
+        if (current_entity == nullptr ||
+            !SafeReadField(
+                current_entity,
+                kEconEntityModelContainerOffset,
+                current_model_container) ||
+            current_model_container == nullptr)
+        {
+            all_updates_succeeded = false;
+            continue;
+        }
+
+        void* current_model_object = nullptr;
+        void* current_material_group = nullptr;
+        bool group_resolved = SafeInvokeFunctionPointer(
+                snapshot.get_model_object,
+                current_model_object,
+                current_model_container,
+                group.object_index) &&
+            current_model_object != nullptr &&
+            SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(current_model_object) + 0x10,
+                current_material_group) &&
+            current_material_group != nullptr;
+        std::unordered_set<void*> visited_groups;
+        for (std::size_t group_index = 0;
+             group_resolved && group_index < group.group_index;
+             ++group_index)
+        {
+            if (!visited_groups.insert(current_material_group).second)
+            {
+                group_resolved = false;
+                break;
+            }
+            void* next_group = nullptr;
+            group_resolved = SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(current_material_group) + 0x40,
+                next_group) && next_group != nullptr;
+            current_material_group = next_group;
+        }
+
+        void* material_layout = nullptr;
+        if (group_resolved &&
+            (!SafeReadValue(
+                 reinterpret_cast<std::uint8_t*>(current_material_group) + 0x20,
+                 material_layout) ||
+             material_layout == nullptr))
+        {
+            group_resolved = SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(current_material_group) + 0x18,
+                material_layout) && material_layout != nullptr;
+        }
+
+        std::int32_t material_count = 0;
+        std::uint32_t material_layout_flags = 0;
+        void* material_records = nullptr;
+        group_resolved = group_resolved &&
+            SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(material_layout) + 0x18,
+                material_count) &&
+            SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(material_layout) + 0x1C,
+                material_layout_flags) &&
+            material_count > 0 && material_count <= 128 &&
+            (material_layout_flags & 0x7FFFFFFFu) != 0 &&
+            SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(material_layout) + 0x20,
+                material_records) &&
+            material_records != nullptr;
+
+        std::vector<void*> current_material_records;
+        current_material_records.reserve(group.assignments.size());
+        for (const auto& assignment : group.assignments)
+        {
+            if (!group_resolved || assignment.material_index < 0 ||
+                assignment.material_index >= material_count)
+            {
+                group_resolved = false;
+                break;
+            }
+            current_material_records.push_back(
+                static_cast<std::uint8_t*>(material_records) +
+                static_cast<std::size_t>(assignment.material_index) * 0x118);
+        }
+
+        std::vector<void*> materials_before(group.assignments.size(), nullptr);
+        bool group_valid = group_resolved &&
+            current_material_records.size() == group.assignments.size();
+        if (!group_valid)
+        {
+            all_updates_succeeded = false;
+            std::wstringstream slot_stream;
+            slot_stream << L"entity[" << group.entity_index << L"]/object["
+                << group.object_index << L"]="
+                << FormatPointer(current_model_object)
+                << L"/group[" << group.group_index << L"]="
+                << FormatPointer(current_material_group)
+                << L":re_resolve_failed";
+            slot_descriptions.push_back(slot_stream.str());
+            continue;
+        }
+        for (std::size_t index = 0; index < group.assignments.size(); ++index)
+        {
+            group_valid =
+                group_valid &&
+                SafeReadValue(
+                    static_cast<std::uint8_t*>(current_material_records[index]) +
+                        0x110,
+                    materials_before[index]) &&
+                materials_before[index] != nullptr &&
+                group.assignments[index].material != nullptr &&
+                IsReadablePointer(group.assignments[index].material);
+        }
+
+        void** group_vtable = nullptr;
+        void* assign_materials = nullptr;
+        const auto assigned = group_valid &&
+            SafeReadValue(current_material_group, group_vtable) &&
+            group_vtable != nullptr &&
+            SafeReadValue(group_vtable, assign_materials) &&
+            assign_materials != nullptr && IsExecutablePointer(assign_materials) &&
+            SafeInvokeVoidFunctionPointer(
+                assign_materials,
+                current_material_group,
+                group.assignments.data(),
+                static_cast<std::int32_t>(group.assignments.size()));
+        const auto updated = assigned && SafeInvokeVoidFunctionPointer(
+            snapshot.update_model_object,
+            current_model_container,
+            current_material_group);
+
+        bool group_readback_verified = updated;
+        for (std::size_t index = 0; index < group.assignments.size(); ++index)
+        {
+            void* material_after = nullptr;
+            const auto readback_verified = updated &&
+                SafeReadValue(
+                    static_cast<std::uint8_t*>(current_material_records[index]) +
+                        0x110,
+                    material_after) &&
+                material_after == group.assignments[index].material;
+            group_readback_verified =
+                group_readback_verified && readback_verified;
+            if (readback_verified)
+            {
+                ++readback_slots;
+            }
+
+            std::wstringstream slot_stream;
+            slot_stream << L"entity[" << group.entity_index << L"]/object["
+                << group.object_index << L"]="
+                << FormatPointer(current_model_object)
+                << L"/group[" << group.group_index << L"]="
+                << FormatPointer(current_material_group)
+                << L"/slot=" << group.assignments[index].material_index
+                << L":" << FormatPointer(materials_before[index])
+                << L"->" << FormatPointer(group.assignments[index].material)
+                << L"->" << FormatPointer(material_after);
+            slot_descriptions.push_back(slot_stream.str());
+        }
+
+        all_updates_succeeded =
+            all_updates_succeeded && assigned && updated;
+        if (assigned && updated)
+        {
+            assigned_slots += group.assignments.size();
+            ++updated_groups;
+            std::uint64_t object_flags = 0;
+            const auto dirty_written = SafeReadValue(
+                    reinterpret_cast<std::uint8_t*>(current_model_object) + 0x78,
+                    object_flags) &&
+                SafeWriteValue(
+                    reinterpret_cast<std::uint8_t*>(current_model_object) + 0x78,
+                    object_flags | 0x100000000ull);
+            all_updates_succeeded = all_updates_succeeded && dirty_written;
+            updated_model_objects.insert(current_model_object);
+        }
+    }
+
+    for (auto* model_object : updated_model_objects)
+    {
+        const auto render_notified = SafeInvokeVoidFunctionPointer(
+            snapshot.render_notify_method,
+            snapshot.render_notifier,
+            model_object);
+        const auto scene_notified = render_notified &&
+            SafeInvokeVoidFunctionPointer(
+                snapshot.scene_notify_method,
+                snapshot.scene_notifier,
+                model_object);
+        all_updates_succeeded =
+            all_updates_succeeded && render_notified && scene_notified;
+        if (render_notified && scene_notified)
+        {
+            ++notified_objects;
+        }
+    }
+
+    const auto verified = all_updates_succeeded && assigned_slots > 0 &&
+        updated_groups > 0 &&
+        notified_objects == updated_model_objects.size();
+    std::wstringstream stream;
+    stream << L"Explicit vanilla knife applied the captured mesh base materials "
+        << (stage != nullptr ? stage : L"at an unspecified stage")
+        << L": entity=" << snapshot.entity_index
+        << L", captured_groups=" << snapshot.groups.size()
+        << L", assigned_slots=" << assigned_slots
+        << L", readback_slots=" << readback_slots
+        << L", updated_groups=" << updated_groups
+        << L", notified_objects=" << notified_objects
+        << L", slots=";
+    for (std::size_t index = 0; index < slot_descriptions.size(); ++index)
+    {
+        if (index != 0)
+        {
+            stream << L" | ";
+        }
+        stream << slot_descriptions[index];
+    }
+    stream << L", verified=" << (verified ? 1 : 0) << L".";
+    if (verified)
+    {
+        LogProfileDiagnosticOnce(
+            snapshot.desired_signature ^ 0x504F53544D455348ull,
+            stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(
+            snapshot.desired_signature ^ 0x504F53544D464149ull,
+            stream.str());
+    }
+    return verified;
+}
+
+bool TryRebindExplicitVanillaKnifeModelResource(
+    const PendingWeaponRefreshRequest& request,
+    const ClientSchemaOffsets& offsets)
+{
+    if (!IsExplicitVanillaKnifeFinishProfile(request.profile) ||
+        request.econ_entity == nullptr || request.entity_index < 0 ||
+        offsets.base_entity_game_scene_node == 0 ||
+        offsets.game_scene_node_owner == 0 ||
+        !g_hook_state.demo_playing.load(std::memory_order_acquire) ||
+        !g_glove_resource_query_frame_render_pass_active ||
+        IsKnifeModelPathSwapDemoSeekSafetyWindowActive())
+    {
+        return false;
+    }
+
+    void* scene_node = nullptr;
+    void* scene_owner = nullptr;
+    std::string model_name_before;
+    std::uint64_t model_handle_before = 0;
+    if (!SafeReadField(
+            request.econ_entity,
+            offsets.base_entity_game_scene_node,
+            scene_node) ||
+        scene_node == nullptr ||
+        !SafeReadField(scene_node, offsets.game_scene_node_owner, scene_owner) ||
+        scene_owner != request.econ_entity ||
+        !TryReadEntityModelNameString(
+            request.econ_entity,
+            offsets,
+            model_name_before) ||
+        model_name_before.empty() ||
+        !TryReadEntityModelHandle(
+            request.econ_entity,
+            offsets,
+            model_handle_before) ||
+        model_handle_before == 0)
+    {
+        return false;
+    }
+
+    constexpr std::ptrdiff_t kSceneOuterToSkeletonOffset = 0x140;
+    constexpr std::ptrdiff_t kSceneOuterIdentityContextOffset = 0x10;
+    constexpr std::ptrdiff_t kSceneOuterUpdateResourceOffset = 0x1E0;
+    constexpr std::ptrdiff_t kSkeletonBindStateOffset = 0xA0;
+    constexpr std::ptrdiff_t kSkeletonBoundRenderObjectOffset = 0xE0;
+    auto* scene_outer = static_cast<std::uint8_t*>(scene_node);
+    auto* skeleton_instance = scene_outer + kSceneOuterToSkeletonOffset;
+    auto* identity_context = scene_outer + kSceneOuterIdentityContextOffset;
+    void* skeleton_bind_state = nullptr;
+    void* update_resource = nullptr;
+    void* bound_render_object_before = nullptr;
+    if (!SafeReadValue(
+            skeleton_instance + kSkeletonBindStateOffset,
+            skeleton_bind_state) ||
+        skeleton_bind_state == nullptr ||
+        !SafeReadValue(
+            scene_outer + kSceneOuterUpdateResourceOffset,
+            update_resource) ||
+        update_resource == nullptr ||
+        !SafeReadValue(
+            skeleton_instance + kSkeletonBoundRenderObjectOffset,
+            bound_render_object_before) ||
+        bound_render_object_before == nullptr)
+    {
+        return false;
+    }
+
+    void* formal_entry = nullptr;
+    void* dispatcher = nullptr;
+    void* lower_bind_model = nullptr;
+    if (!TryResolveFormalSkeletonModelBindChain(
+            formal_entry,
+            dispatcher,
+            lower_bind_model))
+    {
+        return false;
+    }
+
+    // Validate the live scene class still reaches the same uniquely resolved
+    // formal binder from vtable slot 10. This prevents calling an internal ABI
+    // solely because a byte signature happened to survive a client update.
+    void** scene_vtable = nullptr;
+    void* scene_model_initializer = nullptr;
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_text = GetTextSectionSpan(client_module);
+    const auto initializer_calls_formal_entry =
+        [&]() noexcept
+        {
+            if (client_module == nullptr || !client_text.has_value() ||
+                !SafeReadValue(scene_outer, scene_vtable) ||
+                scene_vtable == nullptr ||
+                !SafeReadValue(scene_vtable + 10, scene_model_initializer) ||
+                scene_model_initializer == nullptr ||
+                !IsExecutablePointer(scene_model_initializer) ||
+                GetModuleFromAddress(scene_model_initializer) != client_module)
+            {
+                return false;
+            }
+
+            const auto* const text_end =
+                client_text->base + client_text->size;
+            auto* const initializer =
+                static_cast<std::uint8_t*>(scene_model_initializer);
+            if (initializer < client_text->base || initializer >= text_end)
+            {
+                return false;
+            }
+
+            const auto scan_size = std::min<std::size_t>(
+                static_cast<std::size_t>(text_end - initializer),
+                0x500);
+            for (std::size_t offset = 0; offset + 5 <= scan_size; ++offset)
+            {
+                if (initializer[offset] != 0xE8)
+                {
+                    continue;
+                }
+                std::int32_t displacement = 0;
+                if (SafeReadValue(initializer + offset + 1, displacement) &&
+                    initializer + offset + 5 + displacement == formal_entry)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }();
+    if (!initializer_calls_formal_entry)
+    {
+        return false;
+    }
+
+    std::uintptr_t bind_return = 0;
+    const auto bind_invoked = SafeInvokeFunctionPointer(
+        formal_entry,
+        bind_return,
+        skeleton_instance,
+        static_cast<void*>(nullptr),
+        scene_outer,
+        identity_context);
+
+    void* bound_render_object_after = nullptr;
+    std::string model_name_after;
+    std::uint64_t model_handle_after = 0;
+    const auto verified =
+        bind_invoked &&
+        SafeReadValue(
+            skeleton_instance + kSkeletonBoundRenderObjectOffset,
+            bound_render_object_after) &&
+        bound_render_object_after != nullptr &&
+        TryReadEntityModelNameString(
+            request.econ_entity,
+            offsets,
+            model_name_after) &&
+        ModelIdentityPathMatches(model_name_after, model_name_before) &&
+        TryReadEntityModelHandle(
+            request.econ_entity,
+            offsets,
+            model_handle_after) &&
+        model_handle_after == model_handle_before;
+
+    std::wstringstream stream;
+    stream << L"Explicit vanilla knife formally rebound its unchanged model resource"
+        << L": entity=" << request.entity_index
+        << L", model=" << NarrowToWide(model_name_before)
+        << L", handle_before=0x" << std::hex << std::uppercase
+        << model_handle_before
+        << L", handle_after=0x" << model_handle_after
+        << L", bind_return=0x" << bind_return
+        << std::dec << std::nouppercase
+        << L", scene=" << FormatPointer(scene_outer)
+        << L", skeleton=" << FormatPointer(skeleton_instance)
+        << L", render_before=" << FormatPointer(bound_render_object_before)
+        << L", render_after=" << FormatPointer(bound_render_object_after)
+        << L", formal_entry=" << FormatClientRelativeCodePointer(formal_entry)
+        << L", dispatcher=" << FormatClientRelativeCodePointer(dispatcher)
+        << L", lower_bind=" << FormatClientRelativeCodePointer(lower_bind_model)
+        << L", initializer="
+        << FormatClientRelativeCodePointer(scene_model_initializer)
+        << L", invoked=" << (bind_invoked ? 1 : 0)
+        << L", verified=" << (verified ? 1 : 0) << L".";
+    if (verified)
+    {
+        LogProfileDiagnosticOnce(
+            request.desired_signature ^ 0x56414E4D4F44454Cull,
+            stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(
+            request.desired_signature ^ 0x56414E4D4F444641ull,
+            stream.str());
+    }
+    return verified;
+}
+
+bool TryRebindExplicitVanillaKnifeDefaultMaterials(
+    const PendingWeaponRefreshRequest& request,
+    const ClientSchemaOffsets& offsets,
+    const WeaponSkinRefreshBinding& binding,
+    ExplicitVanillaKnifeMeshRestoreSnapshot* snapshot_out)
+{
+    if (snapshot_out != nullptr)
+    {
+        *snapshot_out = {};
+    }
+    // CCompositeMaterialOwner is the secondary base at entity+0x608 in the
+    // current C_Knife layout. The native refresh helper exposes the owner's
+    // primary vector at entity+0xAA8; derive the base instead of pinning the
+    // entity offset, then validate both the adjacent vector layout and the
+    // exact current C_Knife material-changed virtual before invoking it.
+    constexpr std::uint16_t kOwnerToPrimaryMaterialVectorOffset = 0x4A0;
+    constexpr std::uint16_t kPrimaryToCompanionMaterialVectorOffset = 0x18;
+    constexpr std::size_t kMaterialChangedVtableSlot = 3;
+    if (!IsExplicitVanillaKnifeFinishProfile(request.profile) ||
+        request.econ_entity == nullptr || request.entity_index < 0 ||
+        offsets.weapon_clear_weapon_identifying_ugc == 0 ||
+        !binding.instruction_window_valid ||
+        binding.original_offset < kOwnerToPrimaryMaterialVectorOffset ||
+        binding.original_companion_offset !=
+            binding.original_offset + kPrimaryToCompanionMaterialVectorOffset)
+    {
+        return false;
+    }
+
+    const auto client_module = GetModuleHandleW(L"client.dll");
+    const auto client_text = GetTextSectionSpan(client_module);
+    const auto client_span = GetModuleSpan(client_module);
+    if (client_module == nullptr || !client_text.has_value() ||
+        !client_span.has_value())
+    {
+        return false;
+    }
+
+    // Slot 3 of C_Knife's CCompositeMaterialOwner secondary vtable is the
+    // current-client material-changed callback. It walks the unchanged knife
+    // model's meshes and replaces every old custom material with the base
+    // material returned by the now-empty owner.
+    constexpr char kKnifeMaterialChangedPattern[] =
+        "48 89 6C 24 20 56 48 83 EC 50 48 8B A9 30 FD FF FF "
+        "48 8B F1 48 85 ED 0F 84 ?? ?? ?? ?? 83 B9 A0 04 00 00 00";
+    auto* expected_material_changed = FindUniquePattern(
+        *client_text,
+        kKnifeMaterialChangedPattern);
+    if (expected_material_changed == nullptr ||
+        !IsExecutablePointer(expected_material_changed) ||
+        GetModuleFromAddress(expected_material_changed) != client_module)
+    {
+        return false;
+    }
+
+    const auto owner_offset = static_cast<std::ptrdiff_t>(
+        binding.original_offset - kOwnerToPrimaryMaterialVectorOffset);
+    auto* composite_material_owner =
+        reinterpret_cast<std::uint8_t*>(request.econ_entity) + owner_offset;
+    void** owner_vtable = nullptr;
+    void* material_changed = nullptr;
+    const auto owner_valid =
+        SafeReadValue(composite_material_owner, owner_vtable) &&
+        owner_vtable != nullptr &&
+        PointerInModule(*client_span, owner_vtable) &&
+        SafeReadValue(
+            owner_vtable + kMaterialChangedVtableSlot,
+            material_changed) &&
+        material_changed == expected_material_changed &&
+        IsExecutablePointer(material_changed);
+    if (!owner_valid)
+    {
+        return false;
+    }
+
+    std::int32_t primary_count_before = -1;
+    std::int32_t companion_count_before = -1;
+    std::int32_t original_material_mapping_count_before = -1;
+    const auto counts_before_read =
+        SafeReadField(
+            request.econ_entity,
+            binding.original_offset,
+            primary_count_before) &&
+        SafeReadField(
+            request.econ_entity,
+            binding.original_companion_offset,
+            companion_count_before) &&
+        primary_count_before >= 0 && primary_count_before <= 128 &&
+        companion_count_before >= 0 && companion_count_before <= 128;
+    if (!counts_before_read)
+    {
+        return false;
+    }
+    SafeReadValue(
+        composite_material_owner + sizeof(void*),
+        original_material_mapping_count_before);
+    const auto mesh_base_materials_restored =
+        original_material_mapping_count_before == 0 &&
+        TryRestoreExplicitVanillaKnifeMeshBaseMaterials(
+            request,
+            binding,
+            material_changed,
+            snapshot_out);
+
+    // Run this before RegenerateWeaponSkins while the original-material map at
+    // owner+0x8 is still intact. The engine clear routine first releases both
+    // custom-material vectors and then calls the already validated slot-3
+    // callback, which can still recover each mesh's stock material from that
+    // map. Waiting until the helper has cleared the owner loses this window.
+    constexpr char kCompositeMaterialOwnerClearPattern[] =
+        "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 "
+        "57 41 56 41 57 48 83 EC 20 44 0F B6 F2 48 8B F9 "
+        "E8 ?? ?? ?? ?? 45 33 FF";
+    void* clear_owner = nullptr;
+    bool clear_invoked = false;
+    bool clear_succeeded = true;
+    if (primary_count_before > 0 || companion_count_before > 0)
+    {
+        clear_owner = FindUniquePattern(
+            *client_text,
+            kCompositeMaterialOwnerClearPattern);
+        clear_succeeded =
+            clear_owner != nullptr &&
+            IsExecutablePointer(clear_owner) &&
+            GetModuleFromAddress(clear_owner) == client_module;
+        if (clear_succeeded)
+        {
+            clear_invoked = true;
+            clear_succeeded = SafeInvokeVoidFunctionPointer(
+                clear_owner,
+                composite_material_owner,
+                true);
+        }
+    }
+
+    std::int32_t primary_count_cleared = -1;
+    std::int32_t companion_count_cleared = -1;
+    const auto owner_empty =
+        clear_succeeded &&
+        SafeReadField(
+            request.econ_entity,
+            binding.original_offset,
+            primary_count_cleared) &&
+        SafeReadField(
+            request.econ_entity,
+            binding.original_companion_offset,
+            companion_count_cleared) &&
+        primary_count_cleared == 0 && companion_count_cleared == 0;
+
+    const auto rebind_invoked = owner_empty &&
+        (clear_invoked || SafeInvokeVoidFunctionPointer(
+            material_changed,
+            composite_material_owner,
+            true));
+
+    // Demo knives can arrive with a custom owner but no original-material map
+    // at owner+0x8. In that state the material callback has nothing to restore
+    // and treats the old finish as the mesh base. Rebind the same VMDL through
+    // CS2's formal existing-skeleton path so the render object is rebuilt from
+    // the model resource's default materials without changing the knife model.
+    const auto model_resource_rebound = rebind_invoked &&
+        (mesh_base_materials_restored ||
+         original_material_mapping_count_before > 0 ||
+         TryRebindExplicitVanillaKnifeModelResource(request, offsets));
+
+    // Keep the current weapon's linked UGC generator path disarmed. Calling
+    // that path here would target a linked owner and can enqueue the old red
+    // material again; it is not the current knife's material rebind routine.
+    const auto clear_flag_written = model_resource_rebound && SafeWriteField(
+        request.econ_entity,
+        offsets.weapon_clear_weapon_identifying_ugc,
+        true);
+
+    bool clear_flag_after = false;
+    std::int32_t primary_count_after = -1;
+    std::int32_t companion_count_after = -1;
+    std::int32_t original_material_mapping_count_after = -1;
+    const auto verified =
+        clear_flag_written &&
+        SafeReadField(
+            request.econ_entity,
+            offsets.weapon_clear_weapon_identifying_ugc,
+            clear_flag_after) &&
+        clear_flag_after &&
+        SafeReadField(
+            request.econ_entity,
+            binding.original_offset,
+            primary_count_after) &&
+        SafeReadField(
+            request.econ_entity,
+            binding.original_companion_offset,
+            companion_count_after) &&
+        primary_count_after == 0 && companion_count_after == 0;
+    SafeReadValue(
+        composite_material_owner + sizeof(void*),
+        original_material_mapping_count_after);
+
+    std::wstringstream stream;
+    stream << L"Explicit vanilla knife rebound the unchanged model to its default "
+        << L"materials through the validated C_Knife composite-owner callback"
+        << L": entity=" << request.entity_index
+        << L", owner_offset=0x" << std::hex << std::uppercase << owner_offset
+        << std::dec << std::nouppercase
+        << L", owner=" << FormatPointer(composite_material_owner)
+        << L", vtable=" << FormatPointer(owner_vtable)
+        << L", material_changed="
+        << FormatClientRelativeCodePointer(material_changed)
+        << L", clear=" << FormatClientRelativeCodePointer(clear_owner)
+        << L", counts_before=" << primary_count_before
+        << L"/" << companion_count_before
+        << L", original_mapping_before="
+        << original_material_mapping_count_before
+        << L", clear_invoked=" << (clear_invoked ? 1 : 0)
+        << L", clear_succeeded=" << (clear_succeeded ? 1 : 0)
+        << L", counts_cleared=" << primary_count_cleared
+        << L"/" << companion_count_cleared
+        << L", rebind_invoked=" << (rebind_invoked ? 1 : 0)
+        << L", mesh_base_restored="
+        << (mesh_base_materials_restored ? 1 : 0)
+        << L", model_resource_rebound="
+        << (model_resource_rebound ? 1 : 0)
+        << L", clear_flag_after=" << (clear_flag_after ? 1 : 0)
+        << L", counts_after=" << primary_count_after
+        << L"/" << companion_count_after
+        << L", original_mapping_after="
+        << original_material_mapping_count_after
+        << L", verified=" << (verified ? 1 : 0) << L".";
+    if (verified)
+    {
+        LogProfileDiagnosticOnce(
+            request.desired_signature ^ 0x56414E524542494Eull,
+            stream.str());
+    }
+    else
+    {
+        WarnOnceForRuntimeSignature(
+            request.desired_signature ^ 0x56414E5245424641ull,
+            stream.str());
+    }
+    return verified;
+}
+
 bool TryInitializeWearableModelThroughFormalBind(
     const int entity_index,
     void* entity,
@@ -38749,6 +41419,38 @@ bool TryReadEntityMaterialGroupToken(
         reinterpret_cast<const void*>(
             reinterpret_cast<std::uintptr_t>(game_scene_node) + offsets.skeleton_instance_material_group),
         material_group);
+}
+
+bool TryResetEntityMaterialGroupToDefault(
+    void* entity,
+    const ClientSchemaOffsets& offsets,
+    std::uint32_t& previous_material_group)
+{
+    previous_material_group = 0;
+    if (entity == nullptr ||
+        offsets.base_entity_game_scene_node == 0 ||
+        offsets.skeleton_instance_material_group == 0)
+    {
+        return false;
+    }
+
+    void* game_scene_node = nullptr;
+    if (!SafeReadField(entity, offsets.base_entity_game_scene_node, game_scene_node) ||
+        game_scene_node == nullptr)
+    {
+        return false;
+    }
+
+    auto* material_group_address =
+        reinterpret_cast<std::uint8_t*>(game_scene_node) + offsets.skeleton_instance_material_group;
+    if (!SafeReadValue(material_group_address, previous_material_group))
+    {
+        return false;
+    }
+
+    constexpr std::uint32_t kDefaultMaterialGroupToken = 0;
+    return previous_material_group == kDefaultMaterialGroupToken ||
+        SafeWriteValue(material_group_address, kDefaultMaterialGroupToken);
 }
 
 bool ContainsAsciiInsensitive(std::string_view haystack, std::string_view needle)
@@ -47313,6 +50015,16 @@ bool DoesAppliedPawnGloveBaseFieldsMatchRequest(
         return false;
     }
 
+    if (offsets.item_view_disallow_soc != 0)
+    {
+        bool actual_disallow_soc = false;
+        if (!SafeReadField(glove_item_view, offsets.item_view_disallow_soc, actual_disallow_soc) ||
+            !actual_disallow_soc)
+        {
+            return false;
+        }
+    }
+
     if (offsets.item_view_entity_quality != 0)
     {
         std::uint8_t actual_quality = 0;
@@ -47397,6 +50109,10 @@ bool ApplyGloveFinishToPawnEconGloves(
         success = success && SafeWriteField(glove_item_view, offsets.item_view_item_id_low, item_id_low);
     }
     success = success && SafeWriteField(glove_item_view, offsets.item_view_account_id, account_id);
+    if (offsets.item_view_disallow_soc != 0)
+    {
+        success = success && SafeWriteField(glove_item_view, offsets.item_view_disallow_soc, true);
+    }
     if (offsets.item_view_entity_quality != 0)
     {
         success = success && SafeWriteField(glove_item_view, offsets.item_view_entity_quality, quality);
@@ -47713,7 +50429,7 @@ bool VerifyGloveAppearanceState(
     const auto requested_finish_changed =
         before_snapshot.fallback_paint != request.paint_kit ||
         before_snapshot.fallback_seed != request.seed ||
-        !NearlyEqualFloat(before_snapshot.fallback_wear, request.wear, 0.000001f);
+        !nskinzcs2::model::CosmeticWearMatchesExactly(before_snapshot.fallback_wear, request.wear);
 
     const auto live_render_state_resolved =
         after_snapshot.has_world_render &&
@@ -47778,7 +50494,7 @@ bool VerifyGloveAppearanceState(
         after_snapshot.definition_index == expected_definition_index &&
         after_snapshot.fallback_paint == request.paint_kit &&
         after_snapshot.fallback_seed == request.seed &&
-        NearlyEqualFloat(after_snapshot.fallback_wear, request.wear, 0.000001f);
+        nskinzcs2::model::CosmeticWearMatchesExactly(after_snapshot.fallback_wear, request.wear);
 
     bool live_material_resource_matches_target = false;
     bool first_person_material_resource_matches_target = !after_snapshot.has_first_person_render;
@@ -47914,6 +50630,16 @@ bool DoesAppliedGloveCarrierMatchProfile(
         return false;
     }
 
+    if (offsets.item_view_disallow_soc != 0)
+    {
+        bool actual_disallow_soc = false;
+        if (!SafeReadField(item_view, offsets.item_view_disallow_soc, actual_disallow_soc) ||
+            !actual_disallow_soc)
+        {
+            return false;
+        }
+    }
+
     if (offsets.item_view_initialized != 0)
     {
         bool actual_initialized = false;
@@ -47968,7 +50694,7 @@ bool DoesAppliedGloveCarrierMatchProfile(
 
         float actual_wear = 0.0000001f;
         if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_wear, actual_wear) ||
-            !NearlyEqualFloat(actual_wear, request.wear, 0.000001f))
+            !nskinzcs2::model::CosmeticWearMatchesExactly(actual_wear, request.wear))
         {
             return false;
         }
@@ -48085,6 +50811,10 @@ bool ApplyGloveProfileToWearable(
         success = success && SafeWriteField(item_view, offsets.item_view_item_id_low, item_id_low);
     }
     success = success && SafeWriteField(item_view, offsets.item_view_account_id, account_id);
+    if (offsets.item_view_disallow_soc != 0)
+    {
+        success = success && SafeWriteField(item_view, offsets.item_view_disallow_soc, true);
+    }
     if (offsets.item_view_entity_quality != 0)
     {
         success = success && SafeWriteField(item_view, offsets.item_view_entity_quality, quality);
@@ -48203,6 +50933,162 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
         return false;
     }
 
+    // Current CS2 does not reliably treat paint=0 as a replacement while
+    // seed/wear (or a previous paint) remain in either attribute list. Clear
+    // both lists through their verified Schema operation once inside the
+    // armed knife refresh epoch, then publish one engine-owned paint-kit-zero
+    // record. The reference helper's verified machine code only enters its
+    // native material clear/rebuild path when an attribute-vector count is
+    // positive; this official default record supplies that trigger without
+    // retaining any old finish inputs. Never invoke the helper's internal
+    // material clear function manually after it returns.
+    if (IsExplicitVanillaKnifeFinishProfile(profile))
+    {
+        if (offsets.attribute_list_attributes_operation == nullptr ||
+            offsets.attribute_list_attributes_element_size != attribute_stride ||
+            offsets.item_view_dynamic_attribute_list == 0)
+        {
+            return false;
+        }
+
+        auto clear_attribute_list =
+            [&](const std::ptrdiff_t list_offset, RefreshAttributeVector& previous)
+            {
+                auto* list_vector_address =
+                    reinterpret_cast<std::uint8_t*>(item_view) +
+                    list_offset + offsets.attribute_list_attributes;
+                if (!SafeReadValue(list_vector_address, previous) ||
+                    previous.size > 128 ||
+                    (previous.size != 0 && previous.ptr == 0))
+                {
+                    return false;
+                }
+
+                if (previous.size == 0)
+                {
+                    return true;
+                }
+
+                if (previous.size > static_cast<std::uint64_t>(
+                        std::numeric_limits<std::int32_t>::max()) ||
+                    !TryInvokeNetworkVectorOperation(
+                        offsets.attribute_list_attributes_operation,
+                        5,
+                        list_vector_address,
+                        0,
+                        static_cast<std::int32_t>(previous.size)))
+                {
+                    return false;
+                }
+
+                RefreshAttributeVector cleared {};
+                return SafeReadValue(list_vector_address, cleared) &&
+                    cleared.size == 0;
+            };
+
+        RefreshAttributeVector static_previous {};
+        RefreshAttributeVector dynamic_previous {};
+        if (!clear_attribute_list(offsets.item_view_attribute_list, static_previous) ||
+            !clear_attribute_list(offsets.item_view_dynamic_attribute_list, dynamic_previous))
+        {
+            return false;
+        }
+
+        auto* static_vector_address =
+            reinterpret_cast<std::uint8_t*>(item_view) +
+            offsets.item_view_attribute_list + offsets.attribute_list_attributes;
+        if (!TryInvokeNetworkVectorOperation(
+                offsets.attribute_list_attributes_operation,
+                4,
+                static_vector_address,
+                0,
+                1))
+        {
+            return false;
+        }
+
+        RefreshAttributeVector vanilla_trigger_vector {};
+        if (!SafeReadValue(static_vector_address, vanilla_trigger_vector) ||
+            vanilla_trigger_vector.size != 1 || vanilla_trigger_vector.ptr == 0)
+        {
+            return false;
+        }
+
+        auto* vanilla_trigger_record =
+            reinterpret_cast<void*>(vanilla_trigger_vector.ptr);
+        std::uintptr_t vanilla_trigger_vtable = 0;
+        std::uintptr_t vanilla_trigger_owner = 0;
+        if (!TryInvokeNetworkVectorElementMutation(
+                offsets.attribute_list_attributes_operation,
+                static_vector_address,
+                0,
+                vanilla_trigger_record) ||
+            !SafeReadValue(vanilla_trigger_record, vanilla_trigger_vtable) ||
+            vanilla_trigger_vtable == 0 ||
+            !SafeReadField(
+                vanilla_trigger_record,
+                sizeof(std::uintptr_t),
+                vanilla_trigger_owner) ||
+            vanilla_trigger_owner == 0 ||
+            !SafeWriteField(
+                vanilla_trigger_record,
+                offsets.econ_item_attribute_definition_index,
+                kAttributePaintKit) ||
+            !SafeWriteField(
+                vanilla_trigger_record,
+                offsets.econ_item_attribute_value,
+                0.0f) ||
+            (offsets.econ_item_attribute_initial_value != 0 &&
+                !SafeWriteField(
+                    vanilla_trigger_record,
+                    offsets.econ_item_attribute_initial_value,
+                    0.0f)))
+        {
+            TryInvokeNetworkVectorOperation(
+                offsets.attribute_list_attributes_operation,
+                5,
+                static_vector_address,
+                0,
+                1);
+            return false;
+        }
+
+        float vanilla_paint_readback = -1.0f;
+        if (!TryReadAttributeValue(
+                item_view,
+                offsets,
+                kAttributePaintKit,
+                vanilla_paint_readback) ||
+            vanilla_paint_readback != 0.0f)
+        {
+            TryInvokeNetworkVectorOperation(
+                offsets.attribute_list_attributes_operation,
+                5,
+                static_vector_address,
+                0,
+                1);
+            return false;
+        }
+
+        const auto diagnostic_signature =
+            BuildProfileApplySignature(profile, profile.xuid, profile.base_item, 0x56414E434C454152ull);
+        std::wstringstream stream;
+        stream << L"Explicit vanilla knife cleared stale attribute lists through Schema operations"
+            << L": static_previous_count=" << static_previous.size
+            << L", dynamic_previous_count=" << dynamic_previous.size
+            << L", static_current_count=1"
+            << L", dynamic_current_count=0"
+            << L", paint_zero_trigger_verified=1"
+            << L", element_mutation_notified=1"
+            << L", engine_record_identity_preserved=1"
+            << L", element_size=" << attribute_stride << L".";
+        LogProfileDiagnosticOnce(diagnostic_signature, stream.str());
+
+        attachment.item_view = item_view;
+        attachment.uses_explicit_vanilla_paint_zero_trigger = true;
+        return true;
+    }
+
     std::vector<AttributeStorageRecord> records;
     records.reserve(64);
     if (!CollectAttributeStorageRecordsFromList(
@@ -48254,7 +51140,35 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
     void* vector_address =
         reinterpret_cast<std::uint8_t*>(item_view) + offsets.item_view_attribute_list + offsets.attribute_list_attributes;
     RefreshAttributeVector original {};
-    if (!SafeReadValue(vector_address, original))
+    auto original_read = SafeReadValue(vector_address, original);
+
+    // A stock knife often has no paint record in the static attribute list,
+    // while its dynamic list still owns seed/wear slots.  For an explicit
+    // vanilla request, borrow one of those existing slots for the material
+    // refresh. The overlay is retained for the entity lifetime because current
+    // CS2 consumes it after the helper returns; it still neither grows nor
+    // replaces Source 2's vector.
+    if (IsExplicitVanillaKnifeFinishProfile(profile) &&
+        (!original_read || original.ptr == 0 || original.size < attributes.size()) &&
+        offsets.item_view_dynamic_attribute_list != 0)
+    {
+        auto* dynamic_vector_address =
+            reinterpret_cast<std::uint8_t*>(item_view) +
+            offsets.item_view_dynamic_attribute_list +
+            offsets.attribute_list_attributes;
+        RefreshAttributeVector dynamic_original {};
+        if (SafeReadValue(dynamic_vector_address, dynamic_original) &&
+            dynamic_original.ptr != 0 &&
+            dynamic_original.size >= attributes.size())
+        {
+            vector_address = dynamic_vector_address;
+            original = dynamic_original;
+            original_read = true;
+            attachment.uses_dynamic_attribute_list = true;
+        }
+    }
+
+    if (!original_read)
     {
         return false;
     }
@@ -48303,7 +51217,12 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
         original = expanded;
     }
 
-    if (offsets.item_view_restore_custom_material_after_precache != 0)
+    // For any explicit vanilla request, restoring the pre-existing custom
+    // material after precache is exactly what must not happen: paint=0 asks
+    // CS2 to drop that material. Positive finishes retain the reference
+    // helper's original flag behavior.
+    if (!profile.explicit_vanilla_finish &&
+        offsets.item_view_restore_custom_material_after_precache != 0)
     {
         bool restore_custom_material = false;
         if (SafeReadField(
@@ -48331,7 +51250,8 @@ bool TryAttachTemporaryWeaponRefreshAttributes(
     // can destroy the entity before we observe the tick discontinuity.  Reuse
     // the entity-owned records instead; their allocator ownership then remains
     // intact when the demo tears the entity down.
-    if (UsesTemporaryWorldWeaponRefreshModel(profile) &&
+    if ((UsesTemporaryWorldWeaponRefreshModel(profile) ||
+            IsExplicitVanillaKnifeFinishProfile(profile)) &&
         original.ptr != 0 &&
         original.size >= attributes.size())
     {
@@ -48484,6 +51404,436 @@ void RestoreTemporaryWeaponRefreshAttributes(TemporaryAttributeListAttachment& a
     attachment = {};
 }
 
+void LogLiveKnifeMaterialOwners(
+    const WeaponSkinRefreshBinding& binding,
+    const ClientSchemaOffsets& offsets,
+    const wchar_t* phase,
+    const std::uint64_t signature)
+{
+    if (!binding.instruction_window_valid ||
+        binding.original_offset == 0 ||
+        binding.original_companion_offset == 0 ||
+        phase == nullptr)
+    {
+        return;
+    }
+
+    auto* entity_list = g_hook_state.runtime_entities.last_entity_list;
+    const auto highest_entity_index = std::max(
+        g_hook_state.highest_live_entity_index.load(),
+        g_hook_state.runtime_entities.highest_live_entity_index);
+    if (entity_list == nullptr || highest_entity_index < 0)
+    {
+        return;
+    }
+
+    std::vector<std::wstring> owners;
+    owners.reserve(24);
+    int scanned = 0;
+    int positive_material_count_entities = 0;
+    constexpr std::size_t kMaximumLoggedOwners = 48;
+    for (int entity_index = 0; entity_index <= highest_entity_index; ++entity_index)
+    {
+        void* entity = nullptr;
+        if (!TryGetEntityFromIndex(entity_list, entity_index, entity) || entity == nullptr)
+        {
+            continue;
+        }
+        ++scanned;
+
+        std::int32_t primary_count = -1;
+        std::int32_t companion_count = -1;
+        const auto primary_read = SafeReadField(
+            entity,
+            binding.original_offset,
+            primary_count);
+        const auto companion_read = SafeReadField(
+            entity,
+            binding.original_companion_offset,
+            companion_count);
+        const auto plausible_primary = primary_read && primary_count >= 0 && primary_count <= 128;
+        const auto plausible_companion = companion_read && companion_count >= 0 && companion_count <= 128;
+        const auto has_materials =
+            (plausible_primary && primary_count > 0) ||
+            (plausible_companion && companion_count > 0);
+        if (has_materials)
+        {
+            ++positive_material_count_entities;
+        }
+
+        RefreshAttributeVector primary_vector {};
+        const auto primary_vector_read =
+            plausible_primary &&
+            SafeReadValue(
+                reinterpret_cast<std::uint8_t*>(entity) + binding.original_offset,
+                primary_vector) &&
+            primary_vector.size == static_cast<std::uint64_t>(primary_count) &&
+            (primary_vector.size == 0 || primary_vector.ptr != 0);
+        std::uint64_t primary_record_hash = 0;
+        bool primary_record_hash_valid = false;
+        std::array<std::uint64_t, 4> primary_record_head {};
+        if (primary_vector_read &&
+            primary_vector.size > 0 &&
+            primary_vector.ptr != 0 &&
+            offsets.item_view_composite_materials_element_size >= sizeof(primary_record_head) &&
+            offsets.item_view_composite_materials_element_size <= 0x1000)
+        {
+            std::vector<std::uint8_t> record_bytes(
+                offsets.item_view_composite_materials_element_size);
+            if (SafeReadBytes(
+                    reinterpret_cast<const void*>(primary_vector.ptr),
+                    record_bytes.data(),
+                    record_bytes.size()))
+            {
+                primary_record_hash = HashFlattenedIdentity(
+                    std::string(
+                        reinterpret_cast<const char*>(record_bytes.data()),
+                        record_bytes.size()));
+                std::memcpy(
+                    primary_record_head.data(),
+                    record_bytes.data(),
+                    sizeof(primary_record_head));
+                primary_record_hash_valid = true;
+            }
+        }
+
+        const auto rtti = BuildRuntimeEntityRttiDescriptor(entity);
+        const auto viewmodel_like = rtti.find(L"ViewModel") != std::wstring::npos;
+        const auto knife_like = rtti.find(L"Knife") != std::wstring::npos;
+        std::string model_name;
+        const auto model_name_read = TryReadEntityModelNameString(entity, offsets, model_name);
+        auto normalized_model_name = model_name;
+        std::transform(
+            normalized_model_name.begin(),
+            normalized_model_name.end(),
+            normalized_model_name.begin(),
+            [](const unsigned char value)
+            {
+                return static_cast<char>(std::tolower(value));
+            });
+        const auto knife_model =
+            model_name_read && normalized_model_name.find("knife") != std::string::npos;
+        if (!has_materials && !viewmodel_like && !knife_like && !knife_model)
+        {
+            continue;
+        }
+
+        if (owners.size() >= kMaximumLoggedOwners)
+        {
+            continue;
+        }
+
+        std::uint32_t owner_handle = kInvalidEntityHandle;
+        if (offsets.base_owner_entity != 0)
+        {
+            SafeReadField(entity, offsets.base_owner_entity, owner_handle);
+        }
+        std::uint32_t viewmodel_weapon_handle = kInvalidEntityHandle;
+        if (viewmodel_like && offsets.viewmodel_weapon != 0)
+        {
+            SafeReadField(entity, offsets.viewmodel_weapon, viewmodel_weapon_handle);
+        }
+        std::uintptr_t model_state = 0;
+        const auto model_state_read =
+            TryResolveEntityModelStateAddress(entity, offsets, model_state) && model_state != 0;
+
+        int definition_index = 0;
+        auto* item_view = ResolveWeaponItemView(entity, offsets);
+        const auto definition_read =
+            item_view != nullptr &&
+            offsets.item_view_definition_index != 0 &&
+            SafeReadField(item_view, offsets.item_view_definition_index, definition_index) &&
+            definition_index >= 0 && definition_index <= 10000;
+
+        std::wstringstream owner;
+        owner << L"entity=" << entity_index
+            << L", ptr=" << FormatPointer(entity)
+            << L", primary="
+            << (plausible_primary ? std::to_wstring(primary_count) : L"?")
+            << L", companion="
+            << (plausible_companion ? std::to_wstring(companion_count) : L"?")
+            << L", primary_ptr="
+            << (primary_vector_read
+                    ? FormatPointer(reinterpret_cast<void*>(primary_vector.ptr))
+                    : L"?")
+            << L", primary_record_hash=";
+        if (primary_record_hash_valid)
+        {
+            owner << L"0x" << std::hex << std::uppercase << primary_record_hash
+                << L", primary_record_head={0x" << primary_record_head[0]
+                << L",0x" << primary_record_head[1]
+                << L",0x" << primary_record_head[2]
+                << L",0x" << primary_record_head[3]
+                << L"}" << std::dec << std::nouppercase;
+        }
+        else
+        {
+            owner << L"?";
+        }
+        owner
+            << L", definition="
+            << (definition_read ? std::to_wstring(definition_index) : L"?")
+            << L", owner=" << HandleToEntityIndex(owner_handle)
+            << L", viewmodel_weapon=" << HandleToEntityIndex(viewmodel_weapon_handle)
+            << L", model_state="
+            << (model_state_read
+                    ? FormatPointer(reinterpret_cast<void*>(model_state))
+                    : L"0x0")
+            << L", model="
+            << (model_name_read ? NarrowToWide(model_name) : L"<unreadable>")
+            << L", " << rtti;
+        owners.push_back(owner.str());
+    }
+
+    std::wstringstream stream;
+    stream << L"Live knife/viewmodel composite-material owner scan [" << phase << L"]"
+        << L": scanned=" << scanned
+        << L", positive_count_entities=" << positive_material_count_entities
+        << L", logged=" << owners.size()
+        << L", native_offsets=0x" << std::hex << std::uppercase
+        << binding.original_offset << L"/0x" << binding.original_companion_offset
+        << std::dec << std::nouppercase << L", owners=";
+    if (owners.empty())
+    {
+        stream << L"<none>";
+    }
+    else
+    {
+        for (std::size_t index = 0; index < owners.size(); ++index)
+        {
+            if (index != 0)
+            {
+                stream << L" | ";
+            }
+            stream << owners[index];
+        }
+    }
+    LogProfileDiagnosticOnce(
+        signature ^
+            (std::wcscmp(phase, L"before") == 0
+                    ? 0x4D41544245464F52ull
+                    : 0x4D41544146544552ull),
+        stream.str());
+}
+
+void LogKnifeRefreshGeneratorState(
+    const PendingWeaponRefreshRequest& request,
+    const ClientSchemaOffsets& offsets,
+    const wchar_t* phase)
+{
+    if (request.econ_entity == nullptr || phase == nullptr ||
+        offsets.weapon_visuals_data_set < 0xA1 ||
+        offsets.weapon_custom_econ_reload_event_id == 0)
+    {
+        return;
+    }
+
+    constexpr std::size_t kPrivateVisualPayloadSize = 0xA1;
+    const auto private_visual_payload_offset =
+        offsets.weapon_visuals_data_set -
+        static_cast<std::ptrdiff_t>(kPrivateVisualPayloadSize);
+    std::array<std::uint8_t, kPrivateVisualPayloadSize> private_visual_payload {};
+    const auto payload_read = SafeReadBytes(
+        reinterpret_cast<const std::uint8_t*>(request.econ_entity) +
+            private_visual_payload_offset,
+        private_visual_payload.data(),
+        private_visual_payload.size());
+
+    std::uint64_t payload_hash = 0;
+    if (payload_read)
+    {
+        payload_hash = HashFlattenedIdentity(std::string(
+            reinterpret_cast<const char*>(private_visual_payload.data()),
+            private_visual_payload.size()));
+    }
+
+    const auto read_payload_u64 =
+        [&](const std::size_t relative_offset, std::uint64_t& value)
+        {
+            if (!payload_read ||
+                relative_offset + sizeof(value) > private_visual_payload.size())
+            {
+                return false;
+            }
+            std::memcpy(
+                &value,
+                private_visual_payload.data() + relative_offset,
+                sizeof(value));
+            return true;
+        };
+
+    std::array<std::uint64_t, 7> payload_words {};
+    constexpr std::array<std::size_t, 7> kPayloadWordOffsets {
+        0x00, 0x18, 0x20, 0x50, 0x68, 0x70, 0x78,
+    };
+    std::array<bool, kPayloadWordOffsets.size()> payload_word_read {};
+    for (std::size_t index = 0; index < kPayloadWordOffsets.size(); ++index)
+    {
+        payload_word_read[index] =
+            read_payload_u64(kPayloadWordOffsets[index], payload_words[index]);
+    }
+
+    bool clear_weapon_identifying_ugc = false;
+    bool visuals_data_set = false;
+    std::int32_t reload_event_id = 0;
+    const auto clear_ugc_read =
+        offsets.weapon_clear_weapon_identifying_ugc != 0 &&
+        SafeReadField(
+            request.econ_entity,
+            offsets.weapon_clear_weapon_identifying_ugc,
+            clear_weapon_identifying_ugc);
+    const auto visuals_read = SafeReadField(
+        request.econ_entity,
+        offsets.weapon_visuals_data_set,
+        visuals_data_set);
+    const auto reload_event_read = SafeReadField(
+        request.econ_entity,
+        offsets.weapon_custom_econ_reload_event_id,
+        reload_event_id);
+
+    auto* item_view = request.refresh_item_view != nullptr
+        ? request.refresh_item_view
+        : request.item_view;
+    const auto attribute_stride = ResolveEconItemAttributeStride(offsets);
+    const auto describe_attribute_list =
+        [&](const std::ptrdiff_t list_offset)
+        {
+            std::wstringstream list_stream;
+            if (item_view == nullptr || list_offset == 0 ||
+                offsets.attribute_list_attributes == 0 || attribute_stride == 0)
+            {
+                list_stream << L"<unavailable>";
+                return list_stream.str();
+            }
+
+            auto* vector_address =
+                reinterpret_cast<std::uint8_t*>(item_view) +
+                list_offset + offsets.attribute_list_attributes;
+            NetworkVectorView vector_view {};
+            if (!TryReadNetworkVectorView(vector_address, vector_view) ||
+                vector_view.size > 128 ||
+                (vector_view.size != 0 && vector_view.data == nullptr))
+            {
+                list_stream << L"<unreadable>";
+                return list_stream.str();
+            }
+
+            list_stream << L"count=" << vector_view.size
+                << L", data=" << FormatPointer(vector_view.data)
+                << L", records={";
+            const auto logged_count = std::min<std::uint64_t>(vector_view.size, 32);
+            for (std::uint64_t index = 0; index < logged_count; ++index)
+            {
+                if (index != 0)
+                {
+                    list_stream << L"; ";
+                }
+
+                auto* attribute = vector_view.data +
+                    static_cast<std::size_t>(index) * attribute_stride;
+                std::uintptr_t vtable = 0;
+                std::uintptr_t owner = 0;
+                std::uint16_t definition_index = 0;
+                float value = 0.0f;
+                float initial_value = 0.0f;
+                const auto record_read =
+                    SafeReadValue(attribute, vtable) &&
+                    SafeReadField(attribute, sizeof(std::uintptr_t), owner) &&
+                    SafeReadField(
+                        attribute,
+                        offsets.econ_item_attribute_definition_index,
+                        definition_index) &&
+                    SafeReadField(
+                        attribute,
+                        offsets.econ_item_attribute_value,
+                        value);
+                const auto initial_read =
+                    offsets.econ_item_attribute_initial_value != 0 &&
+                    SafeReadField(
+                        attribute,
+                        offsets.econ_item_attribute_initial_value,
+                        initial_value);
+                if (!record_read)
+                {
+                    list_stream << L"#" << index << L"=<unreadable>";
+                    continue;
+                }
+
+                list_stream << L"#" << index
+                    << L"(def=" << definition_index
+                    << L", value=" << value
+                    << L", initial=";
+                if (initial_read)
+                {
+                    list_stream << initial_value;
+                }
+                else
+                {
+                    list_stream << L"?";
+                }
+                list_stream << L", vtable="
+                    << FormatPointer(reinterpret_cast<void*>(vtable))
+                    << L", owner="
+                    << FormatPointer(reinterpret_cast<void*>(owner)) << L")";
+            }
+            if (logged_count != vector_view.size)
+            {
+                list_stream << L"; ...";
+            }
+            list_stream << L"}";
+            return list_stream.str();
+        };
+
+    std::wstringstream stream;
+    stream << L"Knife refresh generator state [" << phase << L"]"
+        << L": entity=" << request.entity_index
+        << L", econ=" << FormatPointer(request.econ_entity)
+        << L", item_view=" << FormatPointer(item_view)
+        << L", payload_offset=0x" << std::hex << std::uppercase
+        << private_visual_payload_offset
+        << L", payload_hash=0x" << payload_hash
+        << std::dec << std::nouppercase
+        << L", payload_read=" << (payload_read ? 1 : 0)
+        << L", payload_words={";
+    for (std::size_t index = 0; index < kPayloadWordOffsets.size(); ++index)
+    {
+        if (index != 0)
+        {
+            stream << L", ";
+        }
+        stream << L"+0x" << std::hex << std::uppercase
+            << kPayloadWordOffsets[index] << L"=";
+        if (payload_word_read[index])
+        {
+            stream << L"0x" << payload_words[index];
+        }
+        else
+        {
+            stream << L"?";
+        }
+        stream << std::dec << std::nouppercase;
+    }
+    stream << L"}"
+        << L", clear_weapon_identifying_ugc="
+        << (clear_ugc_read
+                ? std::to_wstring(clear_weapon_identifying_ugc ? 1 : 0)
+                : L"?")
+        << L", visuals_data_set="
+        << (visuals_read ? std::to_wstring(visuals_data_set ? 1 : 0) : L"?")
+        << L", reload_event="
+        << (reload_event_read ? std::to_wstring(reload_event_id) : L"?")
+        << L", static_attributes=["
+        << describe_attribute_list(offsets.item_view_attribute_list)
+        << L"], dynamic_attributes=["
+        << describe_attribute_list(offsets.item_view_dynamic_attribute_list)
+        << L"].";
+
+    const auto phase_tag = std::wcscmp(phase, L"before") == 0
+        ? 0x47454E4245464F52ull
+        : 0x47454E4146544552ull;
+    LogProfileDiagnosticOnce(request.desired_signature ^ phase_tag, stream.str());
+}
+
 bool TryProcessPendingWeaponRefreshRequests(
     const ClientSchemaOffsets& offsets,
     std::vector<PendingWeaponRefreshRequest>& requests)
@@ -48575,10 +51925,37 @@ bool TryProcessPendingWeaponRefreshRequests(
             }
         }
 
-        if (!nskinzcs2::runtime::ShouldAllowWeaponRefreshHelperDispatch(
+        const auto desired_refresh_attributes =
+            BuildWeaponRefreshAttributesImpl(request.profile, keychain_profile);
+        const auto live_attribute_values_match =
+            !desired_refresh_attributes.empty() &&
+            (knife_request
+                ? VerifyKnifeFinishRefreshAttributeValues(
+                      effective_refresh_item_view,
+                      offsets,
+                      request.profile,
+                      keychain_profile)
+                : VerifyAttributeValues(
+                      effective_refresh_item_view,
+                      offsets,
+                      desired_refresh_attributes));
+        const auto refresh_signature_matches =
+            HasAppliedSignature(
+                g_hook_state.refreshed_weapon_signatures,
+                request.entity_index,
+                request.desired_signature);
+        const auto verified_in_place_initialization_refresh =
+            nskinzcs2::runtime::ShouldAllowVerifiedInPlaceKnifeInitializationRefresh(
+                knife_request,
+                needs_skin_refresh,
+                live_attribute_values_match,
+                refresh_signature_matches);
+        const auto refresh_epoch_allows_dispatch =
+            nskinzcs2::runtime::ShouldAllowWeaponRefreshHelperDispatch(
                 knife_request,
                 knife_refresh_policy,
-                knife_epoch_armed))
+                knife_epoch_armed);
+        if (!refresh_epoch_allows_dispatch && !verified_in_place_initialization_refresh)
         {
             if (knife_request)
             {
@@ -48586,6 +51963,17 @@ bool TryProcessPendingWeaponRefreshRequests(
                 LogKnifeRefreshHelperSuppressed(request, effective_refresh_item_view);
             }
             continue;
+        }
+
+        if (verified_in_place_initialization_refresh && !refresh_epoch_allows_dispatch)
+        {
+            std::wstringstream stream;
+            stream << L"Allowed one verified in-place knife initialization refresh: entity="
+                << request.entity_index
+                << L", paint=" << request.profile.paint_kit
+                << L", signature=0x" << std::hex << request.desired_signature
+                << std::dec << L". Repeated steady-state helper dispatch remains blocked.";
+            LogProfileDiagnosticOnce(request.desired_signature ^ 0x494E495452454652ull, stream.str());
         }
 
         if (scheduled_item_views.find(effective_refresh_item_view) != scheduled_item_views.end())
@@ -48632,15 +52020,138 @@ bool TryProcessPendingWeaponRefreshRequests(
             }
         }
 
-        TemporaryAttributeListAttachment attachment;
-        const auto attached_refresh_attributes =
-            TryAttachTemporaryWeaponRefreshAttributes(
+        float live_paint_attribute = 0.0f;
+        const auto live_paint_attribute_present =
+            TryReadAttributeValue(
                 effective_refresh_item_view,
                 offsets,
-                request.profile,
-                attachment,
-                keychain_profile);
-        if (!attached_refresh_attributes && needs_skin_refresh)
+                kAttributePaintKit,
+                live_paint_attribute);
+        const auto use_vanilla_temporary_refresh_overlay =
+            nskinzcs2::runtime::ShouldUseKnifeVanillaTemporaryRefreshOverlay(
+                knife_request,
+                request.profile.explicit_vanilla_finish,
+                live_paint_attribute_present);
+        const auto dispatch_with_in_place_attributes =
+            nskinzcs2::runtime::ShouldDispatchKnifeRefreshWithInPlaceAttributes(
+                knife_request,
+                needs_skin_refresh,
+                live_attribute_values_match) &&
+            !use_vanilla_temporary_refresh_overlay;
+
+        if (knife_request && dispatch_with_in_place_attributes)
+        {
+            std::size_t notified_slot_count = 0;
+            if (!TryNotifyAndRewriteWeaponRefreshAttributes(
+                    effective_refresh_item_view,
+                    offsets,
+                    desired_refresh_attributes,
+                    notified_slot_count))
+            {
+                std::wstringstream stream;
+                stream << L"Knife refresh rejected because the current Schema mutable-element operation "
+                    << L"could not notify every paint/seed/wear slot: entity="
+                    << request.entity_index
+                    << L", item_view=" << FormatPointer(effective_refresh_item_view)
+                    << L", desired_count=" << desired_refresh_attributes.size()
+                    << L", notified_slots=" << notified_slot_count << L".";
+                LogProfileDiagnosticOnce(
+                    request.desired_signature ^ 0x4E45544D55544154ull,
+                    stream.str());
+                continue;
+            }
+
+            std::wstringstream stream;
+            stream << L"Knife refresh notified the attribute manager through Schema mutable-element access"
+                << L": entity=" << request.entity_index
+                << L", item_view=" << FormatPointer(effective_refresh_item_view)
+                << L", desired_count=" << desired_refresh_attributes.size()
+                << L", notified_slots=" << notified_slot_count << L".";
+            LogProfileDiagnosticOnce(
+                request.desired_signature ^ 0x4E45544D55544154ull,
+                stream.str());
+
+            std::uint64_t previous_static_attribute_count = 0;
+            std::uint64_t current_static_attribute_count = 0;
+            if (!TryEnsureKnifeRefreshStaticAttributeMirror(
+                    effective_refresh_item_view,
+                    offsets,
+                    desired_refresh_attributes,
+                    previous_static_attribute_count,
+                    current_static_attribute_count))
+            {
+                std::wstringstream rejection_stream;
+                rejection_stream
+                    << L"Knife refresh rejected because an engine-owned static attribute mirror "
+                    << L"could not be prepared for the reference helper gate: entity="
+                    << request.entity_index
+                    << L", item_view=" << FormatPointer(effective_refresh_item_view)
+                    << L", previous_static_count=" << previous_static_attribute_count
+                    << L", current_static_count=" << current_static_attribute_count
+                    << L", desired_count=" << desired_refresh_attributes.size() << L".";
+                LogProfileDiagnosticOnce(
+                    request.desired_signature ^ 0x535441544D495246ull,
+                    rejection_stream.str());
+                continue;
+            }
+
+            std::wstringstream mirror_stream;
+            mirror_stream
+                << L"Knife refresh prepared an engine-owned static attribute mirror for the "
+                << L"reference helper gate: entity=" << request.entity_index
+                << L", item_view=" << FormatPointer(effective_refresh_item_view)
+                << L", previous_static_count=" << previous_static_attribute_count
+                << L", current_static_count=" << current_static_attribute_count
+                << L", desired_count=" << desired_refresh_attributes.size()
+                << L", external_vector_replacement=0.";
+            LogProfileDiagnosticOnce(
+                request.desired_signature ^ 0x535441544D495252ull,
+                mirror_stream.str());
+        }
+
+        // The temporary-attribute path normally raises this flag while the
+        // reference refresh helper rebuilds custom materials. Knife crash
+        // protection deliberately reuses the entity-owned attribute vector,
+        // so it bypassed that side effect and a zero paint value cleared the
+        // HUD/econ state without replacing the previously cached blade
+        // material. Mirror only the scoped flag write; do not replace or grow
+        // the knife attribute vector.
+        TemporaryAttributeListAttachment in_place_material_refresh_scope;
+        if (dispatch_with_in_place_attributes &&
+            offsets.item_view_restore_custom_material_after_precache != 0)
+        {
+            bool restore_custom_material = false;
+            if (SafeReadField(
+                    effective_refresh_item_view,
+                    offsets.item_view_restore_custom_material_after_precache,
+                    restore_custom_material))
+            {
+                in_place_material_refresh_scope.item_view = effective_refresh_item_view;
+                in_place_material_refresh_scope.restore_custom_material_original = restore_custom_material;
+                if (!restore_custom_material)
+                {
+                    in_place_material_refresh_scope.restore_custom_material_written =
+                        SafeWriteField(
+                            effective_refresh_item_view,
+                            offsets.item_view_restore_custom_material_after_precache,
+                            true);
+                }
+            }
+        }
+
+        TemporaryAttributeListAttachment attachment;
+        const auto attached_refresh_attributes =
+            dispatch_with_in_place_attributes
+                ? false
+                : TryAttachTemporaryWeaponRefreshAttributes(
+                      effective_refresh_item_view,
+                      offsets,
+                      request.profile,
+                      attachment,
+                      keychain_profile);
+        if (!attached_refresh_attributes &&
+            !dispatch_with_in_place_attributes &&
+            needs_skin_refresh)
         {
             if (UsesTemporaryWorldWeaponRefreshModel(request.profile))
             {
@@ -48687,7 +52198,7 @@ bool TryProcessPendingWeaponRefreshRequests(
         }
 
         scheduled_item_views.insert(effective_refresh_item_view);
-        if (promote_refresh_attachment)
+        if (promote_refresh_attachment && attached_refresh_attributes)
         {
             promoted_item_views.insert(effective_refresh_item_view);
         }
@@ -48709,6 +52220,17 @@ bool TryProcessPendingWeaponRefreshRequests(
             attachment.restore_on_abandon_when_promoted =
                 restore_promoted_refresh_attachment_on_abandon;
             attachments.push_back(std::move(attachment));
+        }
+        else if (in_place_material_refresh_scope.restore_custom_material_written)
+        {
+            // The helper only queues the composite-material work.  Keep this
+            // Schema flag raised until the runtime-owned binding is released;
+            // restoring it when the helper returns races the later material
+            // consumer and leaves the first-person knife bound to its old
+            // composite material.
+            in_place_material_refresh_scope.restore_on_abandon_when_promoted = false;
+            promoted_item_views.insert(effective_refresh_item_view);
+            attachments.push_back(std::move(in_place_material_refresh_scope));
         }
         candidate_requests.push_back(request);
         if (trace_watched_knife)
@@ -48779,10 +52301,288 @@ bool TryProcessPendingWeaponRefreshRequests(
             << L", watched_knife_candidates=" << watched_knife_candidate_count;
         TraceWatchedKnifeDiagnostic(*watched_knife_profile, stream.str());
     }
-    const auto refresh_result = TryCallWeaponSkinRefresh(
-        g_hook_state.weapon_skin_refresh,
-        candidate_requests,
-        refresh_issue);
+    const auto has_explicit_vanilla_pass =
+        std::any_of(
+            candidate_requests.begin(),
+            candidate_requests.end(),
+            [](const PendingWeaponRefreshRequest& request)
+            {
+                return IsExplicitVanillaKnifeFinishProfile(request.profile);
+            });
+    const auto has_vanilla_paint_zero_trigger =
+        std::any_of(
+            attachments.begin(),
+            attachments.end(),
+            [](const TemporaryAttributeListAttachment& attachment)
+            {
+                return attachment.uses_explicit_vanilla_paint_zero_trigger;
+            });
+    const auto needs_non_vanilla_attribute_pass =
+        std::any_of(
+            candidate_requests.begin(),
+            candidate_requests.end(),
+            [](const PendingWeaponRefreshRequest& request)
+            {
+                return !IsExplicitVanillaKnifeFinishProfile(request.profile);
+            });
+    const auto needs_attribute_triggered_pass =
+        needs_non_vanilla_attribute_pass || has_vanilla_paint_zero_trigger;
+
+    auto configure_native_material_binding =
+        [](WeaponSkinRefreshBinding& binding)
+        {
+            binding.patched_offset = binding.original_offset;
+            binding.offset_patched = false;
+        };
+
+    auto active_refresh_binding = g_hook_state.weapon_skin_refresh;
+    if (has_explicit_vanilla_pass && !needs_attribute_triggered_pass)
+    {
+        configure_native_material_binding(active_refresh_binding);
+    }
+
+    if (has_explicit_vanilla_pass)
+    {
+        for (const auto& request : candidate_requests)
+        {
+            if (!IsExplicitVanillaKnifeFinishProfile(request.profile) ||
+                request.econ_entity == nullptr)
+            {
+                continue;
+            }
+
+            std::int32_t primary_material_count = -1;
+            std::int32_t companion_material_count = -1;
+            const auto primary_read = SafeReadField(
+                request.econ_entity,
+                g_hook_state.weapon_skin_refresh.original_offset,
+                primary_material_count);
+            const auto companion_read = SafeReadField(
+                request.econ_entity,
+                g_hook_state.weapon_skin_refresh.original_companion_offset,
+                companion_material_count);
+
+            std::wstringstream stream;
+            stream << L"Explicit vanilla knife native composite-material gate for XUID "
+                << request.profile.xuid
+                << L": entity=" << request.entity_index
+                << L", primary_offset=0x" << std::hex << std::uppercase
+                << g_hook_state.weapon_skin_refresh.original_offset
+                << L", companion_offset=0x"
+                << g_hook_state.weapon_skin_refresh.original_companion_offset
+                << std::dec << std::nouppercase
+                << L", primary_count="
+                << (primary_read ? std::to_wstring(primary_material_count) : L"<unreadable>")
+                << L", companion_count="
+                << (companion_read ? std::to_wstring(companion_material_count) : L"<unreadable>")
+                << L", dispatch_mode="
+                << (has_vanilla_paint_zero_trigger
+                        ? L"paint_zero_attribute_trigger"
+                        : (needs_attribute_triggered_pass ? L"native_followup" : L"native_only"))
+                << L".";
+            LogProfileDiagnosticOnce(
+                request.desired_signature ^ 0x56414E4E41544956ull,
+                stream.str());
+        }
+    }
+
+    const auto diagnostic_knife_request = std::find_if(
+        candidate_requests.begin(),
+        candidate_requests.end(),
+        [](const PendingWeaponRefreshRequest& request)
+        {
+            return IsKnifeProfile(request.profile);
+        });
+    if (diagnostic_knife_request != candidate_requests.end())
+    {
+        LogKnifeRefreshGeneratorState(
+            *diagnostic_knife_request,
+            offsets,
+            L"before");
+        LogLiveKnifeMaterialOwners(
+            g_hook_state.weapon_skin_refresh,
+            offsets,
+            L"before",
+            diagnostic_knife_request->desired_signature ^ 0x4D41544F574E4552ull);
+    }
+
+    // C_CSWeaponBase::m_bVisualsDataSet is the formal cache-valid bit for the
+    // private material-generation payload at +0x1848..+0x18E8.  The v0.2.0
+    // helper clears the render custom-material vectors, but current CS2 will
+    // rebuild the same cached payload unless this bit and its reload epoch are
+    // invalidated before the helper runs.  Do this once per accepted knife
+    // refresh signature, for positive paint kits as well as explicit vanilla.
+    bool knife_visuals_invalidation_failed = false;
+    bool knife_generator_payload_reset_failed = false;
+    for (const auto& request : candidate_requests)
+    {
+        if (!IsKnifeProfile(request.profile))
+        {
+            continue;
+        }
+
+        knife_visuals_invalidation_failed =
+            !TryInvalidateKnifeVisualsData(
+                request.entity_index,
+                request.econ_entity,
+                offsets,
+                request.desired_signature,
+                request.profile.xuid) ||
+            knife_visuals_invalidation_failed;
+
+        if (IsExplicitVanillaKnifeFinishProfile(request.profile))
+        {
+            knife_generator_payload_reset_failed =
+                !TryResetExplicitVanillaKnifeGeneratorPayload(request, offsets) ||
+                knife_generator_payload_reset_failed;
+        }
+
+        auto* refresh_item_view =
+            request.refresh_item_view != nullptr
+                ? request.refresh_item_view
+                : request.item_view;
+        if (IsExplicitVanillaKnifeFinishProfile(request.profile) &&
+            refresh_item_view != nullptr &&
+            offsets.item_view_restore_custom_material_after_precache != 0)
+        {
+            bool before_restore_custom_material = false;
+            bool after_restore_custom_material = true;
+            const auto before_read = SafeReadField(
+                refresh_item_view,
+                offsets.item_view_restore_custom_material_after_precache,
+                before_restore_custom_material);
+            const auto written = before_read && SafeWriteField(
+                refresh_item_view,
+                offsets.item_view_restore_custom_material_after_precache,
+                false);
+            const auto verified = written && SafeReadField(
+                refresh_item_view,
+                offsets.item_view_restore_custom_material_after_precache,
+                after_restore_custom_material) &&
+                !after_restore_custom_material;
+
+            std::wstringstream stream;
+            stream << L"Knife refresh disabled stale custom-material restore for XUID "
+                << request.profile.xuid
+                << L": entity=" << request.entity_index
+                << L", item_view=" << FormatPointer(refresh_item_view)
+                << L", before=" << (before_restore_custom_material ? 1 : 0)
+                << L", after=" << (after_restore_custom_material ? 1 : 0)
+                << L", verified=" << (verified ? 1 : 0) << L".";
+            LogProfileDiagnosticOnce(
+                request.desired_signature ^ 0x4E4F524553544F52ull,
+                stream.str());
+        }
+    }
+
+    bool knife_default_material_rebind_failed = false;
+    std::vector<ExplicitVanillaKnifeMeshRestoreSnapshot>
+        captured_vanilla_knife_mesh_restores;
+    if (has_explicit_vanilla_pass)
+    {
+        for (const auto& request : candidate_requests)
+        {
+            if (!IsExplicitVanillaKnifeFinishProfile(request.profile))
+            {
+                continue;
+            }
+
+            ExplicitVanillaKnifeMeshRestoreSnapshot captured_mesh_restore;
+            const auto default_materials_rebound =
+                TryRebindExplicitVanillaKnifeDefaultMaterials(
+                    request,
+                    offsets,
+                    g_hook_state.weapon_skin_refresh,
+                    &captured_mesh_restore);
+            if (captured_mesh_restore.active)
+            {
+                captured_vanilla_knife_mesh_restores.push_back(
+                    std::move(captured_mesh_restore));
+            }
+            knife_default_material_rebind_failed =
+                !default_materials_rebound ||
+                knife_default_material_rebind_failed;
+        }
+    }
+
+    auto refresh_result = refresh_issue.empty()
+        ? TryCallWeaponSkinRefresh(
+              active_refresh_binding,
+              candidate_requests,
+              refresh_issue)
+        : WeaponSkinRefreshCallResult::PatchFailed;
+
+    if (refresh_result == WeaponSkinRefreshCallResult::Succeeded &&
+        has_explicit_vanilla_pass &&
+        needs_attribute_triggered_pass &&
+        !has_vanilla_paint_zero_trigger)
+    {
+        auto native_material_binding = g_hook_state.weapon_skin_refresh;
+        configure_native_material_binding(native_material_binding);
+        std::wstring native_refresh_issue;
+
+        nskinzcs2::Logger::Info(
+            L"Dispatching explicit vanilla knife follow-up through the verified native "
+            L"composite-material gate without an attribute-offset patch.");
+
+        const auto native_refresh_result = TryCallWeaponSkinRefresh(
+            native_material_binding,
+            candidate_requests,
+            native_refresh_issue);
+        if (native_refresh_result != WeaponSkinRefreshCallResult::Succeeded)
+        {
+            refresh_result = native_refresh_result;
+            refresh_issue = std::move(native_refresh_issue);
+        }
+    }
+
+    // The helper can submit the old composite to the spectator first-person
+    // renderer after the pre-refresh owner clear.  Rebind the unchanged VMDL
+    // once after every native refresh pass, then replay the captured stock
+    // material assignments against the newly resolved model objects.  This is
+    // part of the manual Update transaction, not a per-frame or weapon-switch
+    // path, so it cannot reintroduce the former knife-switch rebuild loop.
+    if (refresh_result == WeaponSkinRefreshCallResult::Succeeded &&
+        has_explicit_vanilla_pass)
+    {
+        for (const auto& request : candidate_requests)
+        {
+            if (!IsExplicitVanillaKnifeFinishProfile(request.profile))
+            {
+                continue;
+            }
+
+            knife_default_material_rebind_failed =
+                !TryRebindExplicitVanillaKnifeModelResource(request, offsets) ||
+                knife_default_material_rebind_failed;
+        }
+    }
+
+    if (refresh_result == WeaponSkinRefreshCallResult::Succeeded)
+    {
+        for (const auto& captured_restore : captured_vanilla_knife_mesh_restores)
+        {
+            knife_default_material_rebind_failed =
+                !TryApplyCapturedExplicitVanillaKnifeMeshBaseMaterials(
+                    captured_restore,
+                    L"after all native skin-refresh passes") ||
+                knife_default_material_rebind_failed;
+        }
+    }
+
+    if (refresh_result == WeaponSkinRefreshCallResult::Succeeded &&
+        diagnostic_knife_request != candidate_requests.end())
+    {
+        LogKnifeRefreshGeneratorState(
+            *diagnostic_knife_request,
+            offsets,
+            L"after");
+        LogLiveKnifeMaterialOwners(
+            g_hook_state.weapon_skin_refresh,
+            offsets,
+            L"after",
+            diagnostic_knife_request->desired_signature ^ 0x4D41544F574E4552ull);
+    }
 
     if (refresh_result != WeaponSkinRefreshCallResult::Succeeded)
     {
@@ -48809,7 +52609,10 @@ bool TryProcessPendingWeaponRefreshRequests(
         return false;
     }
 
-    bool verification_failed = false;
+    bool verification_failed =
+        knife_visuals_invalidation_failed ||
+        knife_generator_payload_reset_failed ||
+        knife_default_material_rebind_failed;
     if (watched_knife_profile != nullptr &&
         g_hook_state.pending_knife_post_refresh_verification.active &&
         g_hook_state.pending_knife_post_refresh_verification.xuid == watched_knife_profile->xuid)
@@ -48839,6 +52642,17 @@ bool TryProcessPendingWeaponRefreshRequests(
             refresh_result == WeaponSkinRefreshCallResult::Succeeded))
     {
         ConsumeKnifeRefreshHelperEpoch();
+    }
+
+    if (!verification_failed)
+    {
+        for (const auto& request : candidate_requests)
+        {
+            RememberAppliedSignature(
+                g_hook_state.refreshed_weapon_signatures,
+                request.entity_index,
+                request.desired_signature);
+        }
     }
 
     for (auto& attachment : attachments)
@@ -48896,6 +52710,12 @@ bool TryProcessPendingWeaponRefreshRequests(
             {
                 cleanup_stream << L"Standard weapon refresh retained the paint attribute payload in runtime-owned";
                 cleanup_stream << L" storage on world weapon entity " << request.entity_index
+                    << L" for deferred render material consumption.";
+            }
+            else if (IsExplicitVanillaKnifeFinishProfile(request.profile))
+            {
+                cleanup_stream << L"Explicit vanilla knife refresh retained its in-place paint=0 overlay";
+                cleanup_stream << L" on world weapon entity " << request.entity_index
                     << L" for deferred render material consumption.";
             }
             else
@@ -48983,6 +52803,10 @@ bool ApplyExistingItemAttributes(
         if (allow_attribute_list_vector_mutation)
         {
             TryUpdateExistingAttributeValue(item_view, offsets, definition_index, value);
+        }
+        else if (IsKnifeProfile(profile) && definition_index == kAttributePaintKit)
+        {
+            TryWriteKnifePaintAttributeInPlaceOnly(item_view, offsets, value);
         }
         else
         {
@@ -50093,6 +53917,30 @@ bool TryResolveWeaponKeychainModuleEntity(
     return false;
 }
 
+bool DoesDurableStandardWeaponCarrierStateMatchProfile(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::model::CosmeticProfile& profile,
+    const int current_definition_index,
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr)
+{
+    if (!IsStandardWeaponProfile(profile) || item_view == nullptr)
+    {
+        return false;
+    }
+
+    int actual_definition_index = 0;
+    if (!TryReadItemDefinitionIndex(item_view, offsets, actual_definition_index) ||
+        actual_definition_index != current_definition_index)
+    {
+        return false;
+    }
+
+    const auto desired_attributes = BuildWeaponRefreshAttributesImpl(profile, keychain_profile);
+    return !desired_attributes.empty() &&
+        VerifyAttributeValues(item_view, offsets, desired_attributes);
+}
+
 bool DoesAppliedEconItemMatchProfile(
     void* econ_entity,
     void* item_view,
@@ -50111,7 +53959,6 @@ bool DoesAppliedEconItemMatchProfile(
         return false;
     }
 
-    constexpr float kDefaultWear = 0.0000001f;
     const auto keychain_only_apply = IsKeychainOnlyApplyRequest(profile, keychain_profile);
     const auto should_validate_extended_item_view = ShouldApplyExtendedItemViewWrites(profile);
     const auto uses_temporary_world_refresh_model = UsesTemporaryWorldWeaponRefreshModel(profile);
@@ -50122,6 +53969,10 @@ bool DoesAppliedEconItemMatchProfile(
         (allow_knife_definition_override || !IsKnifeOverrideRequest(profile));
     const auto expected_definition_index = static_cast<int>(
         should_expect_definition_override ? profile.override_item : current_definition_index);
+    const auto expected_wear =
+        IsStandardWeaponProfile(profile)
+            ? nskinzcs2::model::NormalizeCosmeticWear(profile.wear)
+            : profile.wear;
 
     int actual_definition_index = 0;
     if (!TryReadItemDefinitionIndex(item_view, offsets, actual_definition_index) ||
@@ -50133,6 +53984,31 @@ bool DoesAppliedEconItemMatchProfile(
     if (keychain_only_apply)
     {
         return VerifyAttributeValues(item_view, offsets, BuildWeaponRefreshAttributesImpl(profile, keychain_profile));
+    }
+
+
+    if (ProfileHasExplicitPaintIntent(profile) && offsets.item_view_disallow_soc != 0)
+    {
+        bool actual_disallow_soc = false;
+        if (!SafeReadField(item_view, offsets.item_view_disallow_soc, actual_disallow_soc) ||
+            !actual_disallow_soc)
+        {
+            return false;
+        }
+    }
+
+    if (profile.explicit_vanilla_finish &&
+        offsets.item_view_restore_custom_material_after_precache != 0)
+    {
+        bool actual_restore_custom_material = true;
+        if (!SafeReadField(
+                item_view,
+                offsets.item_view_restore_custom_material_after_precache,
+                actual_restore_custom_material) ||
+            actual_restore_custom_material)
+        {
+            return false;
+        }
     }
 
     if (should_validate_extended_item_view)
@@ -50155,7 +54031,8 @@ bool DoesAppliedEconItemMatchProfile(
         {
             std::uint32_t actual_item_id_low = 0;
             const auto expected_item_id_low =
-                IsStandardWeaponProfile(profile)
+                (IsStandardWeaponProfile(profile) ||
+                 (IsKnifeProfile(profile) && ProfileHasExplicitPaintIntent(profile)))
                     ? nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey(
                           profile,
                           xuid,
@@ -50211,11 +54088,46 @@ bool DoesAppliedEconItemMatchProfile(
 
     if (econ_entity != nullptr)
     {
-        int actual_fallback_paint_kit = 0;
-        if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_paint_kit, actual_fallback_paint_kit) ||
-            actual_fallback_paint_kit != profile.paint_kit)
+        if (ProfileHasExplicitPaintIntent(profile))
         {
-            return false;
+            int actual_fallback_paint_kit = 0;
+            if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_paint_kit, actual_fallback_paint_kit) ||
+                actual_fallback_paint_kit != profile.paint_kit)
+            {
+                return false;
+            }
+
+            auto* attribute_container = ResolveWeaponAttributeContainer(econ_entity, offsets);
+            if (attribute_container == nullptr)
+            {
+                return false;
+            }
+
+            if (offsets.attribute_container_external_item_provider_registered_token != 0)
+            {
+                std::uint32_t provider_token = 0;
+                if (!SafeReadField(
+                        attribute_container,
+                        offsets.attribute_container_external_item_provider_registered_token,
+                        provider_token) ||
+                    provider_token != 0)
+                {
+                    return false;
+                }
+            }
+
+            if (offsets.attribute_container_registered_as_item_id != 0)
+            {
+                std::uint64_t registered_item_id = 0;
+                if (!SafeReadField(
+                        attribute_container,
+                        offsets.attribute_container_registered_as_item_id,
+                        registered_item_id) ||
+                    registered_item_id != 0)
+                {
+                    return false;
+                }
+            }
         }
 
         const auto xuid_parts = SplitXuid(xuid);
@@ -50240,18 +54152,21 @@ bool DoesAppliedEconItemMatchProfile(
             }
         }
 
-        int actual_fallback_seed = 0;
-        if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_seed, actual_fallback_seed) ||
-            actual_fallback_seed != profile.seed)
+        if (ProfileHasExplicitPaintIntent(profile))
         {
-            return false;
-        }
+            int actual_fallback_seed = 0;
+            if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_seed, actual_fallback_seed) ||
+                actual_fallback_seed != profile.seed)
+            {
+                return false;
+            }
 
-        float actual_fallback_wear = kDefaultWear;
-        if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_wear, actual_fallback_wear) ||
-            !NearlyEqualFloat(actual_fallback_wear, profile.wear, 0.000001f))
-        {
-            return false;
+            float actual_fallback_wear = nskinzcs2::model::kMinimumCosmeticWear;
+            if (!SafeReadField(econ_entity, offsets.econ_entity_fallback_wear, actual_fallback_wear) ||
+                !nskinzcs2::model::CosmeticWearMatchesExactly(actual_fallback_wear, expected_wear))
+            {
+                return false;
+            }
         }
 
         int actual_fallback_stat_trak = 0;
@@ -50363,7 +54278,8 @@ bool ApplyProfileToEconItem(
     const auto quality = static_cast<std::uint8_t>(std::clamp(profile.quality, 0, 255));
     const auto item_id_high = static_cast<std::uint32_t>(0xFFFFFFFFu);
     const auto item_id_low =
-        IsStandardWeaponProfile(profile)
+        (IsStandardWeaponProfile(profile) ||
+         (IsKnifeProfile(profile) && ProfileHasExplicitPaintIntent(profile)))
             ? nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey(
                   profile,
                   xuid,
@@ -50371,11 +54287,41 @@ bool ApplyProfileToEconItem(
             : static_cast<std::uint32_t>(0xFFFFFFFFu);
     const auto account_id = AccountIdFromXuid(xuid);
     const auto xuid_parts = SplitXuid(xuid);
+    const auto effective_wear =
+        IsStandardWeaponProfile(profile)
+            ? nskinzcs2::model::NormalizeCosmeticWear(profile.wear)
+            : profile.wear;
 
     bool success = true;
     if (econ_entity != nullptr)
     {
-        success = success && SafeWriteField(econ_entity, offsets.econ_entity_fallback_paint_kit, profile.paint_kit);
+        if (ProfileHasExplicitPaintIntent(profile))
+        {
+            success = success && SafeWriteField(econ_entity, offsets.econ_entity_fallback_paint_kit, profile.paint_kit);
+
+            auto* attribute_container = ResolveWeaponAttributeContainer(econ_entity, offsets);
+            if (attribute_container == nullptr)
+            {
+                success = false;
+            }
+            else
+            {
+                if (offsets.attribute_container_external_item_provider_registered_token != 0)
+                {
+                    success = success && SafeWriteField(
+                        attribute_container,
+                        offsets.attribute_container_external_item_provider_registered_token,
+                        std::uint32_t {0});
+                }
+                if (offsets.attribute_container_registered_as_item_id != 0)
+                {
+                    success = success && SafeWriteField(
+                        attribute_container,
+                        offsets.attribute_container_registered_as_item_id,
+                        std::uint64_t {0});
+                }
+            }
+        }
         if (offsets.econ_entity_original_owner_xuid_low != 0)
         {
             success = success && SafeWriteField(econ_entity, offsets.econ_entity_original_owner_xuid_low, xuid_parts.first);
@@ -50386,12 +54332,48 @@ bool ApplyProfileToEconItem(
             success = success && SafeWriteField(econ_entity, offsets.econ_entity_original_owner_xuid_high, xuid_parts.second);
         }
 
-        success = success && SafeWriteField(econ_entity, offsets.econ_entity_fallback_seed, profile.seed);
-        success = success && SafeWriteField(econ_entity, offsets.econ_entity_fallback_wear, profile.wear);
+        if (ProfileHasExplicitPaintIntent(profile))
+        {
+            success = success && SafeWriteField(econ_entity, offsets.econ_entity_fallback_seed, profile.seed);
+            success = success && SafeWriteField(econ_entity, offsets.econ_entity_fallback_wear, effective_wear);
+        }
         success = success && SafeWriteField(econ_entity, offsets.econ_entity_fallback_stat_trak, profile.stat_trak);
         if (write_legacy_activation_writes && offsets.econ_entity_initialized != 0)
         {
             success = success && SafeWriteField(econ_entity, offsets.econ_entity_initialized, true);
+        }
+
+        if (IsKnifeProfile(profile) &&
+            ProfileHasExplicitPaintIntent(profile) &&
+            offsets.weapon_clear_weapon_identifying_ugc != 0)
+        {
+            success = success && SafeWriteField(
+                econ_entity,
+                offsets.weapon_clear_weapon_identifying_ugc,
+                false);
+        }
+
+        if (IsExplicitVanillaKnifeFinishProfile(profile))
+        {
+            std::uint32_t previous_material_group = 0;
+            const auto material_group_reset =
+                TryResetEntityMaterialGroupToDefault(
+                    econ_entity,
+                    offsets,
+                    previous_material_group);
+            std::wstringstream stream;
+            stream << L"Explicit vanilla knife material-group reset: entity="
+                << FormatPointer(econ_entity)
+                << L", previous_token=0x" << std::hex << std::uppercase
+                << previous_material_group << std::dec << std::nouppercase
+                << L", reset=" << (material_group_reset ? 1 : 0) << L".";
+            LogProfileDiagnosticOnce(
+                BuildProfileApplySignature(
+                    profile,
+                    xuid,
+                    current_definition_index,
+                    0x56414E4D41544752ull),
+                stream.str());
         }
 
         const auto module_fields_applied =
@@ -50436,6 +54418,23 @@ bool ApplyProfileToEconItem(
             success = success && SafeWriteField(item_view, offsets.item_view_item_id_low, item_id_low);
         }
         success = success && SafeWriteField(item_view, offsets.item_view_account_id, account_id);
+        if (ProfileHasExplicitPaintIntent(profile) && offsets.item_view_disallow_soc != 0)
+        {
+            // A demo item can keep resolving its original SOC-backed visuals
+            // after fallback fields change. Explicit cosmetic intent must
+            // detach this client item view from that provider so paint=0 uses
+            // the model's stock material and positive paints cannot flicker
+            // back to the recorded inventory finish.
+            success = success && SafeWriteField(item_view, offsets.item_view_disallow_soc, true);
+        }
+        if (profile.explicit_vanilla_finish &&
+            offsets.item_view_restore_custom_material_after_precache != 0)
+        {
+            success = success && SafeWriteField(
+                item_view,
+                offsets.item_view_restore_custom_material_after_precache,
+                false);
+        }
         if (write_legacy_activation_writes && offsets.item_view_initialized != 0)
         {
             success = success && SafeWriteField(item_view, offsets.item_view_initialized, true);
@@ -50482,7 +54481,11 @@ bool TryApplyWeaponEntityProfile(
         pending_refresh_requests != nullptr &&
         IsMaterialRefreshTarget(refresh_target) &&
         (refresh_item_view != nullptr ? refresh_item_view : item_view) != nullptr &&
-        NeedsWeaponSkinRefresh(profile, keychain_profile);
+        NeedsWeaponSkinRefresh(profile, keychain_profile) &&
+        !HasAppliedSignature(
+            g_hook_state.refreshed_weapon_signatures,
+            entity_index,
+            desired_signature);
     const auto has_applied_signature =
         HasAppliedSignature(g_hook_state.applied_weapon_signatures, entity_index, desired_signature);
     void* effective_refresh_item_view = refresh_item_view != nullptr ? refresh_item_view : item_view;
@@ -50520,6 +54523,27 @@ bool TryApplyWeaponEntityProfile(
             }
         };
     if (has_applied_signature &&
+        IsStandardWeaponProfile(profile) &&
+        HasAppliedSignature(
+            g_hook_state.refreshed_weapon_signatures,
+            entity_index,
+            desired_signature) &&
+        DoesDurableStandardWeaponCarrierStateMatchProfile(
+            item_view,
+            offsets,
+            profile,
+            current_definition_index,
+            keychain_profile))
+    {
+        // Demo/network replication is allowed to restore item_id_low,
+        // initialized, quality, account and fallback scalar fields after the
+        // material helper has consumed our runtime-owned attribute vector.
+        // Those volatile fields are not a reason to invalidate the completed
+        // material or dispatch the helper again.
+        return false;
+    }
+
+    if (has_applied_signature &&
         DoesAppliedEconItemMatchProfile(
             econ_entity,
             item_view,
@@ -50553,6 +54577,8 @@ bool TryApplyWeaponEntityProfile(
     {
         return false;
     }
+
+    g_hook_state.refreshed_weapon_signatures.erase(entity_index);
 
     RememberAppliedSignature(g_hook_state.applied_weapon_signatures, entity_index, desired_signature);
     applied_entity_indices.insert(entity_index);
@@ -51254,13 +55280,48 @@ bool TryCaptureWeaponAppearanceSnapshot(
         return false;
     }
 
-    bool success =
-        SafeReadField(carrier_entity, offsets.econ_entity_fallback_paint_kit, snapshot.fallback_paint_kit) &&
-        SafeReadField(carrier_entity, offsets.econ_entity_fallback_seed, snapshot.fallback_seed) &&
-        SafeReadField(carrier_entity, offsets.econ_entity_fallback_wear, snapshot.fallback_wear) &&
-        SafeReadField(carrier_entity, offsets.econ_entity_fallback_stat_trak, snapshot.fallback_stat_trak) &&
-        SafeReadField(carrier_item_view, offsets.item_view_item_id_high, snapshot.item_id_high) &&
+    const auto fallback_paint_read =
+        SafeReadField(carrier_entity, offsets.econ_entity_fallback_paint_kit, snapshot.fallback_paint_kit);
+    const auto fallback_seed_read =
+        SafeReadField(carrier_entity, offsets.econ_entity_fallback_seed, snapshot.fallback_seed);
+    const auto fallback_wear_read =
+        SafeReadField(carrier_entity, offsets.econ_entity_fallback_wear, snapshot.fallback_wear);
+    const auto fallback_stattrak_read =
+        SafeReadField(carrier_entity, offsets.econ_entity_fallback_stat_trak, snapshot.fallback_stat_trak);
+    const auto item_id_high_read =
+        SafeReadField(carrier_item_view, offsets.item_view_item_id_high, snapshot.item_id_high);
+    const auto account_id_read =
         SafeReadField(carrier_item_view, offsets.item_view_account_id, snapshot.account_id);
+    bool success =
+        fallback_paint_read &&
+        fallback_seed_read &&
+        fallback_wear_read &&
+        fallback_stattrak_read &&
+        item_id_high_read &&
+        account_id_read;
+
+    auto* attribute_container = ResolveWeaponAttributeContainer(carrier_entity, offsets);
+    if (offsets.attribute_container_external_item_provider_registered_token != 0)
+    {
+        snapshot.has_external_item_provider_registered_token =
+            attribute_container != nullptr &&
+            SafeReadField(
+                attribute_container,
+                offsets.attribute_container_external_item_provider_registered_token,
+                snapshot.external_item_provider_registered_token);
+        success = success && snapshot.has_external_item_provider_registered_token;
+    }
+
+    if (offsets.attribute_container_registered_as_item_id != 0)
+    {
+        snapshot.has_registered_as_item_id =
+            attribute_container != nullptr &&
+            SafeReadField(
+                attribute_container,
+                offsets.attribute_container_registered_as_item_id,
+                snapshot.registered_as_item_id);
+        success = success && snapshot.has_registered_as_item_id;
+    }
 
     if (offsets.econ_entity_original_owner_xuid_low != 0)
     {
@@ -51325,6 +55386,25 @@ bool TryCaptureWeaponAppearanceSnapshot(
         success = success && snapshot.has_item_view_initialized;
     }
 
+
+    if (offsets.item_view_disallow_soc != 0)
+    {
+        snapshot.has_item_view_disallow_soc = SafeReadField(
+            carrier_item_view,
+            offsets.item_view_disallow_soc,
+            snapshot.item_view_disallow_soc);
+        success = success && snapshot.has_item_view_disallow_soc;
+    }
+
+    if (offsets.item_view_restore_custom_material_after_precache != 0)
+    {
+        snapshot.has_restore_custom_material_after_precache = SafeReadField(
+            carrier_item_view,
+            offsets.item_view_restore_custom_material_after_precache,
+            snapshot.restore_custom_material_after_precache);
+        success = success && snapshot.has_restore_custom_material_after_precache;
+    }
+
     if (offsets.item_view_custom_name != 0)
     {
         snapshot.has_custom_name =
@@ -51356,6 +55436,56 @@ bool TryCaptureWeaponAppearanceSnapshot(
 
     static_cast<void>(profile);
     snapshot.valid = success;
+    if (!success && IsKnifeProfile(profile))
+    {
+        std::wstringstream stream;
+        stream << L"Knife weapon appearance snapshot field audit:"
+            << L" fallback_paint=" << (fallback_paint_read ? 1 : 0)
+            << L", fallback_seed=" << (fallback_seed_read ? 1 : 0)
+            << L", fallback_wear=" << (fallback_wear_read ? 1 : 0)
+            << L", fallback_stattrak=" << (fallback_stattrak_read ? 1 : 0)
+            << L", item_id_high=" << (item_id_high_read ? 1 : 0)
+            << L", account_id=" << (account_id_read ? 1 : 0)
+            << L", provider_token="
+            << (offsets.attribute_container_external_item_provider_registered_token == 0
+                    ? -1
+                    : (snapshot.has_external_item_provider_registered_token ? 1 : 0))
+            << L", registered_item_id="
+            << (offsets.attribute_container_registered_as_item_id == 0
+                    ? -1
+                    : (snapshot.has_registered_as_item_id ? 1 : 0))
+            << L", owner_low="
+            << (offsets.econ_entity_original_owner_xuid_low == 0 ? -1 : (snapshot.has_owner_xuid_low ? 1 : 0))
+            << L", owner_high="
+            << (offsets.econ_entity_original_owner_xuid_high == 0 ? -1 : (snapshot.has_owner_xuid_high ? 1 : 0))
+            << L", item_id_low="
+            << (offsets.item_view_item_id_low == 0 ? -1 : (snapshot.has_item_id_low ? 1 : 0))
+            << L", definition="
+            << (offsets.item_view_definition_index == 0 ? -1 : (snapshot.has_definition_index ? 1 : 0))
+            << L", quality="
+            << (offsets.item_view_entity_quality == 0 ? -1 : (snapshot.has_quality ? 1 : 0))
+            << L", entity_initialized="
+            << (offsets.econ_entity_initialized == 0 ? -1 : (snapshot.has_econ_entity_initialized ? 1 : 0))
+            << L", item_initialized="
+            << (offsets.item_view_initialized == 0 ? -1 : (snapshot.has_item_view_initialized ? 1 : 0))
+            << L", disallow_soc="
+            << (offsets.item_view_disallow_soc == 0 ? -1 : (snapshot.has_item_view_disallow_soc ? 1 : 0))
+            << L", restore_custom_material="
+            << (offsets.item_view_restore_custom_material_after_precache == 0
+                    ? -1
+                    : (snapshot.has_restore_custom_material_after_precache ? 1 : 0))
+            << L", custom_name="
+            << (offsets.item_view_custom_name == 0 ? -1 : (snapshot.has_custom_name ? 1 : 0))
+            << L", custom_name_override="
+            << (offsets.item_view_custom_name_override == 0 ? -1 : (snapshot.has_custom_name_override ? 1 : 0))
+            << L", render_mesh=" << (snapshot.has_render_mesh_group_mask ? 1 : 0)
+            << L", hud_mesh="
+            << (hud_entity == nullptr ? -1 : (snapshot.has_hud_mesh_group_mask ? 1 : 0))
+            << L".";
+        LogProfileDiagnosticOnce(
+            BuildProfileApplySignature(profile, profile.xuid, profile.base_item, 0x534E415041554449ull),
+            stream.str());
+    }
     return success;
 }
 
@@ -51383,6 +55513,27 @@ bool RestoreWeaponAppearanceSnapshot(
         SafeWriteField(binding.carrier_item_view, offsets.item_view_item_id_high, snapshot.item_id_high);
     restored = restored &&
         SafeWriteField(binding.carrier_item_view, offsets.item_view_account_id, snapshot.account_id);
+
+    auto* attribute_container = ResolveWeaponAttributeContainer(binding.carrier_entity, offsets);
+    if (snapshot.has_external_item_provider_registered_token &&
+        attribute_container != nullptr &&
+        offsets.attribute_container_external_item_provider_registered_token != 0)
+    {
+        restored = restored && SafeWriteField(
+            attribute_container,
+            offsets.attribute_container_external_item_provider_registered_token,
+            snapshot.external_item_provider_registered_token);
+    }
+
+    if (snapshot.has_registered_as_item_id &&
+        attribute_container != nullptr &&
+        offsets.attribute_container_registered_as_item_id != 0)
+    {
+        restored = restored && SafeWriteField(
+            attribute_container,
+            offsets.attribute_container_registered_as_item_id,
+            snapshot.registered_as_item_id);
+    }
 
     if (snapshot.has_owner_xuid_low)
     {
@@ -51440,6 +55591,24 @@ bool RestoreWeaponAppearanceSnapshot(
     {
         restored = restored &&
             SafeWriteField(binding.carrier_item_view, offsets.item_view_initialized, snapshot.item_view_initialized);
+    }
+
+
+    if (snapshot.has_item_view_disallow_soc && offsets.item_view_disallow_soc != 0)
+    {
+        restored = restored && SafeWriteField(
+            binding.carrier_item_view,
+            offsets.item_view_disallow_soc,
+            snapshot.item_view_disallow_soc);
+    }
+
+    if (snapshot.has_restore_custom_material_after_precache &&
+        offsets.item_view_restore_custom_material_after_precache != 0)
+    {
+        restored = restored && SafeWriteField(
+            binding.carrier_item_view,
+            offsets.item_view_restore_custom_material_after_precache,
+            snapshot.restore_custom_material_after_precache);
     }
 
     if (snapshot.has_custom_name)
@@ -51794,6 +55963,43 @@ bool VerifyWeaponAppearanceState(
     static_cast<void>(desired_signature);
     static_cast<void>(payload);
 
+    if (IsStandardWeaponProfile(profile))
+    {
+        const auto refresh_signature_matches =
+            HasAppliedSignature(
+                g_hook_state.refreshed_weapon_signatures,
+                binding.resolved.carrier_entity_index,
+                desired_signature);
+        const auto durable_carrier_state_matches =
+            DoesDurableStandardWeaponCarrierStateMatchProfile(
+                binding.carrier_item_view,
+                offsets,
+                profile,
+                current_definition_index,
+                keychain_profile);
+        std::uint64_t render_mesh_group_mask = 0;
+        const auto render_mesh_state_matches =
+            TryReadWeaponMeshGroupMask(binding.render_entity, offsets, render_mesh_group_mask) &&
+            render_mesh_group_mask == binding.resolved.mesh_group_mask;
+        std::uint64_t hud_mesh_group_mask = 0;
+        const auto hud_mesh_state_matches =
+            binding.hud_entity == nullptr ||
+            (TryReadWeaponMeshGroupMask(binding.hud_entity, offsets, hud_mesh_group_mask) &&
+                hud_mesh_group_mask == binding.resolved.mesh_group_mask);
+
+        if (nskinzcs2::runtime::ShouldUseStableStandardWeaponMaterialFastPath(
+                true,
+                refresh_signature_matches,
+                durable_carrier_state_matches,
+                durable_carrier_state_matches,
+                render_mesh_state_matches,
+                hud_mesh_state_matches))
+        {
+            verify_line = L"Verified stable standard-weapon material state: " + verify_line;
+            return true;
+        }
+    }
+
     if (!DoesAppliedEconItemMatchProfile(
             binding.carrier_entity,
             binding.carrier_item_view,
@@ -52075,6 +56281,13 @@ bool TryApplyStandardWeaponAppearancePipeline(
     auto try_apply_resource_backed_render_rebind =
         [&]() noexcept
         {
+            // A null knife context is the explicit finish-only contract. Keep
+            // stale resource-swap state from ever changing the live knife model.
+            if (knife_context == nullptr)
+            {
+                return false;
+            }
+
             const auto watched_xuid = g_hook_state.watched_xuid.load();
             const auto force_log_rebind_gate = xuid != 0 && watched_xuid == xuid;
 
@@ -52426,7 +56639,11 @@ bool TryApplyStandardWeaponAppearancePipeline(
             verify_issue))
     {
         std::vector<PendingWeaponRefreshRequest> requests;
-        if (payload.needs_refresh)
+        if (payload.needs_refresh &&
+            !HasAppliedSignature(
+                g_hook_state.refreshed_weapon_signatures,
+                binding.resolved.carrier_entity_index,
+                desired_signature))
         {
             requests.push_back(
                 {binding.resolved.carrier_entity_index,
@@ -52506,6 +56723,11 @@ bool TryApplyStandardWeaponAppearancePipeline(
         return true;
     }
 
+    if (already_applied)
+    {
+        g_hook_state.refreshed_weapon_signatures.erase(binding.resolved.carrier_entity_index);
+    }
+
     result.stage = WeaponAppearanceStage::Validate;
     WeaponAppearanceSnapshot snapshot {};
     if (!TryCaptureWeaponAppearanceSnapshot(
@@ -52565,10 +56787,10 @@ bool TryApplyStandardWeaponAppearancePipeline(
             applied;
     }
 
+    std::vector<PendingWeaponRefreshRequest> exact_apply_refresh_requests;
     if (applied && payload.needs_refresh)
     {
-        std::vector<PendingWeaponRefreshRequest> requests;
-        requests.push_back(
+        exact_apply_refresh_requests.push_back(
             {binding.resolved.carrier_entity_index,
              binding.carrier_entity,
              binding.carrier_item_view,
@@ -52579,7 +56801,16 @@ bool TryApplyStandardWeaponAppearancePipeline(
              false,
              keychain_profile != nullptr ? std::optional<nskinzcs2::model::KeychainProfile> {*keychain_profile}
                                          : std::nullopt});
-        applied = TryProcessPendingWeaponRefreshRequests(offsets, requests) && applied;
+        // Knife refresh helpers are epoch-gated. When the HUD owns a distinct
+        // item view, defer the primary dispatch so both carriers refresh in the
+        // same helper epoch after the primary state has been verified.
+        if (!hud_requires_independent_apply)
+        {
+            applied =
+                TryProcessPendingWeaponRefreshRequests(offsets, exact_apply_refresh_requests) &&
+                applied;
+            exact_apply_refresh_requests.clear();
+        }
     }
 
     if (!applied)
@@ -52616,9 +56847,9 @@ bool TryApplyStandardWeaponAppearancePipeline(
         {
             RememberTrackedWeaponAppearanceRestorePoint(binding, snapshot, desired_signature, xuid);
         }
-        std::vector<PendingWeaponRefreshRequest> hud_requests;
         if (hud_requires_independent_apply)
         {
+            const auto request_count_before_hud = exact_apply_refresh_requests.size();
             RuntimeWeaponAppearanceBinding hud_binding {};
             nskinzcs2::runtime::WeaponAppearanceSnapshot hud_snapshot {};
             bool hud_snapshot_valid = false;
@@ -52664,9 +56895,10 @@ bool TryApplyStandardWeaponAppearancePipeline(
                     trace.hud_weapon_item_view,
                     applied_entity_indices,
                     applied_weapon_writes,
-                    &hud_requests,
+                    &exact_apply_refresh_requests,
                     keychain_profile);
-            const auto hud_refresh_queued = !hud_requests.empty();
+            const auto hud_refresh_queued =
+                exact_apply_refresh_requests.size() > request_count_before_hud;
             if (hud_refresh_queued)
             {
                 applied_entity_indices.insert(trace.hud_weapon_entity_index);
@@ -52693,9 +56925,9 @@ bool TryApplyStandardWeaponAppearancePipeline(
                 LogProfileDiagnosticOnce(desired_signature ^ 0x7410ull, stream.str());
             }
         }
-        if (!hud_requests.empty())
+        if (!exact_apply_refresh_requests.empty())
         {
-            TryProcessPendingWeaponRefreshRequests(offsets, hud_requests);
+            TryProcessPendingWeaponRefreshRequests(offsets, exact_apply_refresh_requests);
         }
         applied_entity_indices.insert(trace.owned_weapon_entity_index);
         applied_entity_indices.insert(binding.resolved.carrier_entity_index);
@@ -53422,7 +57654,10 @@ void RunDemoKeychainController(
         return;
     }
 
-    if (keychain_profile == nullptr || desired_keychain_kit <= 0)
+    const auto explicit_keychain_clear =
+        keychain_profile != nullptr && keychain_profile->explicit_clear;
+    if (keychain_profile == nullptr ||
+        (desired_keychain_kit <= 0 && !explicit_keychain_clear))
     {
         controller_state.last_issue.clear();
         controller_state.state = nskinzcs2::runtime::DemoKeychainState::Idle;
@@ -53456,7 +57691,8 @@ void RunDemoKeychainController(
             live_keychain_def_id == static_cast<std::uint32_t>(desired_keychain_kit) &&
             live_keychain_seed == 0u;
         const auto module_applied = live_module_matches || apply_live_module();
-        const auto visual_refresh_attempted = !live_module_matches && module_applied;
+        const auto visual_refresh_attempted =
+            !explicit_keychain_clear && !live_module_matches && module_applied;
         const auto visual_refresh_succeeded =
             !visual_refresh_attempted ||
             TryRefreshKeychainModuleVisualState(
@@ -53516,6 +57752,14 @@ void RunDemoKeychainController(
         return;
     }
 
+    if (explicit_keychain_clear)
+    {
+        controller_state.last_issue.clear();
+        controller_state.state = nskinzcs2::runtime::DemoKeychainState::Applied;
+        StoreDemoKeychainControllerState(std::move(controller_state));
+        return;
+    }
+
     controller_state.last_issue =
         L"No live keychain module was found on the current demo weapon. Existing-module-only mode can modify only weapons that already have a visible keychain.";
     {
@@ -53570,7 +57814,7 @@ void ApplyManualDemoKeychainModuleUpdates(
         }
 
         const auto desired_keychain_kit = std::max(0, keychain_profile.keychain_kit);
-        if (desired_keychain_kit <= 0)
+        if (desired_keychain_kit <= 0 && !keychain_profile.explicit_clear)
         {
             continue;
         }
@@ -53737,7 +57981,8 @@ void ApplyManualDemoKeychainModuleUpdates(
                     keychain_module_entity,
                     g_hook_state.schema_offsets,
                     &keychain_profile);
-            const auto visual_refresh_attempted = !live_module_matches && module_applied;
+            const auto visual_refresh_attempted =
+                !keychain_profile.explicit_clear && !live_module_matches && module_applied;
             const auto visual_refresh_succeeded =
                 !visual_refresh_attempted ||
                 TryRefreshKeychainModuleVisualState(
@@ -53816,6 +58061,14 @@ void ApplyManualDemoKeychainModuleUpdates(
                 << L", base_item=" << keychain_profile.base_item
                 << L", desired_keychain_kit=" << desired_keychain_kit << L".";
             WarnOnceForRuntimeSignature(profile_signature ^ 0x4B43574Eull, stream.str());
+        }
+        else if (!found_existing_module && keychain_profile.explicit_clear)
+        {
+            std::wstringstream stream;
+            stream << L"Manual demo keychain clear already satisfied because the saved weapon has no live keychain module: "
+                << L"xuid=" << keychain_profile.xuid
+                << L", base_item=" << keychain_profile.base_item << L".";
+            LogProfileDiagnosticOnce(profile_signature ^ 0x4B43434Cull, stream.str());
         }
         else if (!found_existing_module)
         {
@@ -53928,6 +58181,40 @@ bool TryCaptureWeaponSkinRefreshInstructionWindow(
         issue = L"Weapon refresh helper patch window is outside client.dll.";
         return false;
     }
+    // Build 2000885's native helper gates its material cleanup on the two
+    // adjacent composite-material vector counts at entity+0xAA8/0xAC0:
+    //
+    //   cmp dword ptr [rbx+primary], 0
+    //   jg  cleanup
+    //   cmp dword ptr [rbx+companion], 0
+    //   jle skip
+    //
+    // Positive finishes temporarily replace the first displacement with the
+    // attribute-vector count to request a rebuild. Explicit vanilla must run
+    // this exact native window unpatched so the stale composite material is
+    // detected and released by CS2 itself. Validate the complete instruction
+    // window before either path is allowed.
+    std::array<std::uint8_t, 18> window {};
+    if (!SafeReadBytes(patch_address - 2, window.data(), window.size()) ||
+        window[0] != 0x83 || window[1] != 0xBB ||
+        window[4] != 0x00 || window[5] != 0x00 || window[6] != 0x00 ||
+        window[7] != 0x7F || window[8] != 0x09 ||
+        window[9] != 0x83 || window[10] != 0xBB ||
+        window[13] != 0x00 || window[14] != 0x00 || window[15] != 0x00 ||
+        window[16] != 0x7E || window[17] != 0x18)
+    {
+        issue = L"Weapon refresh helper material-gate instruction window does not match the verified build.";
+        return false;
+    }
+
+    std::uint16_t companion_offset = 0;
+    if (!SafeReadValue(patch_address + 9, companion_offset) || companion_offset == 0)
+    {
+        issue = L"Weapon refresh helper companion material-vector displacement could not be decoded.";
+        return false;
+    }
+
+    binding.original_companion_offset = companion_offset;
     binding.instruction_window_valid = true;
     return true;
 }
@@ -72816,6 +77103,29 @@ void PollGameThreadStateModern()
                     << L", econ_attribute_append_ready="
                     << (offsets.attribute_list_attributes_operation != nullptr &&
                         offsets.attribute_list_attributes_element_size == offsets.econ_item_attribute_size ? 1 : 0)
+                    << L", composite_materials_offset=0x" << std::hex << std::uppercase
+                    << static_cast<std::uint64_t>(offsets.item_view_composite_materials)
+                    << L", composite_materials_operation="
+                    << FormatPointer(reinterpret_cast<void*>(offsets.item_view_composite_materials_operation))
+                    << std::dec << std::nouppercase
+                    << L", composite_materials_element_size="
+                    << offsets.item_view_composite_materials_element_size
+                    << L", composite_materials_type="
+                    << NarrowToWide(offsets.item_view_composite_materials_type_name)
+                    << L", composite_materials_owner="
+                    << NarrowToWide(offsets.item_view_composite_materials_owner_type_name)
+                    << L", composite_assembly_offset=0x" << std::hex << std::uppercase
+                    << static_cast<std::uint64_t>(offsets.item_view_composite_material_assembly_procedures)
+                    << L", composite_assembly_operation="
+                    << FormatPointer(reinterpret_cast<void*>(
+                           offsets.item_view_composite_material_assembly_procedures_operation))
+                    << std::dec << std::nouppercase
+                    << L", composite_assembly_element_size="
+                    << offsets.item_view_composite_material_assembly_procedures_element_size
+                    << L", composite_assembly_type="
+                    << NarrowToWide(offsets.item_view_composite_material_assembly_procedures_type_name)
+                    << L", composite_assembly_owner="
+                    << NarrowToWide(offsets.item_view_composite_material_assembly_procedures_owner_type_name)
                     << L".";
                 nskinzcs2::Logger::Info(stream.str());
             }
@@ -73315,15 +77625,35 @@ void PollGameThreadStateModern()
             observer_resolution,
             bridge_resolution,
             heuristic_watched_xuid);
-    const auto raw_watched_xuid = watched_resolution.watched_xuid;
+    const auto resolved_watched_xuid = watched_resolution.watched_xuid;
+    // A single enabled/live knife profile is an explicit target selection.
+    // Observer and HUD evidence can disappear or briefly point at another
+    // pawn while weapons are switched in a demo; allowing that transient
+    // consumer state to override the configured target caused a full runtime
+    // teardown on every knife draw.
+    const auto raw_watched_xuid =
+        preferred_knife_target_xuid != 0
+        ? preferred_knife_target_xuid
+        : resolved_watched_xuid;
     auto watched_xuid = raw_watched_xuid;
     constexpr std::uint32_t kWatchedXuidMissingConfirmationThreshold = 3;
+    constexpr std::uint32_t kWatchedXuidSwitchConfirmationThreshold = 3;
     const auto previous_watched_xuid = runtime_entities.last_watched_xuid;
     const auto previous_watched_is_live_target =
         previous_watched_xuid != 0 &&
         target_xuids.contains(previous_watched_xuid) &&
         pawn_entities_by_xuid.contains(previous_watched_xuid);
-    if (raw_watched_xuid == 0 && previous_watched_is_live_target)
+    const auto raw_watched_is_configured_target =
+        raw_watched_xuid != 0 &&
+        target_xuids.contains(raw_watched_xuid) &&
+        pawn_entities_by_xuid.contains(raw_watched_xuid);
+    if (previous_watched_is_live_target && raw_watched_xuid == previous_watched_xuid)
+    {
+        runtime_entities.watched_xuid_missing_confirmations = 0;
+        runtime_entities.pending_watched_xuid = 0;
+        runtime_entities.pending_watched_xuid_confirmations = 0;
+    }
+    else if (previous_watched_is_live_target && !raw_watched_is_configured_target)
     {
         runtime_entities.watched_xuid_missing_confirmations =
             std::min(
@@ -73333,15 +77663,49 @@ void PollGameThreadStateModern()
         // player while the previously confirmed pawn remains live. Treating
         // that transient zero as a switch tears down m_hMyWearables and
         // creates an orphan wearable. Preserve the last confirmed target
-        // until a new non-zero target is observed or the old pawn disappears;
-        // seek and entity-list changes have independent rebuild reasons.
+        // while an unconfigured observer pawn is reported or the bridge is
+        // temporarily missing; seek and entity-list changes have independent
+        // rebuild reasons.
         watched_xuid = previous_watched_xuid;
+        runtime_entities.pending_watched_xuid = 0;
+        runtime_entities.pending_watched_xuid_confirmations = 0;
+    }
+    else if (previous_watched_is_live_target && raw_watched_xuid != previous_watched_xuid)
+    {
+        runtime_entities.watched_xuid_missing_confirmations = 0;
+        if (runtime_entities.pending_watched_xuid != raw_watched_xuid)
+        {
+            runtime_entities.pending_watched_xuid = raw_watched_xuid;
+            runtime_entities.pending_watched_xuid_confirmations = 1;
+        }
+        else
+        {
+            runtime_entities.pending_watched_xuid_confirmations =
+                std::min(
+                    runtime_entities.pending_watched_xuid_confirmations + 1u,
+                    kWatchedXuidSwitchConfirmationThreshold);
+        }
+
+        if (runtime_entities.pending_watched_xuid_confirmations <
+            kWatchedXuidSwitchConfirmationThreshold)
+        {
+            watched_xuid = previous_watched_xuid;
+        }
+        else
+        {
+            runtime_entities.pending_watched_xuid = 0;
+            runtime_entities.pending_watched_xuid_confirmations = 0;
+        }
     }
     else
     {
         runtime_entities.watched_xuid_missing_confirmations = 0;
+        runtime_entities.pending_watched_xuid = 0;
+        runtime_entities.pending_watched_xuid_confirmations = 0;
+        watched_xuid = raw_watched_is_configured_target ? raw_watched_xuid : 0;
     }
     g_hook_state.watched_xuid.store(watched_xuid);
+    bool watched_knife_model_pipeline_requested = false;
     if (watched_xuid != 0)
     {
         if (const auto* watched_knife_profile =
@@ -73350,10 +77714,12 @@ void PollGameThreadStateModern()
         {
             const auto watched_knife_request =
                 nskinzcs2::runtime::BuildKnifeAppearanceRequest(*watched_knife_profile);
+            watched_knife_model_pipeline_requested =
+                watched_knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish &&
+                watched_knife_request.model_definition != 0;
             target_knife_model_swap_requested =
                 target_knife_model_swap_requested ||
-                (watched_knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish &&
-                    watched_knife_request.model_definition != 0);
+                watched_knife_model_pipeline_requested;
         }
     }
     const auto emit_watched_knife_deep_trace =
@@ -73397,8 +77763,12 @@ void PollGameThreadStateModern()
         std::wstringstream stream;
         stream << L"Watched player resolved: watched_xuid=" << watched_xuid
             << L", raw_watched_xuid=" << raw_watched_xuid
+            << L", resolved_watched_xuid=" << resolved_watched_xuid
             << L", missing_confirmations="
             << runtime_entities.watched_xuid_missing_confirmations
+            << L", pending_switch_xuid=" << runtime_entities.pending_watched_xuid
+            << L", pending_switch_confirmations="
+            << runtime_entities.pending_watched_xuid_confirmations
             << L", watched_source=" << watched_resolution.resolution_source
             << L", heuristic_watched_xuid=" << heuristic_watched_xuid
             << L", observer_state="
@@ -73451,7 +77821,9 @@ void PollGameThreadStateModern()
         ResetRuntimeState(
             rebuild_reason,
             AttributeBindingReleaseModeForRebuildReason(rebuild_decision.reason),
-            rebuild_invalidates_wearable_factory);
+            rebuild_invalidates_wearable_factory,
+            nskinzcs2::runtime::ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(
+                rebuild_decision.reason));
         UpdateKnifeRefreshHelperEpochForRebuildReason(rebuild_decision.reason);
         runtime_entities.last_demo_tick = demo_tick;
         runtime_entities.last_demo_paused = demo_paused;
@@ -73700,7 +78072,11 @@ void PollGameThreadStateModern()
         }
     }
 
-    if (has_knife_profile && watched_xuid != 0)
+    // Finish-only profiles preserve the live model and animation set. The
+    // animation/model-owner discovery below is only needed by an actual model
+    // replacement; running it for every finish-only poll was the remaining
+    // high-cost path when the watched player drew a knife.
+    if (has_knife_profile && watched_xuid != 0 && watched_knife_model_pipeline_requested)
     {
         if (const auto watched_player = runtime_entities.players_by_xuid.find(watched_xuid);
             watched_player != runtime_entities.players_by_xuid.end())
@@ -73945,6 +78321,7 @@ void PollGameThreadStateModern()
             std::uint64_t weapon_mesh_group_mask = 0;
             bool use_temporary_world_refresh_model = false;
             bool prefer_standard_weapon_appearance_pipeline = false;
+            bool allow_knife_model_rebind = false;
             nskinzcs2::runtime::KnifeAppearanceRequest knife_request {};
             nskinzcs2::runtime::KnifeRuntimeContext knife_context {};
             nskinzcs2::runtime::KnifeApplyGateResult knife_gate {};
@@ -73954,6 +78331,61 @@ void PollGameThreadStateModern()
                 ++matched_profiles;
 
                 knife_request = nskinzcs2::runtime::BuildKnifeAppearanceRequest(*knife_profile);
+                if (knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::FinishOnly)
+                {
+                    auto stable_finish_request = knife_request;
+                    stable_finish_request.model_definition = 0;
+                    const auto stable_finish_profile =
+                        BuildKnifeRuntimeWeaponProfile(
+                            *knife_profile,
+                            stable_finish_request,
+                            current_definition_index);
+                    const auto stable_finish_signature =
+                        BuildKnifeProfileApplySignature(
+                            stable_finish_request,
+                            xuid,
+                            current_definition_index,
+                            kTargetTagWeaponEntity);
+                    const auto refresh_signature_matches =
+                        HasAppliedSignature(
+                            g_hook_state.refreshed_weapon_signatures,
+                            entity_index,
+                            stable_finish_signature);
+                    int verified_definition_index = 0;
+                    const auto definition_state_matches =
+                        TryReadItemDefinitionIndex(
+                            weapon_item_view,
+                            g_hook_state.schema_offsets,
+                            verified_definition_index) &&
+                        verified_definition_index == current_definition_index;
+                    const auto attribute_state_matches =
+                        VerifyKnifeFinishRefreshAttributeValues(
+                            weapon_item_view,
+                            g_hook_state.schema_offsets,
+                            stable_finish_profile,
+                            nullptr);
+                    if (nskinzcs2::runtime::ShouldUseStableKnifeFinishFastPath(
+                            true,
+                            true,
+                            false,
+                            refresh_signature_matches,
+                            definition_state_matches,
+                            attribute_state_matches))
+                    {
+                        applied_weapon_entities.insert(entity_index);
+                        prioritized_weapon_entities.insert(entity_index);
+                        std::wstringstream stream;
+                        stream << L"Knife finish-only pre-context fast path active for XUID " << xuid
+                            << L": entity=" << entity_index
+                            << L", definition=" << current_definition_index
+                            << L", paint=" << stable_finish_profile.paint_kit
+                            << L", model/animation discovery and material refresh skipped.";
+                        LogProfileDiagnosticOnce(
+                            stable_finish_signature ^ 0x505245535441424Cull,
+                            stream.str());
+                        continue;
+                    }
+                }
                 knife_context =
                     ResolveKnifeRuntimeContext(
                         entity_list,
@@ -74117,7 +78549,7 @@ void PollGameThreadStateModern()
                             BuildKnifeFinishOnlyRuntimePathText(),
                             definition_override_requested
                                 ? L"Using finish-only runtime with knife definition override (GitHub-style path)."
-                                : BuildKnifeRuntimeReasonText(knife_gate.reason));
+                                : L"Using the exact carrier/material refresh path; the live knife model and definition are preserved.");
                     }
                 }
 
@@ -74142,9 +78574,11 @@ void PollGameThreadStateModern()
                         current_definition_index);
                 apply_linked_weapon_writes = false;
                 require_exact_hud_viewmodel = false;
+                const auto knife_pipeline_route =
+                    nskinzcs2::runtime::ResolveKnifeAppearancePipelineRoute(knife_gate);
                 prefer_standard_weapon_appearance_pipeline =
-                    knife_gate.allow_model_writes &&
-                    knife_gate.resolved_mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish;
+                    knife_pipeline_route.use_exact_appearance_pipeline;
+                allow_knife_model_rebind = knife_pipeline_route.allow_model_rebind;
                 weapon_signature =
                     BuildKnifeProfileApplySignature(runtime_knife_request, xuid, current_definition_index, kTargetTagWeaponEntity);
                 weapon_mesh_group_mask = 1ull;
@@ -74199,7 +78633,7 @@ void PollGameThreadStateModern()
                         keychain_profile);
                 weapon_mesh_group_mask =
                     ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
-                if (keychain_only_profile &&
+                if ((keychain_only_profile || !ProfileHasExplicitPaintIntent(effective_profile)) &&
                     !TryReadWeaponMeshGroupMask(entity, g_hook_state.schema_offsets, weapon_mesh_group_mask))
                 {
                     weapon_mesh_group_mask =
@@ -74214,6 +78648,53 @@ void PollGameThreadStateModern()
                     continue;
                 }
             }
+            // Once the material helper has completed, finish-only knife state
+            // is durable while both its econ fields and dynamic attributes
+            // still match. The exact path scans render/HUD carriers before it
+            // can discover that no further work is needed, which made an
+            // active first-person knife repeatedly consume a full CPU core.
+            // Preserve the live model and take a verified no-write fast path.
+            if (is_runtime_knife_profile &&
+                prefer_standard_weapon_appearance_pipeline &&
+                !allow_knife_model_rebind &&
+                HasAppliedSignature(
+                    g_hook_state.refreshed_weapon_signatures,
+                    entity_index,
+                    weapon_signature))
+            {
+                int verified_definition_index = 0;
+                const auto definition_state_matches =
+                    TryReadItemDefinitionIndex(
+                        weapon_item_view,
+                        g_hook_state.schema_offsets,
+                        verified_definition_index) &&
+                    verified_definition_index == current_definition_index;
+                const auto attribute_state_matches =
+                    VerifyKnifeFinishRefreshAttributeValues(
+                        weapon_item_view,
+                        g_hook_state.schema_offsets,
+                        effective_profile,
+                        keychain_profile);
+                if (nskinzcs2::runtime::ShouldUseStableKnifeFinishFastPath(
+                        true,
+                        true,
+                        allow_knife_model_rebind,
+                        true,
+                        definition_state_matches,
+                        attribute_state_matches))
+                {
+                    applied_weapon_entities.insert(entity_index);
+                    std::wstringstream stream;
+                    stream << L"Knife finish-only stable fast path active for XUID " << xuid
+                        << L": entity=" << entity_index
+                        << L", definition=" << current_definition_index
+                        << L", paint=" << effective_profile.paint_kit
+                        << L", exact carrier scan and material refresh skipped.";
+                    LogProfileDiagnosticOnce(weapon_signature ^ 0x535441424C45ull, stream.str());
+                    continue;
+                }
+            }
+
             bool direct_applied = false;
             bool linked_applied = false;
             bool hud_viewmodel_applied = false;
@@ -74274,7 +78755,7 @@ void PollGameThreadStateModern()
                         weapon_signature,
                         weapon_mesh_group_mask,
                         allow_knife_definition_override,
-                        knife_profile != nullptr ? &knife_context : nullptr,
+                        allow_knife_model_rebind ? &knife_context : nullptr,
                         applied_weapon_entities,
                         applied_weapons);
                     handled_by_exact_weapon_pipeline = direct_applied;
@@ -74354,7 +78835,7 @@ void PollGameThreadStateModern()
                         weapon_signature,
                         weapon_mesh_group_mask,
                         allow_knife_definition_override,
-                        knife_profile != nullptr ? &knife_context : nullptr,
+                        allow_knife_model_rebind ? &knife_context : nullptr,
                         applied_weapon_entities,
                         applied_weapons);
                 }
@@ -74443,8 +78924,15 @@ void PollGameThreadStateModern()
                                     current_definition_index,
                                     kTargetTagWeaponViewModel,
                                     keychain_profile);
-                            const auto hud_mesh_group_mask =
+                            auto hud_mesh_group_mask =
                                 ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
+                            if (!ProfileHasExplicitPaintIntent(effective_profile))
+                            {
+                                TryReadWeaponMeshGroupMask(
+                                    hud_weapon_entity,
+                                    g_hook_state.schema_offsets,
+                                    hud_mesh_group_mask);
+                            }
                             hud_viewmodel_applied =
                                 TryApplyWeaponMeshGroupMask(
                                     hud_weapon_entity_index,
@@ -74718,6 +79206,7 @@ void PollGameThreadStateModern()
                 std::uint64_t weapon_mesh_group_mask = 0;
                 bool use_temporary_world_refresh_model = false;
                 bool prefer_standard_weapon_appearance_pipeline = false;
+                bool allow_knife_model_rebind = false;
                 nskinzcs2::runtime::KnifeAppearanceRequest knife_request {};
                 nskinzcs2::runtime::KnifeRuntimeContext knife_context {};
 
@@ -74786,9 +79275,11 @@ void PollGameThreadStateModern()
                             runtime_knife_request,
                             current_definition_index);
                     apply_linked_weapon_writes = false;
+                    const auto knife_pipeline_route =
+                        nskinzcs2::runtime::ResolveKnifeAppearancePipelineRoute(gate);
                     prefer_standard_weapon_appearance_pipeline =
-                        gate.allow_model_writes &&
-                        gate.resolved_mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish;
+                        knife_pipeline_route.use_exact_appearance_pipeline;
+                    allow_knife_model_rebind = knife_pipeline_route.allow_model_rebind;
                     weapon_signature =
                         BuildKnifeProfileApplySignature(runtime_knife_request, xuid, current_definition_index, kTargetTagWeaponEntity);
                     weapon_mesh_group_mask = 1ull;
@@ -74874,7 +79365,7 @@ void PollGameThreadStateModern()
                             keychain_profile);
                     weapon_mesh_group_mask =
                         ResolveWeaponMeshGroupMaskImpl(normalized_base_item, effective_profile.paint_kit);
-                    if (keychain_only_profile &&
+                    if ((keychain_only_profile || !ProfileHasExplicitPaintIntent(effective_profile)) &&
                         !TryReadWeaponMeshGroupMask(entity, g_hook_state.schema_offsets, weapon_mesh_group_mask))
                     {
                         weapon_mesh_group_mask =
@@ -74951,7 +79442,7 @@ void PollGameThreadStateModern()
                                 weapon_signature,
                                 weapon_mesh_group_mask,
                                 allow_knife_definition_override,
-                                nullptr,
+                                allow_knife_model_rebind ? &knife_context : nullptr,
                                 applied_weapon_entities,
                                 applied_weapons);
                         if (!handled_by_exact_weapon_pipeline)
@@ -75317,7 +79808,66 @@ void PollGameThreadStateModern()
             }
 
             ++matched_profiles;
-            const auto request = nskinzcs2::runtime::BuildGloveAppearanceRequest(*glove_profile);
+            auto effective_glove_profile = *glove_profile;
+            auto request = nskinzcs2::runtime::BuildGloveAppearanceRequest(effective_glove_profile);
+            if (request.paint_kit == 0 && !request.explicit_vanilla_finish)
+            {
+                continue;
+            }
+            if (request.paint_kit == 0 && request.explicit_vanilla_finish)
+            {
+                std::uint8_t team_number = 0;
+                const auto team_resolved =
+                    g_hook_state.schema_offsets.base_entity_team_num != 0 &&
+                    SafeReadField(
+                        player_binding.pawn_entity,
+                        g_hook_state.schema_offsets.base_entity_team_num,
+                        team_number);
+                const auto default_glove_definition =
+                    team_resolved
+                        ? nskinzcs2::runtime::ResolveDefaultGloveDefinitionForTeam(team_number)
+                        : 0;
+                if (default_glove_definition == 0)
+                {
+                    std::wstringstream stream;
+                    stream << L"Default glove restore for XUID " << xuid
+                        << L" was skipped because the live team could not be resolved"
+                        << L": team_offset=0x" << std::hex
+                        << static_cast<std::uint64_t>(g_hook_state.schema_offsets.base_entity_team_num)
+                        << std::dec
+                        << L", team=" << static_cast<int>(team_number) << L".";
+                    WarnOnceForRuntimeSignature(
+                        BuildGloveProfileApplySignature(
+                            effective_glove_profile,
+                            xuid,
+                            0,
+                            kTargetTagGloveEntity) ^
+                            0xD3FA017ull,
+                        stream.str());
+                    continue;
+                }
+
+                effective_glove_profile.mode = nskinzcs2::model::GloveProfileMode::ModelAndFinish;
+                effective_glove_profile.model_definition = default_glove_definition;
+                effective_glove_profile.quality = 0;
+                effective_glove_profile.seed = 0;
+                effective_glove_profile.wear = nskinzcs2::model::kMinimumCosmeticWear;
+                request = nskinzcs2::runtime::BuildGloveAppearanceRequest(effective_glove_profile);
+
+                std::wstringstream stream;
+                stream << L"Resolved stock team glove for XUID " << xuid
+                    << L": team=" << static_cast<int>(team_number)
+                    << L", definition=" << default_glove_definition
+                    << L", paint=0.";
+                LogProfileDiagnosticOnce(
+                    BuildGloveProfileApplySignature(
+                        effective_glove_profile,
+                        xuid,
+                        default_glove_definition,
+                        kTargetTagGlovePawn) ^
+                        0xD3FA018ull,
+                    stream.str());
+            }
             if (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
                 request.model_definition == 0)
             {
@@ -75325,7 +79875,7 @@ void PollGameThreadStateModern()
                 stream << L"Glove profile for XUID " << xuid
                     << L" is invalid: model_and_finish requires a non-zero model_definition.";
                 WarnOnceForRuntimeSignature(
-                    BuildGloveProfileApplySignature(*glove_profile, xuid, 0, kTargetTagGloveEntity) ^ 0x10ull,
+                    BuildGloveProfileApplySignature(effective_glove_profile, xuid, 0, kTargetTagGloveEntity) ^ 0x10ull,
                     stream.str());
                 continue;
             }
@@ -75344,7 +79894,7 @@ void PollGameThreadStateModern()
                         << L" is invalid: paint kit " << request.paint_kit
                         << L" does not match the requested glove definition path.";
                     WarnOnceForRuntimeSignature(
-                        BuildGloveProfileApplySignature(*glove_profile, xuid, compatibility_definition, kTargetTagGloveEntity) ^ 0x101ull,
+                        BuildGloveProfileApplySignature(effective_glove_profile, xuid, compatibility_definition, kTargetTagGloveEntity) ^ 0x101ull,
                         stream.str());
                     continue;
                 }
@@ -75376,7 +79926,7 @@ void PollGameThreadStateModern()
                 const auto carrier_valid = direct_pawn_glove_valid;
                 const auto glove_signature =
                     BuildGloveProfileApplySignature(
-                        *glove_profile,
+                        effective_glove_profile,
                         xuid,
                         carrier_valid ? current_definition_index : 0,
                         kTargetTagGlovePawn);
@@ -75641,7 +80191,7 @@ void PollGameThreadStateModern()
                      g_hook_state.schema_offsets.combat_character_my_wearables_storage_size != 0x18))
                 {
                     const auto warning_signature =
-                        BuildGloveProfileApplySignature(*glove_profile, xuid, 0, kTargetTagGloveEntity) ^ 0x176ull;
+                        BuildGloveProfileApplySignature(effective_glove_profile, xuid, 0, kTargetTagGloveEntity) ^ 0x176ull;
                     WarnOnceForRuntimeSignature(
                         warning_signature,
                         L"Runtime glove creation deferred: m_hMyWearables Schema vector operation is not verified for a 24-byte C_NetworkUtlVectorBase<CHandle<C_EconWearable>>.");
@@ -75703,7 +80253,7 @@ void PollGameThreadStateModern()
                     else if (!create_issue.empty())
                     {
                         const auto warning_signature =
-                            BuildGloveProfileApplySignature(*glove_profile, xuid, 0, kTargetTagGloveEntity);
+                            BuildGloveProfileApplySignature(effective_glove_profile, xuid, 0, kTargetTagGloveEntity);
                         std::wstringstream stream;
                         stream << L"Runtime glove wearable creation failed for XUID " << xuid << L": " << create_issue;
                         WarnOnceForRuntimeSignature(warning_signature, stream.str());
@@ -75740,7 +80290,7 @@ void PollGameThreadStateModern()
                     : kTargetTagGloveEntity;
             const auto glove_signature =
                 BuildGloveProfileApplySignature(
-                    *glove_profile,
+                    effective_glove_profile,
                     xuid,
                     effective_glove_definition_index,
                     glove_target_tag);
@@ -76053,7 +80603,7 @@ void PollGameThreadStateModern()
             const auto applied_glove_signature =
                 using_pawn_render_fallback
                     ? BuildGloveProfileApplySignature(
-                        *glove_profile,
+                        effective_glove_profile,
                         xuid,
                         requested_glove_definition_index,
                         glove_target_tag)
@@ -76950,6 +81500,8 @@ void HookedClientFrameStageNotify(void* this_ptr, int cur_stage)
 
     if (cur_stage == kCs2FrameRenderPass)
     {
+        DispatchPendingLocalDemoCommandAtFrameRenderPassGuarded();
+
         if (g_hook_state.pending_runtime_reset_after_seek.exchange(false))
         {
             ResetRuntimeState(
@@ -77220,6 +81772,20 @@ bool nskinzcs2::runtime::KnifeRefreshHelperPolicyArmsOnRebuildReason(
     }
 }
 
+bool nskinzcs2::runtime::ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(
+    const RuntimeRebuildReason reason) noexcept
+{
+    // Pause/resume and spectator-target transitions rebuild only the runtime
+    // discovery cache. Source 2 keeps the same econ entities and their applied
+    // material state alive, so forgetting the verified signatures here made
+    // every later knife draw invoke the expensive material helper again.
+    // Each fast path still verifies definition and attributes before trusting
+    // these signatures. Seeks/full updates/entity-list changes may replace the
+    // entities and therefore must invalidate them.
+    return reason == RuntimeRebuildReason::PauseResume ||
+        reason == RuntimeRebuildReason::WatchedPlayerSwitch;
+}
+
 bool nskinzcs2::runtime::ShouldAllowWeaponRefreshHelperDispatch(
     const bool knife_request,
     const KnifeRefreshHelperPolicy policy,
@@ -77246,6 +81812,70 @@ bool nskinzcs2::runtime::ShouldConsumeKnifeRefreshHelperEpoch(
     const bool helper_succeeded) noexcept
 {
     return dispatched_knife_request && helper_succeeded;
+}
+
+bool nskinzcs2::runtime::ShouldDispatchKnifeRefreshWithInPlaceAttributes(
+    const bool knife_request,
+    const bool needs_skin_refresh,
+    const bool live_attribute_values_match) noexcept
+{
+    return knife_request && needs_skin_refresh && live_attribute_values_match;
+}
+
+bool nskinzcs2::runtime::ShouldUseKnifeVanillaTemporaryRefreshOverlay(
+    const bool knife_request,
+    const bool explicit_vanilla_finish,
+    const bool paint_attribute_present) noexcept
+{
+    static_cast<void>(paint_attribute_present);
+    // Explicit vanilla means removing the finish, not writing a synthetic
+    // paint-kit zero over an existing finish. Always enter the scoped clear
+    // path so both engine-owned attribute lists are emptied consistently.
+    return knife_request && explicit_vanilla_finish;
+}
+
+bool nskinzcs2::runtime::ShouldAllowVerifiedInPlaceKnifeInitializationRefresh(
+    const bool knife_request,
+    const bool needs_skin_refresh,
+    const bool live_attribute_values_match,
+    const bool refresh_signature_matches) noexcept
+{
+    return knife_request &&
+        needs_skin_refresh &&
+        live_attribute_values_match &&
+        !refresh_signature_matches;
+}
+
+bool nskinzcs2::runtime::ShouldUseStableKnifeFinishFastPath(
+    const bool knife_request,
+    const bool exact_appearance_pipeline,
+    const bool allow_model_rebind,
+    const bool refresh_signature_matches,
+    const bool definition_state_matches,
+    const bool attribute_state_matches) noexcept
+{
+    return knife_request &&
+        exact_appearance_pipeline &&
+        !allow_model_rebind &&
+        refresh_signature_matches &&
+        definition_state_matches &&
+        attribute_state_matches;
+}
+
+bool nskinzcs2::runtime::ShouldUseStableStandardWeaponMaterialFastPath(
+    const bool standard_weapon_request,
+    const bool refresh_signature_matches,
+    const bool definition_state_matches,
+    const bool attribute_state_matches,
+    const bool render_mesh_state_matches,
+    const bool hud_mesh_state_matches) noexcept
+{
+    return standard_weapon_request &&
+        refresh_signature_matches &&
+        definition_state_matches &&
+        attribute_state_matches &&
+        render_mesh_state_matches &&
+        hud_mesh_state_matches;
 }
 
 bool nskinzcs2::runtime::ShouldAllowAttributeListVectorMutationForProfile(
@@ -77904,6 +82534,24 @@ nskinzcs2::RuntimeController::RuntimeController(AppState& state, HMODULE module_
         {
             Logger::Warn(L"Local HLAE regression refresh event could not be created.");
         }
+
+        std::wstringstream command_event_name;
+        command_event_name << L"Local\\nSkinzCS2.DemoCommand." << GetCurrentProcessId();
+        automation_demo_command_event_ = CreateEventW(
+            nullptr,
+            FALSE,
+            FALSE,
+            command_event_name.str().c_str());
+        if (automation_demo_command_event_ != nullptr)
+        {
+            Logger::Info(
+                L"Local demo command event enabled: " + command_event_name.str() +
+                L" (sidecar: nSkinzCS2.demo-command.txt).");
+        }
+        else
+        {
+            Logger::Warn(L"Local demo command event could not be created.");
+        }
     }
 }
 
@@ -77914,6 +82562,11 @@ nskinzcs2::RuntimeController::~RuntimeController()
     {
         CloseHandle(automation_refresh_event_);
         automation_refresh_event_ = nullptr;
+    }
+    if (automation_demo_command_event_ != nullptr)
+    {
+        CloseHandle(automation_demo_command_event_);
+        automation_demo_command_event_ = nullptr;
     }
 }
 
@@ -78060,6 +82713,45 @@ void nskinzcs2::RuntimeController::WorkerLoopImpl()
             {
                 state_.RequestManualRefresh();
                 Logger::Info(L"Runtime Update requested by the local HLAE regression event.");
+            }
+
+            if (automation_demo_command_event_ != nullptr &&
+                WaitForSingleObject(automation_demo_command_event_, 0) == WAIT_OBJECT_0)
+            {
+                std::wstring module_path(MAX_PATH, L'\0');
+                const auto module_path_length = GetModuleFileNameW(
+                    module_instance_,
+                    module_path.data(),
+                    static_cast<DWORD>(module_path.size()));
+                module_path.resize(module_path_length);
+                const auto command_path =
+                    std::filesystem::path(module_path).parent_path() /
+                    L"nSkinzCS2.demo-command.txt";
+                std::ifstream command_stream(command_path);
+                std::string command_text;
+                if (command_stream && std::getline(command_stream, command_text))
+                {
+                    if (!command_text.empty() && command_text.back() == '\r')
+                    {
+                        command_text.pop_back();
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(g_hook_state.local_demo_command_mutex);
+                        g_hook_state.local_demo_command = command_text;
+                    }
+                    g_hook_state.local_demo_command_requested.store(
+                        true,
+                        std::memory_order_release);
+                    Logger::Info(
+                        L"Queued local demo command for the next FRAME_RENDER_PASS: " +
+                        NarrowToWide(command_text));
+                }
+                else
+                {
+                    Logger::Warn(
+                        L"Local demo command event fired, but the sidecar could not be read: " +
+                        command_path.wstring());
+                }
             }
 
             auto status = BuildStatusSkeleton();
@@ -78382,11 +83074,22 @@ nskinzcs2::RuntimeController::Bindings nskinzcs2::RuntimeController::TryResolveB
         engine_versions,
         bindings.engine_to_client.version);
 
-    bindings.engine_cvar.module_name = L"engine2.dll";
+    bindings.engine_cvar.module_name = L"tier0.dll";
     bindings.engine_cvar.address = ResolveCreateInterface(
         bindings.engine_cvar.module_name.c_str(),
         engine_cvar_versions,
         bindings.engine_cvar.version);
+    if (bindings.engine_cvar.address == nullptr)
+    {
+        // Current CS2 builds publish VEngineCvar007 from tier0.dll. Keep the
+        // historical engine2.dll route as a compatibility fallback for older
+        // builds and forks which still expose the interface there.
+        bindings.engine_cvar.module_name = L"engine2.dll";
+        bindings.engine_cvar.address = ResolveCreateInterface(
+            bindings.engine_cvar.module_name.c_str(),
+            engine_cvar_versions,
+            bindings.engine_cvar.version);
+    }
 
     bindings.game_ui_service.module_name = L"engine2.dll";
     bindings.game_ui_service.address = ResolveCreateInterface(

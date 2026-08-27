@@ -156,6 +156,7 @@ KnifeProfile ConvertLegacyKnifeProfile(const CosmeticProfile& profile)
             : KnifeProfileMode::FinishOnly;
     knife_profile.model_definition = profile.override_item;
     knife_profile.paint_kit = profile.paint_kit;
+    knife_profile.explicit_vanilla_finish = profile.explicit_vanilla_finish;
     knife_profile.quality = profile.quality;
     knife_profile.seed = profile.seed;
     knife_profile.stat_trak = profile.stat_trak;
@@ -253,6 +254,10 @@ static void from_json(const json& j, StickerProfile& value)
 
 static void to_json(json& j, const CosmeticProfile& value)
 {
+    const auto serialized_wear =
+        IsLegacyKnifeBaseItem(value.base_item) || value.base_item == 5028
+            ? value.wear
+            : NormalizeCosmeticWear(value.wear);
     j = json {
         {"name", value.name},
         {"enabled", value.enabled},
@@ -260,10 +265,11 @@ static void to_json(json& j, const CosmeticProfile& value)
         {"base_item", value.base_item},
         {"override_item", value.override_item},
         {"paint_kit", value.paint_kit},
+        {"explicit_vanilla_finish", value.explicit_vanilla_finish},
         {"quality", value.quality},
         {"seed", value.seed},
         {"stat_trak", value.stat_trak},
-        {"wear", value.wear},
+        {"wear", serialized_wear},
         {"custom_name", value.custom_name},
         {"stickers", value.stickers},
     };
@@ -277,10 +283,15 @@ static void from_json(const json& j, CosmeticProfile& value)
     value.base_item = j.value("base_item", 7);
     value.override_item = j.value("override_item", 0);
     value.paint_kit = j.value("paint_kit", 0);
+    value.explicit_vanilla_finish = j.value("explicit_vanilla_finish", false);
     value.quality = j.value("quality", 0);
     value.seed = j.value("seed", 0);
     value.stat_trak = j.value("stat_trak", 0);
-    value.wear = j.value("wear", 0.0000001f);
+    const auto parsed_wear = j.value("wear", kMinimumCosmeticWear);
+    value.wear =
+        IsLegacyKnifeBaseItem(value.base_item) || value.base_item == 5028
+            ? parsed_wear
+            : NormalizeCosmeticWear(parsed_wear);
     value.custom_name = j.value("custom_name", std::string());
 
     if (const auto stickers = j.find("stickers"); stickers != j.end() && stickers->is_array())
@@ -303,6 +314,7 @@ static void to_json(json& j, const KnifeProfile& value)
         {"mode", ToString(value.mode)},
         {"model_definition", value.model_definition},
         {"paint_kit", value.paint_kit},
+        {"explicit_vanilla_finish", value.explicit_vanilla_finish},
         {"quality", value.quality},
         {"seed", value.seed},
         {"stat_trak", value.stat_trak},
@@ -319,6 +331,7 @@ static void from_json(const json& j, KnifeProfile& value)
     value.mode = KnifeProfileModeFromString(j.value("mode", std::string("finish_only")));
     value.model_definition = j.value("model_definition", 0);
     value.paint_kit = j.value("paint_kit", 0);
+    value.explicit_vanilla_finish = j.value("explicit_vanilla_finish", false);
     value.quality = j.value("quality", 0);
     value.seed = j.value("seed", 0);
     value.stat_trak = j.value("stat_trak", 0);
@@ -335,9 +348,10 @@ static void to_json(json& j, const GloveProfile& value)
         {"mode", ToString(value.mode)},
         {"model_definition", value.model_definition},
         {"paint_kit", value.paint_kit},
+        {"explicit_vanilla_finish", value.explicit_vanilla_finish},
         {"quality", value.quality},
         {"seed", value.seed},
-        {"wear", value.wear},
+        {"wear", NormalizeCosmeticWear(value.wear)},
     };
 }
 
@@ -349,9 +363,10 @@ static void from_json(const json& j, GloveProfile& value)
     value.mode = GloveProfileModeFromString(j.value("mode", std::string("finish_only")));
     value.model_definition = j.value("model_definition", 0);
     value.paint_kit = j.value("paint_kit", 0);
+    value.explicit_vanilla_finish = j.value("explicit_vanilla_finish", false);
     value.quality = j.value("quality", 0);
     value.seed = j.value("seed", 0);
-    value.wear = j.value("wear", 0.0000001f);
+    value.wear = NormalizeCosmeticWear(j.value("wear", kMinimumCosmeticWear));
 }
 
 static void to_json(json& j, const KeychainProfile& value)
@@ -362,6 +377,7 @@ static void to_json(json& j, const KeychainProfile& value)
         {"xuid", value.xuid},
         {"base_item", value.base_item},
         {"keychain_kit", value.keychain_kit},
+        {"explicit_clear", value.explicit_clear},
     };
 }
 
@@ -372,12 +388,13 @@ static void from_json(const json& j, KeychainProfile& value)
     value.xuid = j.value("xuid", static_cast<std::uint64_t>(0));
     value.base_item = j.value("base_item", 7);
     value.keychain_kit = j.value("keychain_kit", 0);
+    value.explicit_clear = j.value("explicit_clear", false);
 }
 
 static void to_json(json& j, const ConfigDocument& value)
 {
     j = json {
-        {"version", 4},
+        {"version", 5},
         {"profiles", value.profiles},
         {"knife_profiles", value.knife_profiles},
         {"glove_profiles", value.glove_profiles},
@@ -388,7 +405,7 @@ static void to_json(json& j, const ConfigDocument& value)
 
 static void from_json(const json& j, ConfigDocument& value)
 {
-    value.version = j.value("version", 4);
+    value.version = j.value("version", 5);
     value.profiles = j.value("profiles", std::vector<CosmeticProfile> {});
     value.knife_profiles = j.value("knife_profiles", std::vector<KnifeProfile> {});
     value.glove_profiles = j.value("glove_profiles", std::vector<GloveProfile> {});
@@ -443,7 +460,7 @@ nskinzcs2::model::ConfigDocument nskinzcs2::ConfigStore::Load(const std::filesys
             parsed.keychain_profiles.push_back(model::KeychainProfile {});
         }
 
-        parsed.version = 4;
+        parsed.version = 5;
         return parsed;
     }
     catch (const std::exception&)
@@ -461,7 +478,7 @@ bool nskinzcs2::ConfigStore::Save(const std::filesystem::path& path, const model
     }
 
     auto normalized = document;
-    normalized.version = 4;
+    normalized.version = 5;
     normalized.knife_profiles = model::DeduplicateProfilesByXuidKeepLast(normalized.knife_profiles);
     normalized.keychain_profiles =
         model::DeduplicateKeychainProfilesKeepLast(normalized.keychain_profiles);
@@ -576,7 +593,8 @@ nskinzcs2::model::KeychainProfile* nskinzcs2::ConfigStore::FindMatchingKeychainP
         {
             return profile.enabled &&
                 profile.xuid == xuid &&
-                profile.base_item == base_item;
+                profile.base_item == base_item &&
+                (profile.keychain_kit != 0 || profile.explicit_clear);
         });
 
     return iterator == document.keychain_profiles.rend() ? nullptr : &*iterator;
@@ -594,7 +612,8 @@ const nskinzcs2::model::KeychainProfile* nskinzcs2::ConfigStore::FindMatchingKey
         {
             return profile.enabled &&
                 profile.xuid == xuid &&
-                profile.base_item == base_item;
+                profile.base_item == base_item &&
+                (profile.keychain_kit != 0 || profile.explicit_clear);
         });
 
     return iterator == document.keychain_profiles.rend() ? nullptr : &*iterator;

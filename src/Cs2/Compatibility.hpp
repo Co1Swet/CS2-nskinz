@@ -30,6 +30,7 @@ inline constexpr std::size_t kEngineIsPlayingDemoVtableIndex = 42;
 inline constexpr std::size_t kEngineGetDemoFilePathVtableIndex = 43;
 inline constexpr std::size_t kEngineGetLevelNameShortVtableIndex = 65;
 inline constexpr std::size_t kEngineGetDemoFileVtableIndex = 69;
+inline constexpr std::size_t kEngineExecuteClientCmdVtableIndex = 51;
 inline constexpr std::size_t kDemoFileGetTickVtableIndex = 3;
 inline constexpr std::size_t kDemoFileIsPlayingVtableIndex = 11;
 inline constexpr std::size_t kDemoFileIsPausedVtableIndex = 12;

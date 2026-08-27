@@ -46,6 +46,8 @@ using nskinzcs2::model::KeychainProfile;
 using nskinzcs2::model::KnifeProfile;
 using nskinzcs2::model::KnifeProfileMode;
 using nskinzcs2::model::NamedId;
+using nskinzcs2::model::kMaximumCosmeticWear;
+using nskinzcs2::model::kMinimumCosmeticWear;
 using nskinzcs2::ui::UiTextId;
 
 constexpr wchar_t kWindowClassName[] = L"nSkinzCS2.ToolWindow";
@@ -548,14 +550,13 @@ bool DrawKnifeModeCombo(KnifeProfileMode& mode)
                 return false;
             }
 
-            if (profile.keychain_kit <= 0)
+            if (profile.keychain_kit <= 0 && !profile.explicit_clear)
             {
-                issue = L"Keychain profile '" + std::wstring(profile.name.begin(), profile.name.end()) +
-                    L"' is invalid: modify-only demo keychain slots require a non-zero keychain kit.";
-                return false;
+                continue;
             }
 
-            if (!ContainsNamedId(catalog.keychain_kits, profile.keychain_kit))
+            if (profile.keychain_kit > 0 &&
+                !ContainsNamedId(catalog.keychain_kits, profile.keychain_kit))
             {
                 issue = L"Keychain profile '" + std::wstring(profile.name.begin(), profile.name.end()) +
                     L"' is invalid: selected keychain kit was not found in the catalog.";
@@ -734,6 +735,88 @@ bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, c
     }
 
     return changed;
+}
+
+constexpr int kExplicitClearSelectionId = -1;
+
+bool ComboFinishByIntent(
+    const char* label,
+    const std::vector<NamedId>& catalog_values,
+    int& paint_kit,
+    bool& explicit_vanilla_finish,
+    const int popup_count = 10)
+{
+    auto values = catalog_values;
+    const auto no_change = std::find_if(
+        values.begin(),
+        values.end(),
+        [](const NamedId& value) { return value.id == 0; });
+    if (no_change == values.end())
+    {
+        values.insert(values.begin(), NamedId {0, Ui(UiTextId::NoChange)});
+    }
+    else
+    {
+        no_change->name = Ui(UiTextId::NoChange);
+    }
+
+    const auto vanilla_position = std::find_if(
+        values.begin(),
+        values.end(),
+        [](const NamedId& value) { return value.id == 0; });
+    values.insert(
+        vanilla_position + 1,
+        NamedId {kExplicitClearSelectionId, Ui(UiTextId::VanillaNoFinish)});
+
+    int selected_id = explicit_vanilla_finish ? kExplicitClearSelectionId : paint_kit;
+    if (!ComboById(label, values, selected_id, popup_count))
+    {
+        return false;
+    }
+
+    explicit_vanilla_finish = selected_id == kExplicitClearSelectionId;
+    paint_kit = explicit_vanilla_finish ? 0 : selected_id;
+    return true;
+}
+
+bool ComboKeychainByIntent(
+    const char* label,
+    const std::vector<NamedId>& catalog_values,
+    int& keychain_kit,
+    bool& explicit_clear,
+    const int popup_count = 10)
+{
+    auto values = catalog_values;
+    const auto no_change = std::find_if(
+        values.begin(),
+        values.end(),
+        [](const NamedId& value) { return value.id == 0; });
+    if (no_change == values.end())
+    {
+        values.insert(values.begin(), NamedId {0, Ui(UiTextId::NoChange)});
+    }
+    else
+    {
+        no_change->name = Ui(UiTextId::NoChange);
+    }
+
+    const auto clear_position = std::find_if(
+        values.begin(),
+        values.end(),
+        [](const NamedId& value) { return value.id == 0; });
+    values.insert(
+        clear_position + 1,
+        NamedId {kExplicitClearSelectionId, Ui(UiTextId::NoKeychainRemove)});
+
+    int selected_id = explicit_clear ? kExplicitClearSelectionId : keychain_kit;
+    if (!ComboById(label, values, selected_id, popup_count))
+    {
+        return false;
+    }
+
+    explicit_clear = selected_id == kExplicitClearSelectionId;
+    keychain_kit = explicit_clear ? 0 : selected_id;
+    return true;
 }
 
 std::optional<std::filesystem::path> ResolveChineseUiFontPath()
@@ -1476,12 +1559,22 @@ private:
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat(Ui(UiTextId::Wear), &profile.wear, 0.0000001f, 1.0f, "%.7f"))
+        if (ImGui::SliderFloat(
+                Ui(UiTextId::Wear),
+                &profile.wear,
+                kMinimumCosmeticWear,
+                kMaximumCosmeticWear,
+                "%.7f"))
         {
             PushWorkingConfig();
         }
 
-        if (ComboById(Ui(UiTextId::PaintKit), catalog.weapon_paint_kits, profile.paint_kit, 12))
+        if (ComboFinishByIntent(
+                Ui(UiTextId::PaintKit),
+                catalog.weapon_paint_kits,
+                profile.paint_kit,
+                profile.explicit_vanilla_finish,
+                12))
         {
             PushWorkingConfig();
         }
@@ -1583,10 +1676,18 @@ private:
 
         if (ComboById(Ui(UiTextId::KnifeModel), knife_model_items, profile.model_definition, 10))
         {
+            profile.mode = profile.model_definition != 0
+                ? KnifeProfileMode::ModelAndFinish
+                : KnifeProfileMode::FinishOnly;
             PushWorkingConfig();
         }
 
-        if (ComboById(Ui(UiTextId::PaintKit), catalog.weapon_paint_kits, profile.paint_kit, 12))
+        if (ComboFinishByIntent(
+                Ui(UiTextId::PaintKit),
+                catalog.weapon_paint_kits,
+                profile.paint_kit,
+                profile.explicit_vanilla_finish,
+                12))
         {
             PushWorkingConfig();
         }
@@ -1733,6 +1834,7 @@ private:
                          !IsCompatibleGlovePaint(catalog, profile.model_definition, profile.paint_kit))
                 {
                     profile.paint_kit = 0;
+                    profile.explicit_vanilla_finish = false;
                 }
             }
             PushWorkingConfig();
@@ -1746,6 +1848,7 @@ private:
                     !IsCompatibleGlovePaint(catalog, profile.model_definition, profile.paint_kit))
                 {
                     profile.paint_kit = 0;
+                    profile.explicit_vanilla_finish = false;
                 }
                 PushWorkingConfig();
             }
@@ -1762,7 +1865,12 @@ private:
                 ? profile.model_definition
                 : 0;
         const auto glove_paint_list = BuildVisibleGlovePaintList(catalog, glove_item_id);
-        if (ComboById(Ui(UiTextId::PaintKit), glove_paint_list, profile.paint_kit, 12))
+        if (ComboFinishByIntent(
+                Ui(UiTextId::PaintKit),
+                glove_paint_list,
+                profile.paint_kit,
+                profile.explicit_vanilla_finish,
+                12))
         {
             if (profile.mode == GloveProfileMode::ModelAndFinish && profile.paint_kit != 0)
             {
@@ -1785,7 +1893,12 @@ private:
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat(Ui(UiTextId::Wear), &profile.wear, 0.0000001f, 1.0f, "%.7f"))
+        if (ImGui::SliderFloat(
+                Ui(UiTextId::Wear),
+                &profile.wear,
+                kMinimumCosmeticWear,
+                kMaximumCosmeticWear,
+                "%.7f"))
         {
             PushWorkingConfig();
         }
@@ -1910,17 +2023,17 @@ private:
             PushWorkingConfig();
         }
 
-        auto keychain_items = catalog.keychain_kits;
-        if (keychain_items.empty())
-        {
-            keychain_items.push_back(NamedId {0, Ui(UiTextId::None)});
-        }
-        if (ComboById(Ui(UiTextId::Keychain), keychain_items, profile.keychain_kit, 12))
+        if (ComboKeychainByIntent(
+                Ui(UiTextId::Keychain),
+                catalog.keychain_kits,
+                profile.keychain_kit,
+                profile.explicit_clear,
+                12))
         {
             PushWorkingConfig();
         }
 
-        if (profile.keychain_kit == 0)
+        if (profile.explicit_clear)
         {
             ImGui::TextColored(
                 ImVec4(0.94f, 0.42f, 0.25f, 1.0f),

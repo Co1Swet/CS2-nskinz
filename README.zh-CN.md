@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/nskinz-banner.svg" alt="nSkinzCS2 HLAE 离线 Demo 皮肤工具" width="900"></p>
+<p align="center"><img src="./docs/assets/nskinz-banner.svg" alt="nSkinzCS2 HLAE 离线 Demo 皮肤工具" width="900"></p>
 
 <h3 align="center">面向 HLAE Demo 回放的 Counter-Strike 2 离线外观工具</h3>
 
@@ -31,7 +31,7 @@
 
 nSkinzCS2 是一个 Windows x64 DLL，用于在观看 Counter-Strike 2 Demo 时修改当前观战玩家的外观。它通过 HLAE 的 `mirv_loadlibrary` 加载，读取本机 CS2 目录中的物品目录，并通过 Win32 + D3D11 + Dear ImGui 控制面板，按玩家 XUID 安全地应用外观覆盖。
 
-<p align="center"><img src="docs/assets/control-panel.png" alt="nSkinzCS2 控制面板" width="900"></p>
+<p align="center"><img src="./docs/assets/control-panel.png" alt="nSkinzCS2 控制面板" width="900"></p>
 
 ## 功能矩阵
 
@@ -134,8 +134,8 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 <table>
   <tr>
-    <td align="center"><strong>微信支付</strong><br><img src="docs/assets/sponsor/wechat-pay.png" alt="微信支付收款码" width="260"></td>
-    <td align="center"><strong>支付宝</strong><br><img src="docs/assets/sponsor/alipay.png" alt="支付宝收款码" width="260"></td>
+    <td align="center"><strong>微信支付</strong><br><img src="./docs/assets/sponsor/wechat-pay.png" alt="微信支付收款码" width="260"></td>
+    <td align="center"><strong>支付宝</strong><br><img src="./docs/assets/sponsor/alipay.png" alt="支付宝收款码" width="260"></td>
   </tr>
 </table>
 

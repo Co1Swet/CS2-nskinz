@@ -1,4 +1,4 @@
-<p align="center"><img src="https://raw.githubusercontent.com/Lyan-edit/CS2-nskinz/main/docs/assets/nskinz-banner.svg" alt="nSkinzCS2 offline demo cosmetic toolkit" width="900"></p>
+[![nSkinzCS2 offline demo cosmetic toolkit](./docs/assets/nskinz-banner.svg)](./docs/assets/nskinz-banner.svg)
 
 <h3 align="center">Offline Counter-Strike 2 cosmetic overrides for HLAE demo playback</h3>
 
@@ -31,7 +31,7 @@
 
 nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearance while a Counter-Strike 2 demo is being viewed. It is loaded with HLAE `mirv_loadlibrary`, reads the installed CS2 catalog, and applies guarded, XUID-targeted overrides through a small Win32 + D3D11 + Dear ImGui control panel.
 
-<p align="center"><img src="https://raw.githubusercontent.com/Lyan-edit/CS2-nskinz/main/docs/assets/control-panel.png" alt="nSkinzCS2 control panel" width="900"></p>
+![nSkinzCS2 control panel](./docs/assets/control-panel.png)
 
 ## Feature matrix
 
@@ -132,12 +132,9 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For secur
 
 If nSkinzCS2 is useful to your offline demo workflow, optional support is appreciated. The QR images below are the author's provided no-ID payment codes; sponsorship is voluntary and does not provide a support contract or feature guarantee.
 
-<table>
-  <tr>
-    <td align="center"><strong>WeChat Pay</strong><br><img src="https://raw.githubusercontent.com/Lyan-edit/CS2-nskinz/main/docs/assets/sponsor/wechat-pay.png" alt="WeChat Pay QR code" width="260"></td>
-    <td align="center"><strong>Alipay</strong><br><img src="https://raw.githubusercontent.com/Lyan-edit/CS2-nskinz/main/docs/assets/sponsor/alipay.png" alt="Alipay QR code" width="260"></td>
-  </tr>
-</table>
+| **WeChat Pay** | **Alipay** |
+| :---: | :---: |
+| ![WeChat Pay QR code](./docs/assets/sponsor/wechat-pay.png) | ![Alipay QR code](./docs/assets/sponsor/alipay.png) |
 
 ## Acknowledgements
 

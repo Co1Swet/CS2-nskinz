@@ -123,6 +123,15 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 **应该下载哪个 DLL？** 英文界面使用 `nSkinzCS2.dll`，中文界面和中文目录名称使用 `nSkinzCS2.zh-CN.dll`；两者兼容同一套 CS2 基线。
 
+**仓库能打开，但图片显示破图标怎么办？** 某些网络无法访问 GitHub 的 raw 图片域名。本 README 已使用 GitHub 推荐的相对图片路径；如果仍然加载失败，可临时用管理员身份打开记事本，编辑 `C:\Windows\System32\drivers\etc\hosts`，追加：
+
+```text
+199.232.68.133 raw.githubusercontent.com
+199.232.68.133 githubusercontent.com
+```
+
+然后运行 `ipconfig /flushdns`，重启浏览器并刷新页面。网络恢复后可删除这两行；如果仓库本身在无痕窗口也返回 `404`，hosts 不能修复账号级公开可见性，需要联系 GitHub Support。
+
 ## 贡献与支持
 
 提交 Pull Request 前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请参考 [SECURITY.md](SECURITY.md)。反馈问题时请附上准确的 CS2 Build ID、HLAE 版本、DLL 语言、复现步骤和经过脱敏的日志片段。

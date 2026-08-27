@@ -1,230 +1,148 @@
-# nSkinzCS2
+<p align="center"><img src="docs/assets/nskinz-banner.svg" alt="nSkinzCS2 offline demo cosmetic toolkit" width="900"></p>
 
-`nSkinzCS2` is a Windows x64 DLL for Counter-Strike 2 demo playback workflows. It is designed to be injected through HLAE `mirv_loadlibrary`, then attach to CS2 runtime structures, parse installed game data, and apply cosmetic overrides for the watched player during demo playback.
+<h3 align="center">Offline Counter-Strike 2 cosmetic overrides for HLAE demo playback</h3>
 
-This repository is the standalone `nSkinzCS2` project snapshot from the larger local workspace. It contains the Visual Studio solution, first-party source code, helper tools, vendored dependencies, and a codebase map suitable for publishing on GitHub.
+<p align="center">
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/blob/main/README.md"><img src="https://img.shields.io/badge/English-README-1f6feb?style=flat-square" alt="English README"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/blob/main/README.zh-CN.md"><img src="https://img.shields.io/badge/简体中文-README-555?style=flat-square" alt="简体中文 README"></a>
+</p>
 
-## Release Snapshot (v0.4.0)
+<p align="center">
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/latest"><img src="https://img.shields.io/github/v/release/Lyan-edit/CS2-nskinz?style=flat-square&label=release" alt="Latest release"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases"><img src="https://img.shields.io/github/downloads/Lyan-edit/CS2-nskinz/total?style=flat-square&label=downloads" alt="Total downloads"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz"><img src="https://img.shields.io/github/stars/Lyan-edit/CS2-nskinz?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/network/members"><img src="https://img.shields.io/github/forks/Lyan-edit/CS2-nskinz?style=flat-square" alt="Forks"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/issues"><img src="https://img.shields.io/github/issues/Lyan-edit/CS2-nskinz?style=flat-square" alt="Open issues"></a>
+  <img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat-square" alt="C++20">
+  <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Windows x64">
+  <img src="https://img.shields.io/badge/HLAE-offline%20demo-6f42c1?style=flat-square" alt="HLAE offline demo">
+</p>
 
-- English target: `nSkinzCS2.dll`
-- Simplified Chinese target: `nSkinzCS2.zh-CN.dll`
-- Platform: Windows x64
-- Language: C++20
-- UI stack: Win32 + D3D11 + Dear ImGui
-- Hooking/runtime support: MinHook
-- Config format: JSON (`nSkinzCS2.json`)
-- Runtime library: statically linked (`/MT`); no separate Visual C++ runtime install is required
+<p align="center">
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.0/nSkinzCS2.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.0/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.0"><img src="https://img.shields.io/badge/Release%20notes-v0.4.0-8250df?style=for-the-badge" alt="Release notes"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/Report%20an%20issue-f85149?style=for-the-badge" alt="Report an issue"></a>
+</p>
 
-## Current Feature Scope
+> **Safety first:** nSkinzCS2 is intended only for offline demo playback started through HLAE with `-insecure`. Never load it on VAC-protected or online servers. The author does not guarantee account safety for use outside this scope.
 
-Implemented and demo-tested:
+## What is nSkinzCS2?
 
-- Dedicated Win32 + D3D11 + Dear ImGui tool window
-- Versioned JSON config load/save
-- XUID-targeted regular weapon skin replacement during demo playback
-- Knife finish replacement while preserving the player's existing knife model
-- Glove model and glove skin replacement
-- Explicit `Vanilla (No Finish)` selection, distinct from `- (Do not modify)`, for weapons, knives, gloves, and keychains
-- XUID-isolated multi-player profiles, including simultaneous different finishes and seeds
-- English and Simplified Chinese builds; the Chinese build loads CS2's `csgo_schinese.txt` catalog so skin names follow the installed game data
-- Runtime environment detection for CS2, HLAE, interfaces, schema binding, entity-system binding, and hook install state
-- Catalog parsing from installed CS2 files for weapons, gloves, paint kits, qualities, and visual metadata
-- Guarded rebinding after demo tick seeks and watched-player changes
-- Validation and regression-style native tests for config parsing, catalog parsing, duplicate detection, helper logic, and runtime decision probes
+nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearance while a Counter-Strike 2 demo is being viewed. It is loaded with HLAE `mirv_loadlibrary`, reads the installed CS2 catalog, and applies guarded, XUID-targeted overrides through a small Win32 + D3D11 + Dear ImGui control panel.
 
-Limited or experimental:
+<p align="center"><img src="docs/assets/control-panel.png" alt="nSkinzCS2 control panel" width="900"></p>
 
-- Agent replacement
-- Knife model replacement and some animation-remap edge cases
-- Keychain creation when the demo weapon does not already have a live keychain module; modifying or clearing an existing module is supported
-- Fully live item-schema walking instead of preferring installed game data
+## Feature matrix
 
-Known limitation: a knife that already owns a compiled custom material in the demo may keep that old first-person material when `Vanilla (No Finish)` is selected. Positive knife paint kits are verified; this specific stale-material reset remains under investigation and is not claimed as fixed in v0.4.0.
+| Area | Supported in v0.4.0 | Notes |
+| --- | --- | --- |
+| Weapons | Finish, seed, wear, quality, name tag and sticker fields | Profiles are isolated by watched-player XUID and base item definition. |
+| Knives | Finish-only replacement, seed and wear | The live knife model is preserved. Positive paint kits are verified on Skeleton, M9, Butterfly and Karambit entities. |
+| Gloves | T/CT default glove carriers, model and finish | Default glove definitions `5028` and `5029` are supported on the verified build. |
+| Keychains | Modify or clear an existing live module | Creating a keychain module on an item that has none remains experimental. |
+| Vanilla / no finish | Explicit `Vanilla (No Finish)` option | This is different from `- (Do not modify)`. A stale first-person knife material may survive on some demo items. |
+| Languages | English and Simplified Chinese DLLs | The Chinese build reads names from the installed `csgo_schinese.txt` catalog. |
 
-## Build Requirements
+## Quick start
 
-- Windows 10/11 x64
-- Visual Studio 2022 with the MSVC v143 toolset
-- Windows SDK 10
-- Direct3D 11 development libraries
-- A local CS2 installation for runtime use and catalog-backed behavior checks
-- HLAE if you want to load the DLL with `mirv_loadlibrary`
-
-## Verified Compatibility
-
-This snapshot is verified against:
-
-- Steam app build ID `24957633`
-- CS2 ClientVersion `2000897`, patch `1.41.7.8`, Source revision `10942762` (August 26, 2026)
-- `client.dll` SHA-256 `84BCAE9DB379BED5ACB3D81228ABEF86FBD61B6CDB2B3ACCDC5DD0F32E8F89F9`
-- HLAE `2.191.1` / AfxHookSource2 `0.40.1`
-- `Source2Client002`, `ResourceSystem013`, and `VFileSystem017`
-- `Source2Client002::FrameStageNotify` vtable slot 36, with executable-target and module-owner validation
-
-The DLL logs the installed CS2 identity, PE timestamps/sizes, required signature match counts, HLAE module version, resolved interface names, and final hook target. Required signatures must resolve exactly once; ambiguous or missing bindings fail closed.
-
-## Build And Test
-
-### Visual Studio
-
-1. Open `nSkinzCS2.sln`.
-2. Select `Release | x64` for English or `ReleaseZhCn | x64` for Simplified Chinese.
-3. Build the solution.
-
-Outputs:
-
-- DLL: `build/Release/nSkinzCS2.dll`
-- Chinese DLL: `build/Release/nSkinzCS2.zh-CN.dll`
-- Test runner: `build/Release/nSkinzCS2.Tests.exe`
-
-### Command Scripts
-
-- `run-build-and-tests.cmd`
-  Builds the solution with MSBuild, then runs the native test executable.
-- `run-tests.cmd`
-  Runs `build/Release/nSkinzCS2.Tests.exe` and prints the captured logs.
-
-To include a read-only compatibility scan of an installed game:
-
-```text
-run-build-and-tests.cmd --cs2-root "E:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive"
-```
-
-The scripts keep all outputs and logs under `build/Release`. The build wrapper also normalizes duplicate case-insensitive environment keys that can otherwise prevent MSBuild from starting `CL.exe` in automation hosts.
-
-## Runtime Usage
-
-1. Download either `nSkinzCS2.dll` or `nSkinzCS2.zh-CN.dll`. No compiler, SDK, Python, or Visual C++ redistributable is required for the release DLL.
-2. Start CS2 through HLAE 2.191.1 with `-insecure`. Do not use this DLL on VAC or online servers.
-3. Load the DLL:
+1. Start CS2 through HLAE with `-insecure`, then open an offline demo.
+2. Download one of the two Release DLLs. Release binaries use the static MSVC runtime (`/MT`), so no Visual C++ Redistributable, Python, SDK or compiler is required.
+3. In HLAE, load the DLL:
 
 ```text
 mirv_loadlibrary "C:\Path\To\nSkinzCS2.dll"
 ```
 
-Chinese build:
+For the Simplified Chinese UI:
 
 ```text
 mirv_loadlibrary "C:\Path\To\nSkinzCS2.zh-CN.dll"
 ```
 
-4. Press `Insert` to show or hide the tool window.
-5. Open a CS2 demo.
-6. Configure weapon, knife, glove, or keychain profiles.
-7. Press `Update` to request a runtime refresh.
+Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Diagnostics are written beside the DLL as `nSkinzCS2.log`.
 
-Runtime diagnostics are written beside the loaded DLL as `nSkinzCS2.log`.
+## Compatibility baseline
 
-Behavior notes:
+The `v0.4.0` binaries were checked against:
 
-- Weapon profiles are keyed by watched-player XUID and base item definition.
-- Weapon and glove wear is taken only from the configured profile and clamped to `0.0000001`-`1.0`; the demo item's original wear never caps the replacement.
-- Default-skinned weapons are valid replacement carriers. Default T/CT gloves (`5028`/`5029`) can be replaced with a target glove model and finish through `model_and_finish`.
-- Glove profiles support glove model and finish replacement through the watched pawn's current `m_EconGloves` item view on the verified compatibility baseline.
-- Knife `finish_only` preserves the live knife definition and changes only the finish fields. Positive paint kits have been verified on Skeleton Knife, M9 Bayonet, Butterfly Knife, and Karambit demo entities.
-- `- (Do not modify)` leaves the current value untouched. `Vanilla (No Finish)` is an explicit clear request.
-- The Chinese DLL reads Simplified Chinese item and paint-kit names directly from the installed CS2 VPK.
-- Unsupported live layouts are rejected with a diagnostic instead of writing through an uncertain binding.
-- Demo pause/resume, tick seeks, watched-player switches, and repeated Update requests trigger guarded runtime rebinding.
-- Legacy glove entries under `profiles` with `base_item = 5028` are ignored at runtime; use `glove_profiles`.
+- Steam app build ID `24957633`
+- CS2 ClientVersion `2000897`, patch `1.41.7.8`, Source revision `10942762` (2026-08-26)
+- `client.dll` SHA-256 `84BCAE9DB379BED5ACB3D81228ABEF86FBD61B6CDB2B3ACCDC5DD0F32E8F89F9`
+- HLAE `2.191.1` / AfxHookSource2 `0.40.1`
+- `Source2Client002`, `ResourceSystem013` and `VFileSystem017`
 
-## Repository Layout
+CS2 updates can change memory layouts. The DLL logs its detected identity and fails closed when required signatures are missing or ambiguous.
+
+<details>
+<summary><strong>Build from source</strong></summary>
+
+Requirements: Windows 10/11 x64, Visual Studio 2022 with MSVC v143, Windows SDK 10, Direct3D 11 libraries, and a local CS2 installation for catalog-backed checks.
 
 ```text
-nSkinzCS2/
-|-- src/                  First-party source code
-|-- third_party/          Vendored dependencies
-|-- tools/                Helper utilities and reverse-engineering helpers
-|-- nSkinzCS2.sln         Visual Studio solution
-|-- nSkinzCS2.vcxproj     DLL project
-|-- nSkinzCS2.Tests.vcxproj  Native test project
-|-- run-build-and-tests.cmd
-|-- run-tests.cmd
-`-- README.md
+Open nSkinzCS2.sln
+Select Release | x64       # English
+Select ReleaseZhCn | x64   # Simplified Chinese
+Build the solution
 ```
 
-Generated outputs such as `build/`, `.obj`, `.exe`, `.dll`, `.pdb`, and logs are intentionally excluded from version control.
+Outputs are `build/Release/nSkinzCS2.dll`, `build/Release/nSkinzCS2.zh-CN.dll` and `build/Release/nSkinzCS2.Tests.exe`. `run-build-and-tests.cmd` builds and runs the native regression suite; `run-tests.cmd` runs the existing test binary.
 
-## Code Map
+</details>
 
-### Root Project Files
-
-| Path | Purpose |
-| --- | --- |
-| `nSkinzCS2.sln` | Visual Studio solution containing the DLL and native test targets. |
-| `nSkinzCS2.vcxproj` | Main DLL build configuration, include paths, libraries, and post-build copy step. |
-| `nSkinzCS2.Tests.vcxproj` | Native test executable build configuration. |
-| `run-build-and-tests.cmd` | MSBuild wrapper that builds the solution and then runs tests. |
-| `run-tests.cmd` | Standalone test runner wrapper around `build/Release/nSkinzCS2.Tests.exe`. |
-
-### First-Party Source Files
-
-| Path | Lines | Responsibility |
-| --- | ---: | --- |
-| `src/dllmain.cpp` | 23 | DLL entry point; starts the bootstrap flow when the library is loaded. |
-| `src/Bootstrap.cpp` | 539 | Startup orchestration: locate module paths, load config, build catalog, create runtime controller, and launch the UI thread. |
-| `src/Core/AppState.hpp` | 270 | Shared application state model containing config, catalog, runtime status, and refresh flags. |
-| `src/Core/Config.hpp` | 34 | Public config storage API for load/save/default document and profile lookup helpers. |
-| `src/Core/Config.cpp` | 458 | JSON serialization, config migration, legacy knife/glove normalization, and profile lookup logic. |
-| `src/Core/Log.hpp` | 19 | Lightweight logging interface. |
-| `src/Core/Log.cpp` | 91 | File and debug-output logging helpers for runtime diagnostics. |
-| `src/Cs2/Catalog.hpp` | 20 | Catalog builder interface. |
-| `src/Cs2/Catalog.cpp` | 1577 | Parses CS2 item and localization data into weapon, glove, paint-kit, sticker, quality, and visual metadata catalogs. |
-| `src/Cs2/GlobalResourceSwapper.hpp` | 61 | Public API for the resource-swap hook and associated diagnostics counters. |
-| `src/Cs2/GlobalResourceSwapper.cpp` | 8093 | Hooking and deferred-work implementation for resource swap interception and model/material redirection. |
-| `src/Cs2/Runtime.hpp` | 489 | Runtime controller declarations, decision helpers, probe types, and test-facing utility surfaces. |
-| `src/Cs2/Runtime.cpp` | 59347 | Main runtime engine: process/interface discovery, hook install, schema/entity binding, watched-player tracking, refresh logic, and cosmetic application flow. |
-| `src/Runtime/WeaponAppearance.hpp` | 133 | Weapon appearance request, binding, payload, snapshot, rollback, and verification types. |
-| `src/Runtime/WeaponAppearance.cpp` | 196 | Pure helper logic for resolving weapon appearance bindings and payload construction. |
-| `src/Runtime/KnifeAnimation.hpp` | 46 | Knife animation remap declarations. |
-| `src/Runtime/KnifeAnimation.cpp` | 142 | Knife animation remap table and validation helpers. |
-| `src/Runtime/KnifeAppearance.hpp` | 196 | Knife apply/request/context/gating/verification types for finish-only and model-and-finish flows. |
-| `src/Runtime/KnifeAppearance.cpp` | 405 | Knife profile translation, apply gating, render verification, and signature helpers. |
-| `src/Runtime/GloveAppearance.hpp` | 187 | Glove carrier, compatibility, model identity, and verification types. |
-| `src/Runtime/GloveAppearance.cpp` | 210 | Glove slot-mode resolution, compatibility checks, and render verification helpers. |
-| `src/UI/MainWindow.hpp` | 22 | ImGui tool-window thread wrapper. |
-| `src/UI/MainWindow.cpp` | 1715 | Full Win32 + D3D11 + ImGui editor UI for config editing, catalog browsing, runtime status, and manual refresh requests. |
-| `src/Tests/Main.cpp` | 3203 | Native regression test runner covering config migration, catalog building, runtime helper decisions, binding probes, and appearance helper logic. |
-
-### Helper Tools
-
-| Path | Lines | Purpose |
-| --- | ---: | --- |
-| `tools/dia_rva_lookup.cpp` | 244 | DIA SDK-based RVA lookup helper used during reverse-engineering and symbol analysis. |
-| `tools/resolve_resource_query.cpp` | 68 | Small helper for resource-query inspection and experimentation. |
-
-### Vendored Dependencies
+<details>
+<summary><strong>Repository and architecture</strong></summary>
 
 | Path | Purpose |
 | --- | --- |
-| `third_party/imgui/` | Dear ImGui core and the Win32 + DX11 backends used by the tool window. |
-| `third_party/MinHook/` | MinHook sources used for runtime detours and trampoline management. |
-| `third_party/json/json.hpp` | Single-header `nlohmann/json` dependency used for config serialization. |
+| `src/` | Bootstrap, config, catalog, runtime, appearance helpers and ImGui UI |
+| `tools/` | DIA/RVA and resource-query helper programs |
+| `third_party/` | Dear ImGui, MinHook and nlohmann/json sources |
+| `nSkinzCS2.sln` | Visual Studio solution for the DLL and native tests |
+| `run-build-and-tests.cmd` | Build and test wrapper |
 
-## Architectural Notes
+`AppState` connects the bootstrap, UI and runtime threads. `WeaponAppearance`, `KnifeAppearance` and `GloveAppearance` keep profile decisions testable outside the game process, while the runtime layer validates interfaces, signatures and entity bindings before writing.
 
-- `AppState` is the shared synchronization point between bootstrap, runtime, and UI threads.
-- `Bootstrap.cpp` wires the system together and prepares the initial catalog/config state.
-- `Runtime.cpp` is the main operational core and currently concentrates most engine-facing logic in one very large translation unit.
-- `WeaponAppearance`, `KnifeAppearance`, and `GloveAppearance` isolate profile-specific decision logic into smaller helper modules that are also exercised by tests.
-- `MainWindow.cpp` is the full operator-facing editor and diagnostics surface.
-- `Tests/Main.cpp` intentionally exposes many pure helper/probe entry points from `Runtime.hpp` to keep risky runtime logic regression-testable outside the game process.
+</details>
 
-## Third-Party And Licensing Notes
+## Known limitations and roadmap
 
-This repository vendors source from upstream projects:
+- Knife model replacement and a few animation-remap cases are still experimental.
+- If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.0.
+- Fully live item-schema walking is not yet preferred over installed game data.
 
-- Dear ImGui
-- MinHook
-- nlohmann/json
+Planned work includes a more complete vanilla-material reset, broader knife model/animation coverage, keychain creation for empty modules and continued compatibility updates after CS2 patches.
 
-Review each upstream project license before redistributing binaries or republishing modified sources.
+## FAQ
 
-## Publishing Notes
+**Why does `-` not remove a finish?** `- (Do not modify)` deliberately leaves the current value untouched. Choose `Vanilla (No Finish)` when you want an explicit no-finish request.
 
-If you are turning this local project into a public GitHub repository:
+**Nothing changes after editing a profile.** Load the demo first, verify the watched-player XUID and base item, then press `Update`. Check `nSkinzCS2.log` for binding or compatibility failures.
 
-- Keep generated files out of version control.
-- Commit the solution, project files, `src/`, `third_party/`, `tools/`, and scripts.
-- Rebuild locally after changing dependencies or project settings.
-- Prefer documenting runtime limitations and intended usage clearly, because the implementation is currently tuned for demo playback and guarded runtime experimentation.
+**Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.0 vanilla path cannot always clear; this is the documented limitation above.
+
+**Which build should I use?** Use `nSkinzCS2.dll` for English or `nSkinzCS2.zh-CN.dll` for the Chinese UI and catalog names. Both DLLs target the same CS2 compatibility baseline.
+
+## Contributing and support
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For security-sensitive issues, use [SECURITY.md](SECURITY.md). Bug reports should include the exact CS2 Build ID, HLAE version, DLL language, reproduction steps and a redacted log excerpt.
+
+<a name="support"></a>
+## ❤️ Support the project
+
+If nSkinzCS2 is useful to your offline demo workflow, optional support is appreciated. The QR images below are the author's provided no-ID payment codes; sponsorship is voluntary and does not provide a support contract or feature guarantee.
+
+<table>
+  <tr>
+    <td align="center"><strong>WeChat Pay</strong><br><img src="docs/assets/sponsor/wechat-pay.png" alt="WeChat Pay QR code" width="260"></td>
+    <td align="center"><strong>Alipay</strong><br><img src="docs/assets/sponsor/alipay.png" alt="Alipay QR code" width="260"></td>
+  </tr>
+</table>
+
+## Acknowledgements
+
+nSkinzCS2 uses Dear ImGui, MinHook and nlohmann/json. Please review the upstream notices under `third_party/` before redistributing modified source or binaries. This repository intentionally has no root license at this time.
+
+<p align="center"><a href="https://star-history.com/#Lyan-edit/CS2-nskinz&Date"><img src="https://api.star-history.com/svg?repos=Lyan-edit/CS2-nskinz&type=Date" alt="Star History" width="760"></a></p>
+
+<p align="center"><sub>Built for reproducible, offline CS2 demo review. Keep it offline and keep it safe.</sub></p>

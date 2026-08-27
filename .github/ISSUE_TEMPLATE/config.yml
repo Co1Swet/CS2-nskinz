@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Release downloads / Release 下载
+    url: https://github.com/Lyan-edit/CS2-nskinz/releases/latest
+    about: Download the current English or Chinese DLL. / 下载当前英文或中文 DLL。
+  - name: Security report / 安全报告
+    url: https://github.com/Lyan-edit/CS2-nskinz/security/advisories/new
+    about: Report security-sensitive issues privately when available. / 条件允许时私密报告安全问题。

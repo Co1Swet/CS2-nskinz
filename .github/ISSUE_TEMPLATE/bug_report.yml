@@ -1,0 +1,62 @@
+name: Bug report / 错误报告
+description: Report a reproducible offline demo issue. / 报告可复现的离线 Demo 问题。
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please use this form only for offline HLAE demo playback. Do not include credentials, personal data or game files.
+        请仅针对 HLAE 离线 Demo 回放填写，不要上传凭据、个人数据或游戏文件。
+  - type: input
+    id: cs2-build
+    attributes:
+      label: CS2 Build ID / CS2 构建号
+      placeholder: "24957633"
+    validations:
+      required: true
+  - type: input
+    id: hlae-version
+    attributes:
+      label: HLAE version / HLAE 版本
+      placeholder: "2.191.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: dll-language
+    attributes:
+      label: DLL language / DLL 语言
+      options:
+        - English / 英文
+        - Simplified Chinese / 简体中文
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: nSkinzCS2 release / nSkinzCS2 版本
+      placeholder: "v0.4.0"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps / 复现步骤
+      description: Include watched-player XUID only when safe to share; redact it otherwise. / 仅在安全时填写观战玩家 XUID，否则请脱敏。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized log excerpt / 脱敏日志片段
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: offline
+    attributes:
+      label: Scope confirmation / 使用范围确认
+      options:
+        - label: I reproduced this only in an offline demo launched with HLAE `-insecure`. / 我仅在 HLAE `-insecure` 启动的离线 Demo 中复现。
+          required: true

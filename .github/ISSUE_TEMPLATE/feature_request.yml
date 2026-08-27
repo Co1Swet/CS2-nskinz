@@ -1,0 +1,35 @@
+name: Feature request / 功能建议
+description: Suggest an offline demo workflow improvement. / 建议离线 Demo 工作流改进。
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep proposals within offline HLAE demo playback. Do not request VAC or online-server use.
+        建议必须限定在 HLAE 离线 Demo 回放范围内，不接受 VAC 或联机服务器用途。
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case / 问题与使用场景
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior / 期望行为
+    validations:
+      required: true
+  - type: input
+    id: compatibility
+    attributes:
+      label: CS2/HLAE baseline / CS2/HLAE 基线
+      placeholder: "CS2 build 24957633, HLAE 2.191.1"
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope confirmation / 范围确认
+      options:
+        - label: This request is for offline demo playback only. / 此建议仅用于离线 Demo 回放。
+          required: true

@@ -172,6 +172,7 @@ bool ShouldAllowWeaponRefreshHelperDispatch(
     bool knife_request,
     KnifeRefreshHelperPolicy policy,
     bool knife_epoch_armed) noexcept;
+bool ShouldIncrementCustomEconReloadEventForMaterialRefresh() noexcept;
 bool ShouldConsumeKnifeRefreshHelperEpoch(
     bool dispatched_knife_request,
     bool helper_succeeded) noexcept;
@@ -188,6 +189,10 @@ bool ShouldAllowVerifiedInPlaceKnifeInitializationRefresh(
     bool needs_skin_refresh,
     bool live_attribute_values_match,
     bool refresh_signature_matches) noexcept;
+bool ShouldQueueWeaponMaterialRefresh(
+    bool needs_refresh,
+    bool completed_signature_matches,
+    bool force_dispatch = false) noexcept;
 
 bool ShouldUseStableKnifeFinishFastPath(
     bool knife_request,
@@ -234,6 +239,46 @@ bool KnifeAnimationRemapTableSupportsTransition(
     KnifeRemapActionKind action_kind);
 
 #ifdef NSKINZCS2_TESTS
+struct WeaponMeshMaskProbeResult
+{
+    int successful_updates = 0;
+    double elapsed_milliseconds = 0;
+    bool matching_readonly_is_noop = false;
+    bool missing_dirty_data_rejected = false;
+    bool mismatching_readonly_rejected = false;
+    bool both_masks_verified = false;
+};
+WeaponMeshMaskProbeResult ProbeWeaponMeshMaskForTests();
+
+struct KnifeRepeatedRepairProbeResult
+{
+    int repaired_frames = 0;
+    int redundant_refresh_requests = 0;
+    bool completed_request_reused = false;
+    bool changed_finish_queued = false;
+    bool new_entity_epoch_queued = false;
+    bool model_and_finish_preserved = false;
+};
+KnifeRepeatedRepairProbeResult ProbeKnifeRepeatedFieldRepairForTests();
+
+struct StandardWeaponAttributeProbeResult
+{
+    bool matched_before = false;
+    bool synchronized = false;
+    bool matched_after = false;
+    bool repeated_update_is_noop = false;
+    bool demo_rewrite_repaired = false;
+    bool vectors_and_node_metadata_preserved = false;
+    bool original_values_restored = false;
+    std::size_t changed_slots = 0;
+};
+StandardWeaponAttributeProbeResult ProbeStandardWeaponAttributeSynchronizationForTests(
+    const std::vector<std::pair<std::uint16_t, float>>& static_attributes,
+    const std::vector<std::pair<std::uint16_t, float>>& dynamic_attributes,
+    const std::vector<std::pair<std::uint16_t, float>>& desired_attributes,
+    bool callback_available = true,
+    int fail_callback_number = -1);
+
 struct Source2ClientGetterProbeResult
 {
     bool success = false;

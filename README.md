@@ -19,13 +19,23 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.0/nSkinzCS2.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.0/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.0"><img src="https://img.shields.io/badge/Release%20notes-v0.4.0-8250df?style=for-the-badge" alt="Release notes"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.1"><img src="https://img.shields.io/badge/Release%20notes-v0.4.1-8250df?style=for-the-badge" alt="Release notes"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/Report%20an%20issue-f85149?style=for-the-badge" alt="Report an issue"></a>
 </p>
 
 > **Safety first:** nSkinzCS2 is intended only for offline demo playback started through HLAE with `-insecure`. Never load it on VAC-protected or online servers. The author does not guarantee account safety for use outside this scope.
+
+## What's new in v0.4.1
+
+- Fixed the CS2 crash triggered by IME input and typing in the skin search fields, including English input. The full control panel now runs in an isolated host outside `cs2.exe`, using the system's `rundll32.exe`; no additional application download is required.
+- Preserved the full installed-game catalog in the isolated panel, including localized skin names.
+- Fixed dynamic weapon finish synchronization and redundant knife material regeneration.
+- `Finish only` hides and ignores the knife model selector; model selection is available only in `Finish + model`.
+- Removed the blocking mesh-update sleep/retry loop, repeated runtime catalog copies, and synchronous file logging from frame callbacks.
+
+The current build passes **42 native regression tests**. The mesh-function benchmark improved from 3714 ms to approximately 0.1 ms for 240 updates; this is **not** an in-game FPS measurement or a claim that every demo stutter is resolved. See the [bilingual v0.4.1 release notes](docs/releases/v0.4.1.md) for verification boundaries and known limitations.
 
 ## What is nSkinzCS2?
 
@@ -35,10 +45,10 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Feature matrix
 
-| Area | Supported in v0.4.0 | Notes |
+| Area | Supported in v0.4.1 | Notes |
 | --- | --- | --- |
 | Weapons | Finish, seed, wear, quality, name tag and sticker fields | Profiles are isolated by watched-player XUID and base item definition. |
-| Knives | Finish-only replacement, seed and wear | The live knife model is preserved. Positive paint kits are verified on Skeleton, M9, Butterfly and Karambit entities. |
+| Knives | Finish-only or experimental finish + model, seed and wear | Finish-only preserves the demo knife model and hides model selection. Model selection appears only in finish + model. |
 | Gloves | T/CT default glove carriers, model and finish | Default glove definitions `5028` and `5029` are supported on the verified build. |
 | Keychains | Modify or clear an existing live module | Creating a keychain module on an item that has none remains experimental. |
 | Vanilla / no finish | Explicit `Vanilla (No Finish)` option | This is different from `- (Do not modify)`. A stale first-person knife material may survive on some demo items. |
@@ -60,16 +70,18 @@ For the Simplified Chinese UI:
 mirv_loadlibrary "C:\Path\To\nSkinzCS2.zh-CN.dll"
 ```
 
-Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Diagnostics are written beside the DLL as `nSkinzCS2.log`.
+Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Keep the DLL in a writable folder: the isolated panel and runtime share generated catalog/config sidecars there. Runtime diagnostics are written to `nSkinzCS2.log`; panel diagnostics to `nSkinzCS2.ui.log`.
+
+When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2-v0.4.1-windows-x64.zip) contains both language options and loading instructions.
 
 ## Compatibility baseline
 
-The `v0.4.0` binaries were checked against:
+The `v0.4.1` binaries were checked against:
 
-- Steam app build ID `24957633`
-- CS2 ClientVersion `2000897`, patch `1.41.7.8`, Source revision `10942762` (2026-08-26)
-- `client.dll` SHA-256 `84BCAE9DB379BED5ACB3D81228ABEF86FBD61B6CDB2B3ACCDC5DD0F32E8F89F9`
-- HLAE `2.191.1` / AfxHookSource2 `0.40.1`
+- Steam app build ID `25000182`
+- CS2 ClientVersion `2000899`, patch `1.41.7.8`, Source revision `10948930` (2026-08-28)
+- `client.dll` SHA-256 `B8E2C009763E8CEFB88D89A2BDCF452DB17501553D473DB6DA060DF8E6769EB4`
+- HLAE `2.191.1`
 - `Source2Client002`, `ResourceSystem013` and `VFileSystem017`
 
 CS2 updates can change memory layouts. The DLL logs its detected identity and fails closed when required signatures are missing or ambiguous.
@@ -108,18 +120,22 @@ Outputs are `build/Release/nSkinzCS2.dll`, `build/Release/nSkinzCS2.zh-CN.dll` a
 ## Known limitations and roadmap
 
 - Knife model replacement and a few animation-remap cases are still experimental.
-- If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.0.
+- If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.1.
 - Fully live item-schema walking is not yet preferred over installed game data.
 
 Planned work includes a more complete vanilla-material reset, broader knife model/animation coverage, keychain creation for empty modules and continued compatibility updates after CS2 patches.
 
 ## FAQ
 
+**Does the input fix disable Chinese or reduce the skin list?** No. The full panel is isolated from CS2's input/text-service path and reads the exported installed-game catalog. Chinese IME and English search remain available. If the list is unexpectedly short, include both logs and the catalog sidecar status in your report.
+
+**A demo still stutters.** v0.4.1 removes confirmed blocking work but does not guarantee a stutter-free demo. Keep CS2 running and include the `Runtime performance` log lines, which separate engine callbacks, cosmetic polling, mesh updates and native refresh costs.
+
 **Why does `-` not remove a finish?** `- (Do not modify)` deliberately leaves the current value untouched. Choose `Vanilla (No Finish)` when you want an explicit no-finish request.
 
 **Nothing changes after editing a profile.** Load the demo first, verify the watched-player XUID and base item, then press `Update`. Check `nSkinzCS2.log` for binding or compatibility failures.
 
-**Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.0 vanilla path cannot always clear; this is the documented limitation above.
+**Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.1 vanilla path cannot always clear; this is the documented limitation above.
 
 **Which build should I use?** Use `nSkinzCS2.dll` for English or `nSkinzCS2.zh-CN.dll` for the Chinese UI and catalog names. Both DLLs target the same CS2 compatibility baseline.
 

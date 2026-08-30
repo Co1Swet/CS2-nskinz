@@ -3,9 +3,10 @@
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
+#include "Cs2/CatalogStore.hpp"
 #include "Cs2/Compatibility.hpp"
 #include "Cs2/Runtime.hpp"
-#include "UI/MainWindow.hpp"
+#include "UI/ExternalUiHost.hpp"
 
 #include <Windows.h>
 
@@ -26,7 +27,6 @@ namespace
 {
 std::unique_ptr<nskinzcs2::AppState> g_state;
 std::unique_ptr<nskinzcs2::RuntimeController> g_runtime;
-std::unique_ptr<nskinzcs2::MainWindow> g_window;
 std::filesystem::path g_base_directory;
 std::filesystem::path g_config_path;
 
@@ -577,14 +577,35 @@ DWORD BootstrapThreadImpl(void* instance)
         nskinzcs2::Logger::Warn(L"Catalog parsing raised an unknown exception; continuing with fallback catalog.");
     }
 
+    const auto catalog_snapshot_path = g_base_directory / L"nSkinzCS2.catalog.json";
+    if (nskinzcs2::CatalogStore::Save(catalog_snapshot_path, catalog))
+    {
+        nskinzcs2::Logger::Info(
+            L"Published isolated-UI catalog snapshot: " + catalog_snapshot_path.wstring());
+    }
+    else
+    {
+        nskinzcs2::Logger::Warn(
+            L"Could not publish the isolated-UI catalog snapshot; the external panel will use its fallback catalog.");
+    }
+
     g_state->ReplaceCatalog(std::move(catalog));
     g_state->ReplaceConfig(nskinzcs2::ConfigStore::Load(g_config_path));
 
     g_runtime = std::make_unique<nskinzcs2::RuntimeController>(*g_state, module);
     g_runtime->Start();
 
-    g_window = std::make_unique<nskinzcs2::MainWindow>(*g_state);
-    g_window->Start();
+    if (nskinzcs2::ui::LaunchExternalUiHost(module, GetCurrentProcessId()))
+    {
+        nskinzcs2::Logger::Info(
+            L"Launched the complete nSkinzCS2 control panel outside cs2.exe; "
+            L"the injected process will not create a UI D3D11 device or text-service window.");
+    }
+    else
+    {
+        nskinzcs2::Logger::Error(
+            L"Failed to launch the isolated control-panel host. Runtime remains loaded without an in-process UI.");
+    }
 
     nskinzcs2::Logger::Info(L"nSkinzCS2 bootstrap completed.");
     return 0;

@@ -6,6 +6,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -301,7 +302,12 @@ public:
 
     model::Catalog SnapshotCatalog() const
     {
-        std::scoped_lock lock(mutex_);
+        return *SnapshotCatalogShared();
+    }
+
+    std::shared_ptr<const model::Catalog> SnapshotCatalogShared() const
+    {
+        std::scoped_lock lock(catalog_mutex_);
         return catalog_;
     }
 
@@ -326,8 +332,13 @@ public:
 
     void ReplaceCatalog(model::Catalog catalog)
     {
-        std::scoped_lock lock(mutex_);
-        catalog_ = std::move(catalog);
+        // Allocate/copy outside the short publication lock. Existing readers
+        // retain an immutable snapshot until their current apply pass ends.
+        auto replacement = std::make_shared<const model::Catalog>(std::move(catalog));
+        {
+            std::scoped_lock lock(catalog_mutex_);
+            catalog_.swap(replacement);
+        }
     }
 
     void UpdateStatus(runtime::Status status)
@@ -399,8 +410,9 @@ public:
 
 private:
     mutable std::mutex mutex_;
+    mutable std::mutex catalog_mutex_;
     model::ConfigDocument config_;
-    model::Catalog catalog_;
+    std::shared_ptr<const model::Catalog> catalog_ = std::make_shared<const model::Catalog>();
     runtime::Status status_;
     std::vector<model::DemoMirvPlayerEntry> demo_mirv_players_;
     std::atomic<std::uint64_t> config_revision_ {0};

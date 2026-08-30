@@ -19,13 +19,23 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.0/nSkinzCS2.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.0/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.0"><img src="https://img.shields.io/badge/版本说明-v0.4.0-8250df?style=for-the-badge" alt="版本说明"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.1"><img src="https://img.shields.io/badge/版本说明-v0.4.1-8250df?style=for-the-badge" alt="版本说明"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/提交问题-f85149?style=for-the-badge" alt="提交问题"></a>
 </p>
 
 > **安全提示：** nSkinzCS2 只用于通过 HLAE、带 `-insecure` 启动的离线 Demo 回放。请勿加载到 VAC 保护服务器或任何联机服务器。超出此范围使用造成的账号风险由使用者自行承担。
+
+## v0.4.1 更新
+
+- 修复使用输入法、在皮肤搜索栏输入文字导致 CS2 闪退的问题，包括英文输入触发的崩溃。完整控制面板现运行于 `cs2.exe` 之外，通过系统自带的 `rundll32.exe` 承载，无需额外下载程序。
+- 独立面板保留本机游戏的完整皮肤目录及中文名称，不以缩减涂装选项规避输入问题。
+- 修复枪械动态涂装属性同步和刀材质重复刷新。
+- “仅饰面”隐藏并忽略刀模型选择，只有“饰面＋模型”才显示模型选项。
+- 移除网格更新中的阻塞等待/重试、运行时反复复制完整目录，以及帧回调内同步写日志的开销。
+
+当前版本通过 **42 项原生回归测试**。网格函数 240 次更新的基准从 3714 毫秒降至约 0.1 毫秒；这**不是游戏帧率实测，也不代表所有 Demo 卡顿都已解决**。验证范围和已知限制见[中英双语 v0.4.1 发布说明](docs/releases/v0.4.1.md)。
 
 ## nSkinzCS2 是什么？
 
@@ -35,11 +45,11 @@ nSkinzCS2 是一个 Windows x64 DLL，用于在观看 Counter-Strike 2 Demo 时�
 
 ## 功能矩阵
 
-| 模块 | v0.4.0 支持情况 | 说明 |
+| 模块 | v0.4.1 支持情况 | 说明 |
 | --- | --- | --- |
 | 枪械 | 涂装、种子、磨损、品质、名称标签和贴纸字段 | 按观战玩家 XUID 与基础物品定义隔离配置。 |
-| 刀 | 仅换涂装、种子和磨损 | 保留 Demo 中的刀模；骷髅匕首、M9 刺刀、蝴蝶刀和爪子刀的正数涂装已验证。 |
-| 手套 | T/CT 默认手套、刀模和涂装 | 已在当前兼容版本验证默认手套定义 `5028`、`5029`。 |
+| 刀 | 仅饰面或实验性的饰面＋模型、种子和磨损 | 仅饰面保留 Demo 刀模并隐藏模型选项；仅在饰面＋模型模式下选择刀模。 |
+| 手套 | T/CT 默认手套、手套模型和涂装 | 已在当前兼容版本验证默认手套定义 `5028`、`5029`。 |
 | 挂件 | 修改或清除已有实时模块 | 对没有挂件模块的物品创建模块仍属实验功能。 |
 | 原皮 / 无涂装 | 独立的 `原皮（无涂装）` 选项 | 与 `-（不修改）` 不同；部分 Demo 刀的第一人称旧材质可能残留。 |
 | 语言 | 英文和简体中文 DLL | 中文版从本机 `csgo_schinese.txt` 读取名称。 |
@@ -60,16 +70,18 @@ mirv_loadlibrary "C:\Path\To\nSkinzCS2.zh-CN.dll"
 mirv_loadlibrary "C:\Path\To\nSkinzCS2.dll"
 ```
 
-按 `Insert` 显示面板，选择观战玩家 XUID 和外观配置，点击 `Update`。运行诊断会写入 DLL 同目录的 `nSkinzCS2.log`。
+按 `Insert` 显示面板，选择观战玩家 XUID 和外观配置，点击“更新”（`Update`）。请把 DLL 放在可写文件夹，独立面板与运行时需要在此生成和共享目录/配置文件。运行日志为 `nSkinzCS2.log`，面板日志为 `nSkinzCS2.ui.log`。
+
+升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 发布包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2-v0.4.1-windows-x64.zip)含中英文 DLL 和加载说明。
 
 ## 兼容基线
 
-`v0.4.0` 发布版基于以下版本检查：
+`v0.4.1` 发布版基于以下版本检查：
 
-- Steam app build ID `24957633`
-- CS2 ClientVersion `2000897`、Patch `1.41.7.8`、Source revision `10942762`（2026-08-26）
-- `client.dll` SHA-256：`84BCAE9DB379BED5ACB3D81228ABEF86FBD61B6CDB2B3ACCDC5DD0F32E8F89F9`
-- HLAE `2.191.1` / AfxHookSource2 `0.40.1`
+- Steam app build ID `25000182`
+- CS2 ClientVersion `2000899`、Patch `1.41.7.8`、Source revision `10948930`（2026-08-28）
+- `client.dll` SHA-256：`B8E2C009763E8CEFB88D89A2BDCF452DB17501553D473DB6DA060DF8E6769EB4`
+- HLAE `2.191.1`
 - `Source2Client002`、`ResourceSystem013`、`VFileSystem017`
 
 CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签名缺失或匹配不唯一时拒绝不确定的写入。
@@ -108,18 +120,22 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 ## 已知限制与路线图
 
 - 刀模替换和部分动画重映射仍属实验功能。
-- 如果 Demo 中的刀已经拥有编译后的自定义材质，选择 `原皮（无涂装）` 后第一人称视角仍可能显示旧材质。正数刀涂装已验证；该旧材质清理问题不在 v0.4.0 的已修复声明内。
+- 如果 Demo 中的刀已经拥有编译后的自定义材质，选择 `原皮（无涂装）` 后第一人称视角仍可能显示旧材质。正数刀涂装已验证；该旧材质清理问题不在 v0.4.1 的已修复声明内。
 - 当前优先读取已安装的 CS2 游戏数据，尚未完全改为实时物品 Schema 遍历。
 
 后续计划包括：完善原皮材质清理、扩大刀模/动画覆盖、支持空挂件模块创建，以及跟随 CS2 更新维护兼容性。
 
 ## 常见问题
 
+**修复输入崩溃是否禁用了中文，或减少了皮肤？** 没有。完整面板与 CS2 的输入/文字服务路径隔离，并读取导出的本机游戏目录，仍支持中文输入法和英文搜索。如目录异常变少，请反馈两份日志及目录文件的生成状态。
+
+**Demo 仍然卡顿怎么办？** v0.4.1 移除了已确认的阻塞操作，但不保证所有 Demo 都无卡顿。请保留 CS2 运行现场，反馈日志里的 `Runtime performance` 行，以区分游戏回调、外观轮询、网格更新和材质生成的耗时。
+
 **为什么 `-` 不会清除涂装？** `-（不修改）` 的含义就是保持当前值不变。需要明确去除涂装时请选择 `原皮（无涂装）`。
 
 **修改后没有变化。** 请先加载 Demo，确认观战玩家 XUID 和基础物品正确，再点击 `Update`；同时查看 `nSkinzCS2.log` 中的绑定或兼容性错误。
 
-**为什么刀上仍有旧材质？** 部分 Demo 物品带有编译后的第一人称材质，当前 v0.4.0 原皮路径无法保证全部清除，详见上面的已知限制。
+**为什么刀上仍有旧材质？** 部分 Demo 物品带有编译后的第一人称材质，当前 v0.4.1 原皮路径无法保证全部清除，详见上面的已知限制。
 
 **应该下载哪个 DLL？** 英文界面使用 `nSkinzCS2.dll`，中文界面和中文目录名称使用 `nSkinzCS2.zh-CN.dll`；两者兼容同一套 CS2 基线。
 

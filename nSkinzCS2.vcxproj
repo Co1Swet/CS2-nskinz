@@ -138,6 +138,7 @@
     <ClInclude Include="src\Core\Config.hpp" />
     <ClInclude Include="src\Core\Log.hpp" />
     <ClInclude Include="src\Cs2\Catalog.hpp" />
+    <ClInclude Include="src\Cs2\CatalogStore.hpp" />
     <ClInclude Include="src\Cs2\Compatibility.hpp" />
     <ClInclude Include="src\Cs2\GlobalResourceSwapper.hpp" />
     <ClInclude Include="src\Cs2\Runtime.hpp" />
@@ -146,6 +147,7 @@
     <ClInclude Include="src\Runtime\KnifeAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponAppearance.hpp" />
     <ClInclude Include="src\UI\MainWindow.hpp" />
+    <ClInclude Include="src\UI\ExternalUiHost.hpp" />
     <ClInclude Include="src\UI\UiText.hpp" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_dx11.h" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_win32.h" />
@@ -160,6 +162,7 @@
     <ClCompile Include="src\Core\Config.cpp" />
     <ClCompile Include="src\Core\Log.cpp" />
     <ClCompile Include="src\Cs2\Catalog.cpp" />
+    <ClCompile Include="src\Cs2\CatalogStore.cpp" />
     <ClCompile Include="src\Cs2\Compatibility.cpp" />
     <ClCompile Include="src\Cs2\GlobalResourceSwapper.cpp" />
     <ClCompile Include="src\Cs2\Runtime.cpp" />
@@ -169,6 +172,7 @@
     <ClCompile Include="src\Runtime\KnifeAppearance.cpp" />
     <ClCompile Include="src\Runtime\WeaponAppearance.cpp" />
     <ClCompile Include="src\UI\MainWindow.cpp" />
+    <ClCompile Include="src\UI\ExternalUiHost.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_dx11.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="third_party\imgui\imgui.cpp" />

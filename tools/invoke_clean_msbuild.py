@@ -31,6 +31,12 @@ def main() -> int:
     parser.add_argument("--platform", default="x64")
     parser.add_argument("--stdout-log", required=True)
     parser.add_argument("--stderr-log", required=True)
+    parser.add_argument(
+        "--property",
+        action="append",
+        default=[],
+        help="Additional MSBuild property in NAME=VALUE form (repeatable).",
+    )
     arguments = parser.parse_args()
 
     solution = Path(arguments.solution).resolve()
@@ -47,6 +53,7 @@ def main() -> int:
         "/nologo",
         "/v:minimal",
     ]
+    command.extend(f"/p:{value}" for value in arguments.property)
     with open(arguments.stdout_log, "w", encoding="utf-8", errors="replace") as stdout_log, open(
         arguments.stderr_log, "w", encoding="utf-8", errors="replace"
     ) as stderr_log:

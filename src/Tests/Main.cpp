@@ -1,5 +1,7 @@
 #include "Core/Config.hpp"
+#include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
+#include "Cs2/CatalogStore.hpp"
 #include "Cs2/Compatibility.hpp"
 #include "Cs2/Runtime.hpp"
 #include "Runtime/GloveAppearance.hpp"
@@ -22,6 +24,7 @@
 namespace
 {
 std::filesystem::path g_compatibility_cs2_root;
+bool g_mesh_benchmark_only = false;
 
 template <typename Fn>
 void RunNamedTest(const char* name, Fn&& fn)
@@ -42,6 +45,69 @@ void Expect(bool condition, const char* message)
     {
         throw std::runtime_error(message);
     }
+}
+
+void TestCatalogStoreRoundTrip()
+{
+    nskinzcs2::model::Catalog source;
+    source.base_items = {{7, "AK-47"}};
+    source.knife_items = {{508, "M9 Bayonet"}};
+    source.glove_items = {{5032, "Hand Wraps"}};
+    source.weapon_paint_kits = {{409, "虎牙"}, {568, "伽玛多普勒"}};
+    source.glove_paint_kits = {{10009, "Leather"}};
+    source.glove_paint_compatibility.emplace(10009, 5032);
+    source.sticker_kits = {{1, "Sticker"}};
+    source.keychain_kits = {{2, "Keychain"}};
+    source.qualities = {{3, "Vintage"}};
+    source.runtime_populated = true;
+    source.warnings = {"catalog warning"};
+
+    nskinzcs2::model::VisualInfo visual;
+    visual.world_model = "weapons/models/knife/knife_m9/weapon_knife_m9.vmdl";
+    visual.view_model = visual.world_model;
+    visual.resolved_world_model_resource_path = visual.world_model + "_c";
+    visual.resolved_view_model_resource_path = visual.resolved_world_model_resource_path;
+    visual.knife_family = "m9_bayonet";
+    visual.killfeed_icon = "knife_m9_bayonet";
+    visual.knife_identity_resolved = true;
+    visual.is_knife = true;
+    source.visuals.emplace(508, visual);
+
+    nskinzcs2::model::KeychainVisualInfo keychain_visual;
+    keychain_visual.model_path = "models/keychain.vmdl";
+    keychain_visual.resolved_model_resource_path = "models/keychain.vmdl_c";
+    source.keychain_visuals.emplace(2, keychain_visual);
+
+    const auto path = std::filesystem::temp_directory_path() /
+        (L"nSkinzCS2.catalog.roundtrip." + std::to_wstring(GetCurrentProcessId()) + L".json");
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+    Expect(nskinzcs2::CatalogStore::Save(path, source), "catalog IPC snapshot should save atomically");
+    const auto loaded = nskinzcs2::CatalogStore::Load(path);
+    std::filesystem::remove(path, remove_error);
+
+    Expect(loaded.has_value(), "catalog IPC snapshot should load");
+    Expect(loaded->base_items.size() == 1, "base item count must survive catalog IPC");
+    Expect(
+        loaded->base_items[0].id == 7 && loaded->base_items[0].name == "AK-47",
+        "base item names and IDs must survive catalog IPC");
+    Expect(loaded->weapon_paint_kits.size() == 2, "paint kit count must survive catalog IPC");
+    Expect(
+        loaded->weapon_paint_kits[0].id == 409 && loaded->weapon_paint_kits[0].name == "虎牙" &&
+            loaded->weapon_paint_kits[1].id == 568 && loaded->weapon_paint_kits[1].name == "伽玛多普勒",
+        "localized paint names must survive catalog IPC");
+    Expect(
+        loaded->glove_paint_compatibility.at(10009) == 5032,
+        "glove compatibility must survive catalog IPC");
+    Expect(loaded->visuals.at(508).is_knife, "knife visual flags must survive catalog IPC");
+    Expect(
+        loaded->visuals.at(508).resolved_world_model_resource_path ==
+            visual.resolved_world_model_resource_path,
+        "resolved knife resources must survive catalog IPC");
+    Expect(
+        loaded->keychain_visuals.at(2).resolved_model_resource_path ==
+            keychain_visual.resolved_model_resource_path,
+        "keychain resources must survive catalog IPC");
 }
 
 void TestCompatibilityManifest()
@@ -1605,6 +1671,7 @@ void TestKnifeRefreshCrashGuardPolicy()
     using nskinzcs2::runtime::ShouldAllowAttributeListVectorMutationForProfile;
     using nskinzcs2::runtime::ShouldAllowVerifiedInPlaceKnifeInitializationRefresh;
     using nskinzcs2::runtime::ShouldAllowWeaponRefreshHelperDispatch;
+    using nskinzcs2::runtime::ShouldIncrementCustomEconReloadEventForMaterialRefresh;
     using nskinzcs2::runtime::ShouldConsumeKnifeRefreshHelperEpoch;
     using nskinzcs2::runtime::ShouldDispatchKnifeRefreshWithInPlaceAttributes;
     using nskinzcs2::runtime::ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason;
@@ -1668,6 +1735,9 @@ void TestKnifeRefreshCrashGuardPolicy()
         ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(RuntimeRebuildReason::PauseResume),
         "pause/resume should preserve verified weapon material signatures");
     Expect(
+        ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(RuntimeRebuildReason::ManualRefresh),
+        "an unchanged manual Update should preserve verified weapon material signatures");
+    Expect(
         ShouldPreserveWeaponAppearanceSignaturesOnRebuildReason(RuntimeRebuildReason::WatchedPlayerSwitch),
         "spectator-target switches should preserve verified weapon material signatures");
     Expect(
@@ -1680,6 +1750,9 @@ void TestKnifeRefreshCrashGuardPolicy()
     Expect(
         ShouldAllowWeaponRefreshHelperDispatch(false, KnifeRefreshHelperPolicy::Disabled, false),
         "standard weapon helper dispatch should stay enabled under the knife crash guard");
+    Expect(
+        !ShouldIncrementCustomEconReloadEventForMaterialRefresh(),
+        "explicit material refresh must not also forge a second network reload event");
     Expect(
         !ShouldAllowWeaponRefreshHelperDispatch(true, KnifeRefreshHelperPolicy::Disabled, false),
         "disabled crash-guard mode should suppress knife helper dispatch");
@@ -1714,7 +1787,7 @@ void TestKnifeRefreshCrashGuardPolicy()
         "a knife refresh must not dispatch with incomplete in-place attributes");
     Expect(
         !ShouldDispatchKnifeRefreshWithInPlaceAttributes(false, true, true),
-        "standard weapons should retain their existing temporary/runtime-owned attachment path");
+        "standard weapons should use the native material gate without temporary attribute attachments");
 
     Expect(
         ShouldUseKnifeVanillaTemporaryRefreshOverlay(true, true, false),
@@ -1798,14 +1871,14 @@ void TestKnifeRefreshCrashGuardPolicy()
         nskinzcs2::model::CosmeticProfile weapon_profile;
         weapon_profile.base_item = 9;
         Expect(
-            ShouldAllowAttributeListVectorMutationForProfile(weapon_profile),
-            "standard weapons should keep attribute-list vector mutation enabled");
+            !ShouldAllowAttributeListVectorMutationForProfile(weapon_profile),
+            "standard weapons must not grow or replace live attribute-list vectors");
         Expect(
-            ShouldInstallRuntimeOwnedAttributeListForProfile(weapon_profile),
-            "standard weapons should keep runtime-owned attribute-list installs enabled");
+            !ShouldInstallRuntimeOwnedAttributeListForProfile(weapon_profile),
+            "standard weapons must not install runtime-owned attribute-list storage");
         Expect(
-            ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile),
-            "standard weapon refresh helper attachments should remain live for deferred material consumption");
+            !ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile),
+            "standard weapon refresh must use native invalidation without promoted attribute attachments");
         Expect(
             !ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(weapon_profile),
             "standard weapon in-place attachments must not touch stale entity storage after seek detection");
@@ -1814,8 +1887,8 @@ void TestKnifeRefreshCrashGuardPolicy()
         keychain_profile.base_item = weapon_profile.base_item;
         keychain_profile.keychain_kit = 101;
         Expect(
-            ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile, &keychain_profile),
-            "standard weapon keychain refresh helper attachments should promote to runtime-owned so the full keychain block survives cleanup");
+            !ProbeKnifeRefreshAttachmentPromotionAllowedForTests(weapon_profile, &keychain_profile),
+            "standard weapon keychain refresh must not retain rewritten CS2 attribute storage");
         Expect(
             !ProbePromotedWeaponRefreshAttachmentRestoresOnAbandonForTests(weapon_profile, &keychain_profile),
             "standard weapon promoted in-place attachments must be abandoned without stale entity writes");
@@ -2239,6 +2312,18 @@ void TestKnifeAppearanceModule()
     Expect(finish_request.xuid == finish_only_profile.xuid, "knife request should preserve xuid");
     Expect(finish_request.mode == KnifeSlotMode::FinishOnly, "finish-only request should stay finish-only");
     Expect(model_request.mode == KnifeSlotMode::ModelAndFinish, "valid knife request should preserve model-and-finish");
+
+    auto finish_with_stale_m9 = finish_only_profile;
+    finish_with_stale_m9.model_definition = 508;
+    const auto stale_m9_request = BuildKnifeAppearanceRequest(finish_with_stale_m9);
+    Expect(stale_m9_request.mode == KnifeSlotMode::FinishOnly && stale_m9_request.model_definition == 0,
+        "finish-only must ignore an M9 saved by an older panel without enabling model replacement");
+    Expect(stale_m9_request.paint_kit == finish_request.paint_kit &&
+        stale_m9_request.seed == finish_request.seed && stale_m9_request.wear == finish_request.wear,
+        "ignoring a stale model must preserve the selected finish, seed and wear");
+    Expect(BuildKnifeProfileApplySignature(stale_m9_request, stale_m9_request.xuid, 507, 0x55ull) ==
+        BuildKnifeProfileApplySignature(finish_request, finish_request.xuid, 507, 0x55ull),
+        "a hidden stale M9 selection must not alter finish-only material identity");
 
     auto vanilla_profile = finish_only_profile;
     vanilla_profile.paint_kit = 0;
@@ -4303,6 +4388,132 @@ void TestWeaponRefreshTargetMaterialRefreshGate()
     }
 }
 
+void TestKnifeRepeatedFieldRepair()
+{
+    using nskinzcs2::runtime::ShouldQueueWeaponMaterialRefresh;
+    Expect(!ShouldQueueWeaponMaterialRefresh(true, true), "completed knife refresh must not repeat after scalar repair");
+    Expect(ShouldQueueWeaponMaterialRefresh(true, false), "a new finish must still regenerate materials");
+    Expect(ShouldQueueWeaponMaterialRefresh(true, true, true), "an explicit force refresh must remain available");
+    Expect(!ShouldQueueWeaponMaterialRefresh(false, false), "no cosmetic intent must not generate materials");
+    const auto result = nskinzcs2::runtime::ProbeKnifeRepeatedFieldRepairForTests();
+    Expect(result.repaired_frames == 240, "all 240 demo scalar rewrites must still be repaired");
+    Expect(result.redundant_refresh_requests == 0, "240 unchanged knife frames must enqueue zero redundant regenerations");
+    Expect(result.completed_request_reused, "the refresh dispatcher must deduplicate already-completed requests");
+    Expect(result.changed_finish_queued, "changing paint and seed must still enqueue the native refresh");
+    Expect(result.new_entity_epoch_queued, "a demo seek/entity rebuild must allow material initialization again");
+    Expect(result.model_and_finish_preserved, "the M9 model and newly selected finish must remain applied");
+}
+
+void TestWeaponMeshMaskNonblocking()
+{
+    const auto result = nskinzcs2::runtime::ProbeWeaponMeshMaskForTests();
+    std::cout << "[PERF] mesh_updates=" << result.successful_updates
+        << " elapsed_ms=" << result.elapsed_milliseconds << '\n';
+    Expect(result.successful_updates == 240 && result.both_masks_verified,
+        "mesh updates must repair both masks, including repeated demo rewrites and 1/2 transitions");
+    Expect(result.matching_readonly_is_noop, "matching meshes must not attempt even one redundant write");
+    Expect(result.mismatching_readonly_rejected, "unwritable mismatching meshes must fail without waiting");
+    Expect(result.missing_dirty_data_rejected, "missing dirty model storage must not report a successful apply");
+    // Broad enough for loaded CI hosts, but detects the old 240 * Sleep(5)
+    // regression (3.7 seconds on this Windows host). Not a game FPS assertion.
+    Expect(result.elapsed_milliseconds < 500.0, "240 mesh updates must not contain a game-thread sleep/retry loop");
+}
+
+void TestImmutableCatalogSnapshot()
+{
+    nskinzcs2::AppState state;
+    nskinzcs2::model::Catalog original;
+    original.weapon_paint_kits = {{0, "-"}, {617, "Doppler"}, {1040, "The Traitor"}};
+    original.sticker_kits.resize(11642);
+    state.ReplaceCatalog(original);
+    const auto first = state.SnapshotCatalogShared();
+    for (int i = 0; i < 240; ++i)
+        Expect(state.SnapshotCatalogShared().get() == first.get(), "runtime catalog reads must not copy the entire catalog");
+    auto editable = state.SnapshotCatalog();
+    editable.weapon_paint_kits.push_back({568, "Gamma Doppler"});
+    Expect(first->weapon_paint_kits.size() == 3, "editable UI copies must not mutate a runtime snapshot");
+    state.ReplaceCatalog(std::move(editable));
+    const auto second = state.SnapshotCatalogShared();
+    Expect(second.get() != first.get() && second->weapon_paint_kits.size() == 4 &&
+        second->sticker_kits.size() == 11642, "catalog publication must retain every entry, including newly loaded finishes");
+    Expect(first->weapon_paint_kits.size() == 3 && first->sticker_kits.size() == 11642,
+        "an active apply pass must retain its old catalog safely across replacement");
+}
+
+void TestDeferredRuntimeLogging()
+{
+    const auto directory = std::filesystem::temp_directory_path();
+    const auto filename = L"nSkinzCS2.deferred." + std::to_wstring(GetCurrentProcessId()) + L".log";
+    const auto path = directory / filename;
+    nskinzcs2::Logger::Initialize(directory.wstring(), filename);
+    const auto initial_size = std::filesystem::file_size(path);
+    {
+        nskinzcs2::Logger::DeferredScope outer;
+        nskinzcs2::Logger::Info(L"queued-outer-marker");
+        {
+            nskinzcs2::Logger::DeferredScope nested;
+            nskinzcs2::Logger::Warn(L"queued-inner-marker");
+        }
+        nskinzcs2::Logger::FlushDeferred();
+        Expect(std::filesystem::file_size(path) == initial_size,
+            "neither nested logging nor flush inside a game callback may touch the file");
+        for (int i = 0; i < 600; ++i) nskinzcs2::Logger::Info(L"bounded-queue-entry");
+    }
+    Expect(std::filesystem::file_size(path) == initial_size, "leaving the callback must not flush on the game thread");
+    nskinzcs2::Logger::FlushDeferred();
+    std::wifstream stream(path);
+    const std::wstring content((std::istreambuf_iterator<wchar_t>(stream)), std::istreambuf_iterator<wchar_t>());
+    Expect(content.find(L"queued-outer-marker") != std::wstring::npos &&
+        content.find(L"queued-inner-marker") != std::wstring::npos, "the worker must retain normal callback diagnostics");
+    Expect(content.find(L"diagnostics dropped=90") != std::wstring::npos,
+        "queue overflow must be bounded and reported instead of blocking gameplay");
+    stream.close();
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
+
+void TestStandardWeaponAttributeSynchronization()
+{
+    using nskinzcs2::runtime::ProbeStandardWeaponAttributeSynchronizationForTests;
+    const std::vector<std::pair<std::uint16_t, float>> desired {{6, 1040}, {7, 0}, {8, 0.0000001f}};
+    const std::vector<std::pair<std::uint16_t, float>> recorded {{6, 1142}, {7, 913.7957f}, {8, 0.2667014f}};
+    const auto usp = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, desired);
+    Expect(!usp.matched_before, "USP fallback 1040 must not hide recorded dynamic paint 1142");
+    Expect(usp.synchronized && usp.matched_after && usp.changed_slots == 3, "all three recorded USP finish slots must synchronize");
+    Expect(usp.repeated_update_is_noop, "repeated Update must not notify or write matching slots again");
+    Expect(usp.demo_rewrite_repaired, "a demo rewrite must be repaired without replacing its vector");
+    Expect(usp.vectors_and_node_metadata_preserved, "never modify vectors, definition IDs, owners or node metadata");
+    Expect(usp.original_values_restored, "runtime reset must restore the recorded values in unchanged storage");
+
+    const auto conflict = ProbeStandardWeaponAttributeSynchronizationForTests(recorded, desired, desired);
+    Expect(!conflict.matched_before && conflict.synchronized && conflict.matched_after,
+        "a matching dynamic list must not hide a conflicting static mirror");
+    Expect(conflict.changed_slots == 3 && conflict.original_values_restored, "only the conflicting mirror should be rewritten and restored");
+    const auto duplicate = ProbeStandardWeaponAttributeSynchronizationForTests({}, {{6, 1040}, {6, 1142}}, desired);
+    Expect(!duplicate.matched_before && duplicate.matched_after && duplicate.changed_slots == 1,
+        "all duplicate paint slots must be verified, not just the first match");
+    const auto stock = ProbeStandardWeaponAttributeSynchronizationForTests({}, {}, desired, false);
+    Expect(stock.synchronized && stock.matched_after && stock.changed_slots == 0,
+        "empty stock finish lists must remain empty and use real entity fallback fields");
+    const auto vanilla = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, {{6, 0}, {7, 0}, {8, 0.0000001f}});
+    Expect(vanilla.synchronized && vanilla.matched_after && vanilla.original_values_restored,
+        "explicit vanilla must synchronize paint zero without deleting or reallocating slots");
+    const auto unchanged = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, {}, false);
+    Expect(unchanged.synchronized && unchanged.changed_slots == 0 && unchanged.original_values_restored,
+        "No change must leave the original finish untouched");
+    const auto no_callback = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, desired, false);
+    Expect(!no_callback.synchronized && !no_callback.matched_after && no_callback.original_values_restored,
+        "missing schema notification must fail without silently applying raw attribute writes");
+    const auto failed = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, desired, true, 2);
+    Expect(!failed.synchronized && failed.original_values_restored && failed.vectors_and_node_metadata_preserved,
+        "a mid-transaction notification failure must roll back scalar values without damaging nodes");
+    const auto sticker = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, {{113, 12}});
+    Expect(!sticker.synchronized && sticker.original_values_restored,
+        "missing attributes without entity fallback storage cannot count as applied");
+    const auto invalid = ProbeStandardWeaponAttributeSynchronizationForTests({}, {{6, 1040}}, {{6, std::numeric_limits<float>::quiet_NaN()}});
+    Expect(!invalid.synchronized && invalid.original_values_restored, "non-finite desired attributes must not be written");
+}
+
 void TestStandardWeaponRefreshModel()
 {
     using nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey;
@@ -4598,7 +4809,18 @@ int RunAllTests()
 {
     try
     {
+        if (g_mesh_benchmark_only)
+        {
+            const auto result = nskinzcs2::runtime::ProbeWeaponMeshMaskForTests();
+            std::cout << "mesh_updates=" << result.successful_updates
+                << " elapsed_ms=" << result.elapsed_milliseconds
+                << " readonly_noop=" << result.matching_readonly_is_noop
+                << " readonly_mismatch_rejected=" << result.mismatching_readonly_rejected
+                << " missing_dirty_rejected=" << result.missing_dirty_data_rejected << '\n';
+            return result.both_masks_verified ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
         RunNamedTest("TestCompatibilityManifest", TestCompatibilityManifest);
+        RunNamedTest("TestCatalogStoreRoundTrip", TestCatalogStoreRoundTrip);
         RunNamedTest("TestInstalledCompatibilityIfRequested", TestInstalledCompatibilityIfRequested);
         RunNamedTest("TestConfigRoundTrip", TestConfigRoundTrip);
         RunNamedTest("TestCosmeticWearPolicy", TestCosmeticWearPolicy);
@@ -4633,7 +4855,12 @@ int RunAllTests()
         RunNamedTest("TestBuildMissingWeaponAttributeDefinitionIndices", TestBuildMissingWeaponAttributeDefinitionIndices);
         RunNamedTest("TestWeaponRefreshTargetMaterialRefreshGate", TestWeaponRefreshTargetMaterialRefreshGate);
         RunNamedTest("TestStandardWeaponRefreshModel", TestStandardWeaponRefreshModel);
+        RunNamedTest("TestStandardWeaponAttributeSynchronization", TestStandardWeaponAttributeSynchronization);
+        RunNamedTest("TestKnifeRepeatedFieldRepair", TestKnifeRepeatedFieldRepair);
+        RunNamedTest("TestWeaponMeshMaskNonblocking", TestWeaponMeshMaskNonblocking);
+        RunNamedTest("TestImmutableCatalogSnapshot", TestImmutableCatalogSnapshot);
         RunNamedTest("TestWeaponAppearanceModule", TestWeaponAppearanceModule);
+        RunNamedTest("TestDeferredRuntimeLogging", TestDeferredRuntimeLogging);
         std::cout << "nSkinzCS2 tests passed\n";
         return EXIT_SUCCESS;
     }
@@ -4658,6 +4885,10 @@ void ParseArguments(const int argc, wchar_t** argv)
         else if (argument == L"--cs2-root" && index + 1 < argc)
         {
             g_compatibility_cs2_root = argv[++index];
+        }
+        else if (argument == L"--mesh-benchmark")
+        {
+            g_mesh_benchmark_only = true;
         }
     }
 }

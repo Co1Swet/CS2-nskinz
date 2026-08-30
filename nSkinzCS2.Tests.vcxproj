@@ -91,6 +91,7 @@
     <ClInclude Include="src\Core\AppState.hpp" />
     <ClInclude Include="src\Core\Config.hpp" />
     <ClInclude Include="src\Cs2\Catalog.hpp" />
+    <ClInclude Include="src\Cs2\CatalogStore.hpp" />
     <ClInclude Include="src\Cs2\Compatibility.hpp" />
     <ClInclude Include="src\Cs2\GlobalResourceSwapper.hpp" />
     <ClInclude Include="src\Cs2\Runtime.hpp" />
@@ -106,6 +107,7 @@
     <ClCompile Include="src\Core\Config.cpp" />
     <ClCompile Include="src\Core\Log.cpp" />
     <ClCompile Include="src\Cs2\Catalog.cpp" />
+    <ClCompile Include="src\Cs2\CatalogStore.cpp" />
     <ClCompile Include="src\Cs2\Compatibility.cpp" />
     <ClCompile Include="src\Cs2\GlobalResourceSwapper.cpp" />
     <ClCompile Include="src\Cs2\Runtime.cpp" />

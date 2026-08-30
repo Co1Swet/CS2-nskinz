@@ -2,6 +2,7 @@
 
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
+#include "UI/ExternalUiHost.hpp"
 #include "UI/UiText.hpp"
 
 #include <d3d11.h>
@@ -15,7 +16,6 @@
 #include <array>
 #include <chrono>
 #include <cfloat>
-#include <cctype>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -626,30 +626,149 @@ int FindIndexById(const std::vector<NamedId>& values, const int id)
     return 0;
 }
 
-std::string Lowercase(std::string_view value)
+// Fold only the ASCII range while comparing UTF-8 strings.  Applying the C
+// locale's std::tolower() to each byte is both needlessly expensive for a
+// large catalog and not Unicode-aware (the bytes of a Chinese code point are
+// not individual characters).  Keeping non-ASCII bytes unchanged still gives
+// exact UTF-8 substring matching for localized names and avoids allocating a
+// second string for every item on every ImGui frame.
+unsigned char FoldAscii(const unsigned char ch) noexcept
 {
-    std::string result(value);
-    std::transform(
-        result.begin(),
-        result.end(),
-        result.begin(),
-        [](unsigned char ch)
-        {
-            return static_cast<char>(std::tolower(ch));
-        });
-    return result;
+    return ch >= static_cast<unsigned char>('A') && ch <= static_cast<unsigned char>('Z')
+        ? static_cast<unsigned char>(ch + ('a' - 'A'))
+        : ch;
 }
 
-bool ContainsCaseInsensitive(std::string_view haystack, std::string_view needle)
+bool ContainsCaseInsensitive(const std::string_view haystack, const std::string_view needle) noexcept
 {
     if (needle.empty())
     {
         return true;
     }
 
-    const auto lower_haystack = Lowercase(haystack);
-    const auto lower_needle = Lowercase(needle);
-    return lower_haystack.find(lower_needle) != std::string::npos;
+    if (needle.size() > haystack.size())
+    {
+        return false;
+    }
+
+    for (std::size_t start = 0; start + needle.size() <= haystack.size(); ++start)
+    {
+        bool matches = true;
+        for (std::size_t offset = 0; offset < needle.size(); ++offset)
+        {
+            if (FoldAscii(static_cast<unsigned char>(haystack[start + offset])) !=
+                FoldAscii(static_cast<unsigned char>(needle[offset])))
+            {
+                matches = false;
+                break;
+            }
+        }
+
+        if (matches)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Return the largest prefix that ends on a complete UTF-8 code point.  The
+// search edit control stores UTF-8 in a fixed ImGui buffer; truncating a
+// Chinese query in the middle of a three-byte code point can leave invalid
+// text for the renderer.  This helper keeps the buffer valid even when a
+// future catalog contains names longer than the control's capacity.
+std::size_t Utf8PrefixSize(const std::string_view value, const std::size_t max_bytes) noexcept
+{
+    const std::size_t limit = std::min(value.size(), max_bytes);
+    std::size_t position = 0;
+
+    while (position < limit)
+    {
+        const unsigned char lead = static_cast<unsigned char>(value[position]);
+        std::size_t width = 1;
+        if (lead >= 0xC2U && lead <= 0xDFU)
+        {
+            width = 2;
+        }
+        else if (lead >= 0xE0U && lead <= 0xEFU)
+        {
+            width = 3;
+        }
+        else if (lead >= 0xF0U && lead <= 0xF4U)
+        {
+            width = 4;
+        }
+        else if (lead >= 0x80U && lead <= 0xBFU)
+        {
+            // A stray continuation byte is still safe to copy as one byte;
+            // ImGui will replace it when the user edits the query.
+            ++position;
+            continue;
+        }
+
+        if (position + width > limit || position + width > value.size())
+        {
+            break;
+        }
+
+        bool valid = true;
+        for (std::size_t offset = 1; offset < width; ++offset)
+        {
+            const unsigned char continuation = static_cast<unsigned char>(value[position + offset]);
+            if (continuation < 0x80U || continuation > 0xBFU)
+            {
+                valid = false;
+                break;
+            }
+        }
+
+        if (!valid)
+        {
+            ++position;
+            continue;
+        }
+
+        position += width;
+    }
+
+    return position;
+}
+
+bool InputSearchText(const char* label, const char* hint, std::string& value)
+{
+    // Keep the ImGui edit buffer independent from the std::string stored in
+    // the filter map.  This avoids handing a resizable C++ object to the
+    // Win32/IME input path, which is especially sensitive while a CJK
+    // composition string is being committed.  2048 bytes is much larger than
+    // any catalog name and still keeps the input control bounded.
+    constexpr std::size_t kSearchBufferSize = 2048;
+    std::array<char, kSearchBufferSize> buffer {};
+    const auto copy_size = Utf8PrefixSize(value, kSearchBufferSize - 1);
+    if (copy_size != 0)
+    {
+        std::copy_n(value.data(), copy_size, buffer.data());
+    }
+
+    const bool changed = ImGui::InputTextWithHint(
+        label,
+        hint,
+        buffer.data(),
+        buffer.size(),
+        ImGuiInputTextFlags_NoUndoRedo);
+
+    if (changed)
+    {
+        std::size_t text_size = 0;
+        while (text_size < buffer.size() && buffer[text_size] != '\0')
+        {
+            ++text_size;
+        }
+        const std::string_view text(buffer.data(), text_size);
+        value.assign(text.data(), Utf8PrefixSize(text, text.size()));
+    }
+
+    return changed;
 }
 
 bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, const int popup_count = 10)
@@ -674,15 +793,13 @@ bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, c
     if (ImGui::BeginCombo(label, values[current_index].name.c_str()))
     {
         auto& filter = filters[combo_id];
-        char filter_buffer[128] {};
-        const auto copy_size = std::min<std::size_t>(filter.size(), sizeof(filter_buffer) - 1);
-        std::copy_n(filter.data(), copy_size, filter_buffer);
-
         ImGui::PushID(static_cast<int>(combo_id));
         ImGui::SetNextItemWidth(-FLT_MIN);
-        if (ImGui::InputTextWithHint("##search", Ui(UiTextId::SearchHint), filter_buffer, sizeof(filter_buffer)))
+        InputSearchText("##search", Ui(UiTextId::SearchHint), filter);
+        const auto complete_utf8_size = Utf8PrefixSize(filter, filter.size());
+        if (complete_utf8_size != filter.size())
         {
-            filter = filter_buffer;
+            filter.resize(complete_utf8_size);
         }
         ImGui::PopID();
 
@@ -857,10 +974,14 @@ std::string Narrow(const std::wstring& value)
 class WindowController
 {
 public:
-    WindowController(AppState& state, std::atomic_bool& stop_requested)
+    WindowController(
+        AppState& state,
+        std::atomic_bool& stop_requested,
+        const DWORD external_runtime_process_id)
         : state_(state)
         , stop_requested_(stop_requested)
         , config_path_(ResolveConfigPath())
+        , external_runtime_process_id_(external_runtime_process_id)
     {
         state_.SetWindowVisible(false);
         working_config_ = state_.SnapshotConfig();
@@ -956,7 +1077,6 @@ private:
             Logger::Error(L"Failed to create nSkinzCS2 UI window.");
             return false;
         }
-
         if (!CreateDeviceD3D())
         {
             Logger::Error(L"Failed to create D3D11 device for UI window.");
@@ -1102,7 +1222,7 @@ private:
         D3D_FEATURE_LEVEL created_level {};
         auto result = D3D11CreateDeviceAndSwapChain(
             nullptr,
-            D3D_DRIVER_TYPE_WARP,
+            D3D_DRIVER_TYPE_HARDWARE,
             nullptr,
             0,
             feature_levels,
@@ -1116,13 +1236,13 @@ private:
 
         if (SUCCEEDED(result))
         {
-            Logger::Info(L"UI D3D11 device created using WARP software rasterizer for stability.");
+            Logger::Info(L"External UI D3D11 device created using hardware acceleration.");
         }
         else
         {
             result = D3D11CreateDeviceAndSwapChain(
                 nullptr,
-                D3D_DRIVER_TYPE_HARDWARE,
+                D3D_DRIVER_TYPE_WARP,
                 nullptr,
                 0,
                 feature_levels,
@@ -1136,7 +1256,7 @@ private:
 
             if (SUCCEEDED(result))
             {
-                Logger::Warn(L"UI WARP device creation failed; falling back to hardware D3D11 for the tool window.");
+                Logger::Warn(L"External UI hardware D3D11 creation failed; using the WARP software fallback.");
             }
         }
 
@@ -1266,7 +1386,20 @@ private:
         device_context_->OMSetRenderTargets(1, &render_target_view_, nullptr);
         device_context_->ClearRenderTargetView(render_target_view_, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        swap_chain_->Present(1, 0);
+        const auto present_result = swap_chain_->Present(1, 0);
+        if (FAILED(present_result))
+        {
+            if (!present_failure_logged_)
+            {
+                present_failure_logged_ = true;
+                std::wstringstream stream;
+                stream << L"External UI DXGI Present failed with HRESULT 0x"
+                       << std::hex << std::uppercase
+                       << static_cast<unsigned long>(present_result);
+                Logger::Warn(stream.str());
+            }
+            return;
+        }
         if (!first_frame_presented_)
         {
             first_frame_presented_ = true;
@@ -1628,19 +1761,6 @@ private:
     void DrawKnifeProfileEditor(const Catalog& catalog, const nskinzcs2::runtime::Status& status)
     {
         auto& profile = CurrentKnifeProfile();
-        std::vector<NamedId> knife_model_items;
-        knife_model_items.reserve(catalog.knife_items.size() + 1);
-        knife_model_items.push_back(NamedId {0, Ui(UiTextId::SelectKnifeModel)});
-        for (const auto& knife_item : catalog.knife_items)
-        {
-            if (IsSelectableKnifeModelDefinition(catalog, knife_item.id))
-            {
-                knife_model_items.push_back(knife_item);
-            }
-        }
-        const bool missing_model_definition =
-            profile.mode == KnifeProfileMode::ModelAndFinish && profile.model_definition == 0;
-        const bool model_and_finish_requested = profile.mode == KnifeProfileMode::ModelAndFinish;
         const bool runtime_finish_only_active =
             status.knife_runtime_path == L"Knife finish-only runtime path active";
         const bool runtime_model_swap_active =
@@ -1671,15 +1791,31 @@ private:
         }
         if (DrawKnifeModeCombo(profile.mode))
         {
+            if (profile.mode == KnifeProfileMode::FinishOnly)
+            {
+                profile.model_definition = 0;
+            }
             PushWorkingConfig();
         }
 
-        if (ComboById(Ui(UiTextId::KnifeModel), knife_model_items, profile.model_definition, 10))
+        if (profile.mode == KnifeProfileMode::ModelAndFinish)
         {
-            profile.mode = profile.model_definition != 0
-                ? KnifeProfileMode::ModelAndFinish
-                : KnifeProfileMode::FinishOnly;
-            PushWorkingConfig();
+            std::vector<NamedId> knife_model_items;
+            knife_model_items.reserve(catalog.knife_items.size() + 1);
+            knife_model_items.push_back(NamedId {0, Ui(UiTextId::SelectKnifeModel)});
+            for (const auto& knife_item : catalog.knife_items)
+            {
+                if (IsSelectableKnifeModelDefinition(catalog, knife_item.id))
+                {
+                    knife_model_items.push_back(knife_item);
+                }
+            }
+            if (ComboById(Ui(UiTextId::KnifeModel), knife_model_items, profile.model_definition, 10))
+            {
+                // The mode selector is authoritative. Selecting/clearing a
+                // model must never silently switch finish-only/model modes.
+                PushWorkingConfig();
+            }
         }
 
         if (ComboFinishByIntent(
@@ -1720,6 +1856,8 @@ private:
             PushWorkingConfig();
         }
 
+        const bool model_and_finish_requested = profile.mode == KnifeProfileMode::ModelAndFinish;
+        const bool missing_model_definition = model_and_finish_requested && profile.model_definition == 0;
         if (missing_model_definition)
         {
             ImGui::TextWrapped("%s", Ui(UiTextId::KnifeModelRequired));
@@ -2114,17 +2252,40 @@ private:
             }
             else
             {
-                state_.ReplaceConfig(working_config_);
-                if (ShouldUseLightweightDemoKeychainRefresh(runtime_status, working_config_))
+                const bool external_update = external_runtime_process_id_ != 0;
+                const bool update_published = !external_update ||
+                    nskinzcs2::ui::PublishExternalConfigUpdate(
+                        external_runtime_process_id_,
+                        config_path_,
+                        working_config_);
+                if (!update_published)
                 {
-                    state_.RequestDemoKeychainRefresh();
+                    Logger::Warn(
+                        L"UI could not publish the staged config to the injected runtime; "
+                        L"the editor remains dirty.");
                 }
                 else
                 {
-                    state_.RequestManualRefresh();
+                    if (!external_update)
+                    {
+                        Logger::Warn(L"Unexpected in-process UI update path used.");
+                    }
+                    state_.ReplaceConfig(working_config_);
+                    if (!external_update &&
+                        ShouldUseLightweightDemoKeychainRefresh(runtime_status, working_config_))
+                    {
+                        state_.RequestDemoKeychainRefresh();
+                    }
+                    else if (!external_update)
+                    {
+                        state_.RequestManualRefresh();
+                    }
+                    working_config_dirty_ = false;
+                    Logger::Info(
+                        external_update
+                            ? L"External UI saved and published staged config via Update."
+                            : L"UI applied staged config via Update.");
                 }
-                working_config_dirty_ = false;
-                Logger::Info(L"UI applied staged config via Update.");
             }
         }
 
@@ -2307,8 +2468,18 @@ private:
         switch (message)
         {
         case kAutomatedRuntimeRefreshMessage:
-            state_.RequestManualRefresh();
-            Logger::Info(L"Runtime Update requested by local regression automation.");
+            if (external_runtime_process_id_ != 0)
+            {
+                nskinzcs2::ui::PublishExternalConfigUpdate(
+                    external_runtime_process_id_,
+                    config_path_,
+                    state_.SnapshotConfig());
+            }
+            else
+            {
+                state_.RequestManualRefresh();
+            }
+            Logger::Info(L"Runtime Update requested by local regression automation through the isolated UI.");
             return 0;
         case WM_SIZE:
             if (device_ != nullptr && swap_chain_ != nullptr && wparam != SIZE_MINIMIZED)
@@ -2341,6 +2512,7 @@ private:
     AppState& state_;
     std::atomic_bool& stop_requested_;
     std::filesystem::path config_path_;
+    DWORD external_runtime_process_id_ = 0;
     ConfigDocument working_config_;
     bool working_config_dirty_ = false;
     int selected_profile_ = 0;
@@ -2357,6 +2529,7 @@ private:
     bool first_win32_frame_completed_ = false;
     bool first_imgui_frame_started_ = false;
     bool first_frame_presented_ = false;
+    bool present_failure_logged_ = false;
 
     HWND hwnd_ = nullptr;
     ID3D11Device* device_ = nullptr;
@@ -2366,8 +2539,11 @@ private:
 };
 }
 
-nskinzcs2::MainWindow::MainWindow(AppState& state)
+nskinzcs2::MainWindow::MainWindow(
+    AppState& state,
+    const DWORD external_runtime_process_id)
     : state_(state)
+    , external_runtime_process_id_(external_runtime_process_id)
 {
 }
 
@@ -2414,7 +2590,10 @@ void nskinzcs2::MainWindow::ThreadMainImpl()
 {
     try
     {
-        WindowController controller(state_, stop_requested_);
+        WindowController controller(
+            state_,
+            stop_requested_,
+            external_runtime_process_id_);
         controller.Run();
     }
     catch (const std::exception& exception)

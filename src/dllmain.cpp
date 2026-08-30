@@ -32,7 +32,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
     {
-        DisableThreadLibraryCalls(instance);
+        // /MT uses the static CRT, which needs thread attach/detach callbacks.
+        // Do not call DisableThreadLibraryCalls for this portable build.
         // The complete control panel is hosted by rundll32.exe.  Never start
         // the injected runtime when this DLL is acting as the isolated UI.
         if (!IsCs2HostProcess())

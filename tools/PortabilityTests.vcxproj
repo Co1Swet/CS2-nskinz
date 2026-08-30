@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{250729E8-7471-4BA8-960D-9998843827D4}</ProjectGuid>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <TestKind Condition="'$(TestKind)'==''">Loader</TestKind>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <ConfigurationType Condition="'$(TestKind)'=='CompilerStub'">DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\portability-tests\$(TestKind)\</OutDir>
+    <IntDir>$(OutDir)obj\</IntDir>
+    <TargetName>nSkinzCS2.LoadCheck</TargetName>
+    <TargetName Condition="'$(TestKind)'=='Renderer'">nSkinzCS2.RenderCheck</TargetName>
+    <TargetName Condition="'$(TestKind)'=='CompilerStub'">D3DCOMPILER_47</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <WarningLevel>Level4</WarningLevel>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <Optimization>MaxSpeed</Optimization>
+      <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;NSKINZCS2_DX11_EMBEDDED_SHADERS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;$(ProjectDir)..\third_party\imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <OptimizeReferences>true</OptimizeReferences>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <AdditionalDependencies Condition="'$(TestKind)'=='Renderer'">d3d11.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <NoEntryPoint Condition="'$(TestKind)'=='CompilerStub'">true</NoEntryPoint>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup Condition="'$(TestKind)'=='Loader'"><ClCompile Include="PortableLoaderProbe.cpp" /></ItemGroup>
+  <ItemGroup Condition="'$(TestKind)'=='CompilerStub'"><ClCompile Include="LoaderCompilerStub.cpp" /></ItemGroup>
+  <ItemGroup Condition="'$(TestKind)'=='Renderer'">
+    <ClCompile Include="Dx11EmbeddedShaderTest.cpp" />
+    <ClCompile Include="..\third_party\imgui\backends\imgui_impl_dx11.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_draw.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_tables.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_widgets.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

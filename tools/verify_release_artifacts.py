@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import struct
+import sys
 from pathlib import Path
+
+from audit_portable_dll import audit
 
 
 VPK_SIGNATURE = 0x55AA1234
@@ -123,11 +126,16 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--english-dll", required=True, type=Path)
     parser.add_argument("--chinese-dll", required=True, type=Path)
     parser.add_argument("--vpk", required=True, type=Path)
     args = parser.parse_args()
+
+    for dll in (args.english_dll, args.chinese_dll):
+        result = audit(dll)
+        print(f"{dll.name}: x64 portable imports passed: {', '.join(result['imports'])}")
 
     english = args.english_dll.read_bytes()
     chinese = args.chinese_dll.read_bytes()

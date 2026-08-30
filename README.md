@@ -19,15 +19,25 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.1"><img src="https://img.shields.io/badge/Release%20notes-v0.4.1-8250df?style=for-the-badge" alt="Release notes"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.2/nSkinzCS2.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.2/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.2"><img src="https://img.shields.io/badge/Release%20notes-v0.4.2-8250df?style=for-the-badge" alt="Release notes"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/Report%20an%20issue-f85149?style=for-the-badge" alt="Report an issue"></a>
 </p>
 
 > **Safety first:** nSkinzCS2 is intended only for offline demo playback started through HLAE with `-insecure`. Never load it on VAC-protected or online servers. The author does not guarantee account safety for use outside this scope.
 
-## What's new in v0.4.1
+## What's new in v0.4.2
+
+- Embedded precompiled UI shaders, removing the `D3DCOMPILER_47.dll` dependency while retaining static MSVC `/MT`.
+- No extra runtime installation beyond Windows 10/11 x64, CS2 and HLAE. Static CRT thread notifications and release import checks are corrected.
+- Clarified absolute paths and quoting. The user confirmed successful loading after correcting the command; the failure was not established to be a missing VC++ runtime issue.
+- Preserved the exact verified DLL bytes and v0.4.1's cosmetic logic. No new knife-model/animation changes are included.
+
+Nine local loading/rendering control cases met expectations and the existing **42 native regressions** passed. See the [bilingual v0.4.2 release notes](docs/releases/v0.4.2.md) for validation scope and compatibility.
+
+<details>
+<summary>Retained v0.4.1 fixes</summary>
 
 - Fixed the CS2 crash triggered by IME input and typing in the skin search fields, including English input. The full control panel now runs in an isolated host outside `cs2.exe`, using the system's `rundll32.exe`; no additional application download is required.
 - Preserved the full installed-game catalog in the isolated panel, including localized skin names.
@@ -37,6 +47,8 @@
 
 The current build passes **42 native regression tests**. The mesh-function benchmark improved from 3714 ms to approximately 0.1 ms for 240 updates; this is **not** an in-game FPS measurement or a claim that every demo stutter is resolved. See the [bilingual v0.4.1 release notes](docs/releases/v0.4.1.md) for verification boundaries and known limitations.
 
+</details>
+
 ## What is nSkinzCS2?
 
 nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearance while a Counter-Strike 2 demo is being viewed. It is loaded with HLAE `mirv_loadlibrary`, reads the installed CS2 catalog, and applies guarded, XUID-targeted overrides through a small Win32 + D3D11 + Dear ImGui control panel.
@@ -45,7 +57,7 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Feature matrix
 
-| Area | Supported in v0.4.1 | Notes |
+| Area | Supported in v0.4.2 | Notes |
 | --- | --- | --- |
 | Weapons | Finish, seed, wear, quality, name tag and sticker fields | Profiles are isolated by watched-player XUID and base item definition. |
 | Knives | Finish-only or experimental finish + model, seed and wear | Finish-only preserves the demo knife model and hides model selection. Model selection appears only in finish + model. |
@@ -56,27 +68,31 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Quick start
 
+v0.4.2 embeds precompiled UI shaders and retains `/MT`. No additional runtime installation is needed beyond Windows 10/11 x64, CS2 and HLAE. See [single-DLL loading and diagnostics](docs/portable-loading.md) for `LoadLibrary failed` troubleshooting.
+
 1. Start CS2 through HLAE with `-insecure`, then open an offline demo.
 2. Download one of the two Release DLLs. Release binaries use the static MSVC runtime (`/MT`), so no Visual C++ Redistributable, Python, SDK or compiler is required.
 3. In HLAE, load the DLL:
 
 ```text
-mirv_loadlibrary "C:\Path\To\nSkinzCS2.dll"
+mirv_loadlibrary D:\nSkinzCS2.dll
 ```
 
 For the Simplified Chinese UI:
 
 ```text
-mirv_loadlibrary "C:\Path\To\nSkinzCS2.zh-CN.dll"
+mirv_loadlibrary D:\nSkinzCS2.zh-CN.dll
 ```
+
+These examples require the DLL to be in the root of drive D. Use your actual full path. Paths without spaces need no quotes; if there are spaces, use exactly one pair of ASCII quotes, e.g. `mirv_loadlibrary "D:\My Tools\nSkinzCS2.dll"`. Never double-wrap the path or use typographic quotes.
 
 Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Keep the DLL in a writable folder: the isolated panel and runtime share generated catalog/config sidecars there. Runtime diagnostics are written to `nSkinzCS2.log`; panel diagnostics to `nSkinzCS2.ui.log`.
 
-When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.1/nSkinzCS2-v0.4.1-windows-x64.zip) contains both language options and loading instructions.
+When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.2/nSkinzCS2-v0.4.2-windows-x64.zip) contains both language options and loading instructions.
 
 ## Compatibility baseline
 
-The `v0.4.1` binaries were checked against:
+`v0.4.2` retains the checked v0.4.1 baseline below; this loading-only release does not claim a new full-demo retest:
 
 - Steam app build ID `25000182`
 - CS2 ClientVersion `2000899`, patch `1.41.7.8`, Source revision `10948930` (2026-08-28)
@@ -120,7 +136,7 @@ Outputs are `build/Release/nSkinzCS2.dll`, `build/Release/nSkinzCS2.zh-CN.dll` a
 ## Known limitations and roadmap
 
 - Knife model replacement and a few animation-remap cases are still experimental.
-- If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.1.
+- If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.2.
 - Fully live item-schema walking is not yet preferred over installed game data.
 
 Planned work includes a more complete vanilla-material reset, broader knife model/animation coverage, keychain creation for empty modules and continued compatibility updates after CS2 patches.
@@ -135,7 +151,7 @@ Planned work includes a more complete vanilla-material reset, broader knife mode
 
 **Nothing changes after editing a profile.** Load the demo first, verify the watched-player XUID and base item, then press `Update`. Check `nSkinzCS2.log` for binding or compatibility failures.
 
-**Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.1 vanilla path cannot always clear; this is the documented limitation above.
+**Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.2 vanilla path cannot always clear; this is the documented limitation above.
 
 **Which build should I use?** Use `nSkinzCS2.dll` for English or `nSkinzCS2.zh-CN.dll` for the Chinese UI and catalog names. Both DLLs target the same CS2 compatibility baseline.
 

@@ -207,6 +207,8 @@ struct KnifeAnimationRemapKey
 KnifeSlotMode ResolveKnifeSlotMode(const nskinzcs2::model::KnifeProfile& profile) noexcept;
 bool KnifeProfileRequiresModelDefinition(KnifeSlotMode mode) noexcept;
 KnifeAppearanceRequest BuildKnifeAppearanceRequest(const nskinzcs2::model::KnifeProfile& profile) noexcept;
+// Production cosmetic request: a model selection must not alter material work.
+KnifeAppearanceRequest BuildKnifeFinishRequest(const nskinzcs2::model::KnifeProfile& profile) noexcept;
 KnifeApplyGateResult EvaluateKnifeApplyGate(const KnifeApplyGateInputs& inputs) noexcept;
 KnifeAppearancePipelineRoute ResolveKnifeAppearancePipelineRoute(
     const KnifeApplyGateResult& gate) noexcept;

@@ -19,22 +19,23 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.2/nSkinzCS2.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.2/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.2"><img src="https://img.shields.io/badge/Release%20notes-v0.4.2-8250df?style=for-the-badge" alt="Release notes"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.3/nSkinzCS2.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.3/nSkinzCS2.zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.3"><img src="https://img.shields.io/badge/Release%20notes-v0.4.3-8250df?style=for-the-badge" alt="Release notes"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/Report%20an%20issue-f85149?style=for-the-badge" alt="Report an issue"></a>
 </p>
 
 > **Safety first:** nSkinzCS2 is intended only for offline demo playback started through HLAE with `-insecure`. Never load it on VAC-protected or online servers. The author does not guarantee account safety for use outside this scope.
 
-## What's new in v0.4.2
+## What's new in v0.4.3
 
-- Embedded precompiled UI shaders, removing the `D3DCOMPILER_47.dll` dependency while retaining static MSVC `/MT`.
-- No extra runtime installation beyond Windows 10/11 x64, CS2 and HLAE. Static CRT thread notifications and release import checks are corrected.
-- Clarified absolute paths and quoting. The user confirmed successful loading after correcting the command; the failure was not established to be a missing VC++ runtime issue.
-- Preserved the exact verified DLL bytes and v0.4.1's cosmetic logic. No new knife-model/animation changes are included.
+- Fixed modern/legacy gun mesh selection from installed paint metadata, including M4A4 Full Throttle → The Emperor.
+- Fixed first-person gun HUD lookup outside the network-entity cache. An expected but unresolved active HUD now stays pending before any appearance writes.
+- Filtered gun finishes by exact weapon/paint compatibility, with the same checks in runtime writes and imported configs. The full catalog is preserved; invalid selections are shown explicitly, not silently changed to vanilla.
+- Bound completed gun refreshes to verified carrier/render object generations. Stable bindings, holstering and replicated-field repairs do not invalidate them.
+- Retained isolated-panel IME/search fixes, static MSVC `/MT` and embedded UI shaders. Independent knife-model work remains read-only and unfinished.
 
-Nine local loading/rendering control cases met expectations and the existing **42 native regressions** passed. See the [bilingual v0.4.2 release notes](docs/releases/v0.4.2.md) for validation scope and compatibility.
+The user confirmed the Emperor fix in their local demo. **45 native regressions**, **8 targeted checks**, both language builds and isolated loading/rendering checks passed. Catalog coverage is **34 guns / 1,449 valid pairs**, not visual certification of every finish. See the [bilingual v0.4.3 release notes](docs/releases/v0.4.3.md).
 
 <details>
 <summary>Retained v0.4.1 fixes</summary>
@@ -45,7 +46,7 @@ Nine local loading/rendering control cases met expectations and the existing **4
 - `Finish only` hides and ignores the knife model selector; model selection is available only in `Finish + model`.
 - Removed the blocking mesh-update sleep/retry loop, repeated runtime catalog copies, and synchronous file logging from frame callbacks.
 
-The current build passes **42 native regression tests**. The mesh-function benchmark improved from 3714 ms to approximately 0.1 ms for 240 updates; this is **not** an in-game FPS measurement or a claim that every demo stutter is resolved. See the [bilingual v0.4.1 release notes](docs/releases/v0.4.1.md) for verification boundaries and known limitations.
+The v0.4.1 validation passed **42 native regression tests**. The mesh-function benchmark improved from 3714 ms to approximately 0.1 ms for 240 updates; this is **not** an in-game FPS measurement or a claim that every demo stutter is resolved. See the [bilingual v0.4.1 release notes](docs/releases/v0.4.1.md) for verification boundaries and known limitations.
 
 </details>
 
@@ -57,10 +58,10 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Feature matrix
 
-| Area | Supported in v0.4.2 | Notes |
+| Area | Supported in v0.4.3 | Notes |
 | --- | --- | --- |
-| Weapons | Finish, seed, wear, quality, name tag and sticker fields | Profiles are isolated by watched-player XUID and base item definition. |
-| Knives | Finish-only or experimental finish + model, seed and wear | Finish-only preserves the demo knife model and hides model selection. Model selection appears only in finish + model. |
+| Weapons | Compatible finish list, seed, wear, quality, name tag and sticker fields | Exact weapon/paint checks also protect runtime writes and imported configs; modern/legacy meshes follow paint metadata. |
+| Knives | Finish, seed and wear; reserved finish + model UI | Finish-only hides model selection. The independent model adapter remains read-only; model/animation replacement is not complete. |
 | Gloves | T/CT default glove carriers, model and finish | Default glove definitions `5028` and `5029` are supported on the verified build. |
 | Keychains | Modify or clear an existing live module | Creating a keychain module on an item that has none remains experimental. |
 | Vanilla / no finish | Explicit `Vanilla (No Finish)` option | This is different from `- (Do not modify)`. A stale first-person knife material may survive on some demo items. |
@@ -68,7 +69,7 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Quick start
 
-v0.4.2 embeds precompiled UI shaders and retains `/MT`. No additional runtime installation is needed beyond Windows 10/11 x64, CS2 and HLAE. See [single-DLL loading and diagnostics](docs/portable-loading.md) for `LoadLibrary failed` troubleshooting.
+v0.4.3 embeds precompiled UI shaders and retains `/MT`. No additional runtime installation is needed beyond Windows 10/11 x64, CS2 and HLAE. See [single-DLL loading and diagnostics](docs/portable-loading.md) for `LoadLibrary failed` troubleshooting.
 
 1. Start CS2 through HLAE with `-insecure`, then open an offline demo.
 2. Download one of the two Release DLLs. Release binaries use the static MSVC runtime (`/MT`), so no Visual C++ Redistributable, Python, SDK or compiler is required.
@@ -88,11 +89,11 @@ These examples require the DLL to be in the root of drive D. Use your actual ful
 
 Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Keep the DLL in a writable folder: the isolated panel and runtime share generated catalog/config sidecars there. Runtime diagnostics are written to `nSkinzCS2.log`; panel diagnostics to `nSkinzCS2.ui.log`.
 
-When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.2/nSkinzCS2-v0.4.2-windows-x64.zip) contains both language options and loading instructions.
+When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.3/nSkinzCS2-v0.4.3-windows-x64.zip) contains both language options and loading instructions.
 
 ## Compatibility baseline
 
-`v0.4.2` retains the checked v0.4.1 baseline below; this loading-only release does not claim a new full-demo retest:
+`v0.4.3` targets the checked baseline below. The Emperor case is user-confirmed; this is not an exhaustive demo/FPS retest:
 
 - Steam app build ID `25000182`
 - CS2 ClientVersion `2000899`, patch `1.41.7.8`, Source revision `10948930` (2026-08-28)
@@ -136,7 +137,7 @@ Outputs are `build/Release/nSkinzCS2.dll`, `build/Release/nSkinzCS2.zh-CN.dll` a
 ## Known limitations and roadmap
 
 - Knife model replacement and a few animation-remap cases are still experimental.
-- If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.2.
+- If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.3.
 - Fully live item-schema walking is not yet preferred over installed game data.
 
 Planned work includes a more complete vanilla-material reset, broader knife model/animation coverage, keychain creation for empty modules and continued compatibility updates after CS2 patches.
@@ -145,13 +146,15 @@ Planned work includes a more complete vanilla-material reset, broader knife mode
 
 **Does the input fix disable Chinese or reduce the skin list?** No. The full panel is isolated from CS2's input/text-service path and reads the exported installed-game catalog. Chinese IME and English search remain available. If the list is unexpectedly short, include both logs and the catalog sidecar status in your report.
 
+**Why are fewer finishes listed for a gun?** v0.4.3 shows only that gun's compatible finishes. The full installed catalog is retained. Missing compatibility data blocks the request; an incompatible saved selection is marked unavailable, never silently converted to vanilla.
+
 **A demo still stutters.** v0.4.1 removes confirmed blocking work but does not guarantee a stutter-free demo. Keep CS2 running and include the `Runtime performance` log lines, which separate engine callbacks, cosmetic polling, mesh updates and native refresh costs.
 
 **Why does `-` not remove a finish?** `- (Do not modify)` deliberately leaves the current value untouched. Choose `Vanilla (No Finish)` when you want an explicit no-finish request.
 
 **Nothing changes after editing a profile.** Load the demo first, verify the watched-player XUID and base item, then press `Update`. Check `nSkinzCS2.log` for binding or compatibility failures.
 
-**Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.2 vanilla path cannot always clear; this is the documented limitation above.
+**Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.3 vanilla path cannot always clear; this is the documented limitation above.
 
 **Which build should I use?** Use `nSkinzCS2.dll` for English or `nSkinzCS2.zh-CN.dll` for the Chinese UI and catalog names. Both DLLs target the same CS2 compatibility baseline.
 

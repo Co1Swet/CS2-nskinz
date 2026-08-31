@@ -98,6 +98,7 @@
     <ClInclude Include="src\Core\Log.hpp" />
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
     <ClInclude Include="src\Runtime\KnifeAnimation.hpp" />
+    <ClInclude Include="src\Runtime\KnifeModel.hpp" />
     <ClInclude Include="src\Runtime\KnifeAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponAppearance.hpp" />
     <ClInclude Include="third_party\MinHook\include\MinHook.h" />
@@ -113,6 +114,8 @@
     <ClCompile Include="src\Cs2\Runtime.cpp" />
     <ClCompile Include="src\Runtime\GloveAppearance.cpp" />
     <ClCompile Include="src\Runtime\KnifeAnimation.cpp" />
+    <ClCompile Include="src\Runtime\KnifeModel.cpp" />
+    <ClCompile Include="src\Tests\KnifeModelTests.cpp" />
     <ClCompile Include="src\Runtime\KnifeAppearance.cpp" />
     <ClCompile Include="src\Runtime\WeaponAppearance.cpp" />
     <ClCompile Include="src\Tests\Main.cpp" />

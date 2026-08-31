@@ -2,6 +2,7 @@
 
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
+#include "Cs2/Catalog.hpp"
 #include "UI/ExternalUiHost.hpp"
 #include "UI/UiText.hpp"
 
@@ -771,7 +772,8 @@ bool InputSearchText(const char* label, const char* hint, std::string& value)
     return changed;
 }
 
-bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, const int popup_count = 10)
+bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, const int popup_count = 10,
+    const char* preview_override = nullptr)
 {
     if (values.empty())
     {
@@ -790,7 +792,7 @@ bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, c
             ImVec2(FLT_MAX, ImGui::GetTextLineHeightWithSpacing() * static_cast<float>(popup_count + 2)));
     }
 
-    if (ImGui::BeginCombo(label, values[current_index].name.c_str()))
+    if (ImGui::BeginCombo(label, preview_override != nullptr ? preview_override : values[current_index].name.c_str()))
     {
         auto& filter = filters[combo_id];
         ImGui::PushID(static_cast<int>(combo_id));
@@ -829,7 +831,7 @@ bool ComboById(const char* label, const std::vector<NamedId>& values, int& id, c
                 for (int visible = clipper.DisplayStart; visible < clipper.DisplayEnd; ++visible)
                 {
                     const int index = visible_indices[visible];
-                    const bool selected = index == current_index;
+                    const bool selected = values[index].id == id;
                     ImGui::PushID(values[index].id);
                     if (ImGui::Selectable(values[index].name.c_str(), selected))
                     {
@@ -861,7 +863,8 @@ bool ComboFinishByIntent(
     const std::vector<NamedId>& catalog_values,
     int& paint_kit,
     bool& explicit_vanilla_finish,
-    const int popup_count = 10)
+    const int popup_count = 10,
+    const char* preview_override = nullptr)
 {
     auto values = catalog_values;
     const auto no_change = std::find_if(
@@ -886,7 +889,7 @@ bool ComboFinishByIntent(
         NamedId {kExplicitClearSelectionId, Ui(UiTextId::VanillaNoFinish)});
 
     int selected_id = explicit_vanilla_finish ? kExplicitClearSelectionId : paint_kit;
-    if (!ComboById(label, values, selected_id, popup_count))
+    if (!ComboById(label, values, selected_id, popup_count, preview_override))
     {
         return false;
     }
@@ -1702,14 +1705,41 @@ private:
             PushWorkingConfig();
         }
 
+        const auto weapon_paints = nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(catalog, profile.base_item);
+        const auto paint_compatibility = nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(
+            &catalog, profile.base_item, profile.paint_kit);
+        const auto blocked_paint = paint_compatibility != nskinzcs2::WeaponPaintCompatibility::Compatible;
+        // Preserve imported/staged invalid values and identify them honestly.
+        // Do not silently show '-' or convert an incompatible paint to vanilla.
+        std::string blocked_preview;
+        if (blocked_paint)
+        {
+            const auto found = std::find_if(catalog.weapon_paint_kits.begin(), catalog.weapon_paint_kits.end(),
+                [&](const NamedId& paint) { return paint.id == profile.paint_kit; });
+            blocked_preview = std::string(Ui(UiTextId::WeaponPaintBlocked)) + " " +
+                (found != catalog.weapon_paint_kits.end() ? found->name : std::string {}) +
+                " (" + std::to_string(profile.paint_kit) + ")";
+        }
         if (ComboFinishByIntent(
                 Ui(UiTextId::PaintKit),
-                catalog.weapon_paint_kits,
+                weapon_paints,
                 profile.paint_kit,
                 profile.explicit_vanilla_finish,
-                12))
+                12,
+                blocked_paint ? blocked_preview.c_str() : nullptr))
         {
             PushWorkingConfig();
+        }
+        ImGui::TextDisabled(Ui(UiTextId::CompatibleWeaponPaintCount), static_cast<int>(std::count_if(
+            weapon_paints.begin(), weapon_paints.end(), [](const NamedId& paint) { return paint.id > 0; })));
+        if (!catalog.weapon_paint_compatibility.contains(profile.base_item) ||
+            catalog.weapon_paint_compatibility.at(profile.base_item).empty())
+        {
+            ImGui::TextWrapped("%s", Ui(UiTextId::WeaponPaintCompatibilityUnknown));
+        }
+        else if (blocked_paint)
+        {
+            ImGui::TextWrapped("%s", Ui(UiTextId::WeaponPaintIncompatible));
         }
 
         if (ComboById(Ui(UiTextId::Quality), catalog.qualities, profile.quality, 8))

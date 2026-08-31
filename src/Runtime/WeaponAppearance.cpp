@@ -73,6 +73,7 @@ nskinzcs2::runtime::ResolvedWeaponAppearanceBinding nskinzcs2::runtime::ResolveW
     binding.owned_weapon_entity_index = inputs.owned_weapon_entity_index;
     binding.mesh_group_mask = inputs.mesh_group_mask == 0 ? 1ull : inputs.mesh_group_mask;
     binding.hud_entity_index = inputs.hud_entity_index;
+    binding.hud_render_only = inputs.hud_render_only_verified;
 
     if (inputs.owned_weapon_entity_index < 0 || !inputs.owned_weapon_has_item_view)
     {
@@ -102,6 +103,35 @@ nskinzcs2::runtime::ResolvedWeaponAppearanceBinding nskinzcs2::runtime::ResolveW
 
     binding.valid = true;
     return binding;
+}
+
+bool nskinzcs2::runtime::IsStandardWeaponHudRenderCandidate(
+    const std::wstring_view class_name, const std::string_view model_name,
+    const std::uint32_t candidate_owner, const std::uint32_t weapon_handle,
+    const bool below_verified_arms, const bool aliases_world_or_arms) noexcept
+{
+    return below_verified_arms && !aliases_world_or_arms &&
+        weapon_handle != 0xFFFFFFFFu && weapon_handle != 0xFFFFFFFEu &&
+        candidate_owner == weapon_handle && class_name == L"C_CS2HudModelWeapon" &&
+        model_name.starts_with("weapons/models/") &&
+        model_name.find("/knife/") == std::string_view::npos &&
+        model_name.find("knife_") == std::string_view::npos &&
+        model_name.find("/arms/") == std::string_view::npos &&
+        model_name.find("glove") == std::string_view::npos;
+}
+
+std::uint64_t nskinzcs2::runtime::ResolvePaintMeshGroupMask(
+    const bool standard_weapon, const int paint_kit, const model::Catalog* catalog) noexcept
+{
+    if (!standard_weapon || paint_kit <= 0) { return 1; }
+    if (catalog != nullptr)
+    {
+        const auto found = catalog->weapon_paint_uses_legacy_model.find(paint_kit);
+        if (found != catalog->weapon_paint_uses_legacy_model.end()) { return found->second ? 2 : 1; }
+    }
+    // Preserve the old behavior only when metadata is genuinely unavailable.
+    // Parsed modern kits WITHOUT use_legacy_model are explicit false entries.
+    return 2;
 }
 
 nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppearancePayload(

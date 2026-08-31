@@ -2,7 +2,7 @@
 
 ## 中文
 
-v0.4.2（2026-08-30）发布加载兼容修订，基于 v0.4.1。刀模型开发已单独保存并暂停；本次不改动枪、刀、手套的外观运行时逻辑。GitHub v0.4.1 的标签与下载资产保留，修订通过独立 v0.4.2 发布。
+v0.4.3（2026-08-31）沿用 v0.4.2 的单 DLL 加载方案，并加入枪型/涂装兼容校验、新旧枪械网格及 HUD 绑定修复。旧版标签和下载资产保留。独立刀模链尚未完成可用的模型替换。
 
 ### 使用要求
 
@@ -62,7 +62,7 @@ nSkinzCS2.LoadCheck.exe "C:\nSkinzCS2\nSkinzCS2.zh-CN.dll"
 
 ## English
 
-v0.4.2 (2026-08-30) releases the loading fix based on v0.4.1. Knife-model work is saved and paused; weapon, knife and glove runtime behavior is unchanged. The existing GitHub v0.4.1 tag/assets are preserved; this is a separate v0.4.2 release.
+v0.4.3 (2026-08-31) retains v0.4.2's single-DLL loading and adds gun/paint compatibility, modern/legacy mesh and HUD binding fixes. Previous tags/assets are preserved. Independent knife-model replacement remains unfinished.
 
 Only Windows 10/11 x64, CS2 and HLAE are required. No separate VC++ redistributable, legacy DirectX runtime/SDK, .NET, Python or compiler installation is needed. Use one language DLL, extracted into a writable folder, with HLAE `-insecure` offline demos only. Restart HLAE/CS2 before upgrading. Generated catalog/config/log files are not additional downloads.
 

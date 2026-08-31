@@ -7,7 +7,7 @@
 
 namespace
 {
-constexpr std::array<int, 21> kSupportedKnifeDefinitions {{
+constexpr std::array<int, 22> kSupportedKnifeDefinitions {{
     42,
     59,
     500,
@@ -29,6 +29,7 @@ constexpr std::array<int, 21> kSupportedKnifeDefinitions {{
     522,
     523,
     525,
+    526,
 }};
 
 constexpr int kKnifeDefaultCtDefinition = 42;
@@ -113,6 +114,17 @@ KnifeAppearanceRequest BuildKnifeAppearanceRequest(const nskinzcs2::model::Knife
     request.stat_trak = profile.stat_trak;
     request.wear = profile.wear;
     request.custom_name = profile.custom_name;
+    return request;
+}
+
+KnifeAppearanceRequest BuildKnifeFinishRequest(const nskinzcs2::model::KnifeProfile& profile) noexcept
+{
+    auto request = BuildKnifeAppearanceRequest(profile);
+    request.model_definition = 0;
+    if (request.mode != KnifeSlotMode::None)
+    {
+        request.mode = KnifeSlotMode::FinishOnly;
+    }
     return request;
 }
 

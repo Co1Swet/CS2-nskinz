@@ -159,6 +159,10 @@ enum class UiTextId : std::size_t
     AvailabilityReady,
     LookupUnknown,
     None,
+    WeaponPaintBlocked,
+    CompatibleWeaponPaintCount,
+    WeaponPaintCompatibilityUnknown,
+    WeaponPaintIncompatible,
     Count,
 };
 
@@ -317,6 +321,10 @@ inline constexpr UiTextTable kEnglishTexts {
     "Ready",
     "Unknown",
     "None",
+    "Unavailable:",
+    "Compatible finishes: %d (full catalog retained)",
+    "Compatibility data for this weapon is unavailable. Wait for the local game catalog to load; only No Change and Vanilla are available meanwhile.",
+    "The saved finish is not compatible with this weapon and will not be applied. Select a compatible finish; the saved ID has not been cleared.",
 };
 
 inline constexpr UiTextTable kChineseTexts {
@@ -470,6 +478,10 @@ inline constexpr UiTextTable kChineseTexts {
     "就绪",
     "未知",
     "无",
+    "不可用：",
+    "此枪型可用涂装：%d（完整目录已保留）",
+    "缺少此枪型的涂装兼容数据。请等待本地游戏目录加载；期间仅可选择“不修改”和“原皮／无涂装”。",
+    "当前保存的涂装不适用于此枪型，已阻止应用。请选择兼容涂装；原有涂装 ID 未被清除。",
 };
 }
 

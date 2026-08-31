@@ -249,6 +249,11 @@ struct WeaponMeshMaskProbeResult
     bool both_masks_verified = false;
 };
 WeaponMeshMaskProbeResult ProbeWeaponMeshMaskForTests();
+bool ProbeStandardWeaponRenderOnlyBindingForTests();
+bool ProbeStandardWeaponHudDiscoveryForTests();
+bool ProbeStandardWeaponHudPendingGateForTests();
+bool ProbeStandardWeaponAppearanceEpochForTests();
+bool ProbeWeaponPaintCompatibilityForTests();
 
 struct KnifeRepeatedRepairProbeResult
 {

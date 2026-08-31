@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -53,6 +54,7 @@ struct WeaponAppearanceBindingInputs
     bool explicit_world_child_item_view_shared_with_owned = true;
     int hud_entity_index = -1;
     std::uint64_t mesh_group_mask = 1;
+    bool hud_render_only_verified = false;
 };
 
 struct ResolvedWeaponAppearanceBinding
@@ -69,7 +71,17 @@ struct ResolvedWeaponAppearanceBinding
     bool carrier_entity_is_owned = true;
     bool carrier_entity_is_explicit_child = false;
     bool valid = false;
+    bool hud_render_only = false;
 };
+
+// Render-only HUD objects are not CEconEntity instances and may have no entry
+// in the network entity list. They must never become an attribute carrier.
+bool IsStandardWeaponHudRenderCandidate(
+    std::wstring_view class_name, std::string_view model_name,
+    std::uint32_t candidate_owner, std::uint32_t weapon_handle,
+    bool below_verified_arms, bool aliases_world_or_arms) noexcept;
+std::uint64_t ResolvePaintMeshGroupMask(
+    bool standard_weapon, int paint_kit, const model::Catalog* catalog) noexcept;
 
 struct WeaponAppearancePayload
 {

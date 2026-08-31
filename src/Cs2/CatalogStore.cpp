@@ -53,7 +53,17 @@ json SaveCatalog(const Catalog& catalog)
     output["knife_items"] = SaveNamedIds(catalog.knife_items);
     output["glove_items"] = SaveNamedIds(catalog.glove_items);
     output["weapon_paint_kits"] = SaveNamedIds(catalog.weapon_paint_kits);
+    output["weapon_paint_model_metadata"] = json::array();
+    for (const auto& [paint, legacy] : catalog.weapon_paint_uses_legacy_model)
+    {
+        output["weapon_paint_model_metadata"].push_back({{"paint", paint}, {"legacy", legacy}});
+    }
     output["glove_paint_kits"] = SaveNamedIds(catalog.glove_paint_kits);
+    output["weapon_paint_compatibility"] = json::array();
+    for (const auto& [definition, paints] : catalog.weapon_paint_compatibility)
+    {
+        output["weapon_paint_compatibility"].push_back({{"definition", definition}, {"paints", paints}});
+    }
     output["sticker_kits"] = SaveNamedIds(catalog.sticker_kits);
     output["keychain_kits"] = SaveNamedIds(catalog.keychain_kits);
     output["qualities"] = SaveNamedIds(catalog.qualities);
@@ -103,7 +113,29 @@ Catalog LoadCatalog(const json& input)
     catalog.knife_items = LoadNamedIds(input.value("knife_items", json::array()));
     catalog.glove_items = LoadNamedIds(input.value("glove_items", json::array()));
     catalog.weapon_paint_kits = LoadNamedIds(input.value("weapon_paint_kits", json::array()));
+    for (const auto& entry : input.value("weapon_paint_model_metadata", json::array()))
+    {
+        if (entry.is_object() && entry.contains("legacy") && entry["legacy"].is_boolean())
+        {
+            const auto paint = entry.value("paint", 0);
+            if (paint > 0) { catalog.weapon_paint_uses_legacy_model[paint] = entry["legacy"].get<bool>(); }
+        }
+    }
     catalog.glove_paint_kits = LoadNamedIds(input.value("glove_paint_kits", json::array()));
+    // An old snapshot has no compatibility map and stays Unknown, not unrestricted.
+    for (const auto& entry : input.value("weapon_paint_compatibility", json::array()))
+    {
+        if (!entry.is_object() || !entry.contains("paints") || !entry["paints"].is_array()) { continue; }
+        const auto definition = entry.value("definition", 0);
+        if (definition <= 0) { continue; }
+        auto& paints = catalog.weapon_paint_compatibility[definition];
+        for (const auto& paint : entry["paints"])
+        {
+            if (paint.is_number_integer() && paint.get<int>() > 0) { paints.push_back(paint.get<int>()); }
+        }
+        std::sort(paints.begin(), paints.end());
+        paints.erase(std::unique(paints.begin(), paints.end()), paints.end());
+    }
     catalog.sticker_kits = LoadNamedIds(input.value("sticker_kits", json::array()));
     catalog.keychain_kits = LoadNamedIds(input.value("keychain_kits", json::array()));
     catalog.qualities = LoadNamedIds(input.value("qualities", json::array()));

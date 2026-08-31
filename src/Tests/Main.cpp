@@ -21,10 +21,14 @@
 #include <limits>
 #include <stdexcept>
 
+void RunKnifeModelTests();
+
 namespace
 {
 std::filesystem::path g_compatibility_cs2_root;
 bool g_mesh_benchmark_only = false;
+bool g_knife_model_only = false;
+bool g_weapon_paint_only = false;
 
 template <typename Fn>
 void RunNamedTest(const char* name, Fn&& fn)
@@ -54,6 +58,8 @@ void TestCatalogStoreRoundTrip()
     source.knife_items = {{508, "M9 Bayonet"}};
     source.glove_items = {{5032, "Hand Wraps"}};
     source.weapon_paint_kits = {{409, "虎牙"}, {568, "伽玛多普勒"}};
+    source.weapon_paint_uses_legacy_model = {{844, true}, {1353, false}};
+    source.weapon_paint_compatibility = {{16, {844, 1353}}, {7, {44, 180}}, {60, {44, 984}}};
     source.glove_paint_kits = {{10009, "Leather"}};
     source.glove_paint_compatibility.emplace(10009, 5032);
     source.sticker_kits = {{1, "Sticker"}};
@@ -92,6 +98,10 @@ void TestCatalogStoreRoundTrip()
         loaded->base_items[0].id == 7 && loaded->base_items[0].name == "AK-47",
         "base item names and IDs must survive catalog IPC");
     Expect(loaded->weapon_paint_kits.size() == 2, "paint kit count must survive catalog IPC");
+    Expect(loaded->weapon_paint_uses_legacy_model == source.weapon_paint_uses_legacy_model,
+        "both legacy=true and modern=false metadata must survive catalog IPC");
+    Expect(loaded->weapon_paint_compatibility == source.weapon_paint_compatibility,
+        "exact shared and weapon-specific finish compatibility must survive catalog IPC");
     Expect(
         loaded->weapon_paint_kits[0].id == 409 && loaded->weapon_paint_kits[0].name == "虎牙" &&
             loaded->weapon_paint_kits[1].id == 568 && loaded->weapon_paint_kits[1].name == "伽玛多普勒",
@@ -108,6 +118,18 @@ void TestCatalogStoreRoundTrip()
         loaded->keychain_visuals.at(2).resolved_model_resource_path ==
             keychain_visual.resolved_model_resource_path,
         "keychain resources must survive catalog IPC");
+
+    // Backwards-compatible IPC must not silently restore an unrestricted list.
+    {
+        std::ofstream legacy(path, std::ios::binary | std::ios::trunc);
+        legacy << R"json({"version":1,"weapon_paint_kits":[{"id":844,"name":"Emperor"}],"runtime_populated":true})json";
+    }
+    const auto legacy = nskinzcs2::CatalogStore::Load(path);
+    std::filesystem::remove(path, remove_error);
+    Expect(legacy.has_value() && legacy->weapon_paint_compatibility.empty() &&
+        nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*legacy, 16, 844) ==
+            nskinzcs2::WeaponPaintCompatibility::Unknown,
+        "old IPC catalogs without compatibility stay unknown and cannot authorize a colored finish");
 }
 
 void TestCompatibilityManifest()
@@ -1470,6 +1492,10 @@ void TestCatalogFromGameText()
         {
             "name" "weapon_m4a1"
         }
+        "60"
+        {
+            "name" "weapon_m4a1_silencer"
+        }
     }
     "paint_kits"
     {
@@ -1482,6 +1508,50 @@ void TestCatalogFromGameText()
         {
             "name" "cu_printstream"
             "description_tag" "#PaintKit_Printstream"
+        }
+        "844"
+        {
+            "name" "gs_m4a4_emperor"
+            "use_legacy_model" "1"
+        }
+        "1353"
+        {
+            "name" "m4a4_skrrrt_green"
+            "composite_material_path" "weapons/paints/community/community_36/m4a4_skrrrt_green.vcompmat"
+        }
+    }
+    "item_sets"
+    {
+        "legacy_collection"
+        {
+            "items"
+            {
+                "[gs_m4a4_emperor]weapon_m4a1" "1"
+                "[cu_printstream]weapon_ak47" "1"
+                "[unknown_paint]weapon_m4a1" "1"
+                "[gs_m4a4_emperor]weapon_m4a1_extra" "1"
+                // "[gs_m4a4_emperor]weapon_ak47" "1"
+                "[gs_m4a4_emperor]weapon_ak47" "1" [$X360]
+            }
+        }
+    }
+    "item_sets"
+    {
+        "modern_collection"
+        {
+            "items"
+            {
+                "[m4a4_skrrrt_green]weapon_m4a1" "1"
+            }
+        }
+    }
+    "client_loot_lists"
+    {
+        "shared_finish"
+        {
+            "[cu_printstream]weapon_m4a1_silencer" "1"
+            "[gs_m4a4_emperor]weapon_m4a1" "1"
+            "[gs_m4a4_emperorweapon_ak47" "1"
         }
     }
     "sticker_kits"
@@ -1522,7 +1592,15 @@ void TestCatalogFromGameText()
     const auto catalog = nskinzcs2::CatalogBuilder::BuildCatalogFromGameText(items_game_text, localization_text);
     Expect(catalog.has_value(), "catalog should parse from in-memory game text");
     Expect(catalog->runtime_populated, "text-backed catalog should mark itself populated");
-    Expect(catalog->weapon_paint_kits.size() == 2, "text-backed catalog should expose full parsed paint kits");
+    Expect(catalog->weapon_paint_kits.size() == 4, "text-backed catalog should expose full parsed paint kits");
+    Expect(catalog->weapon_paint_uses_legacy_model.at(844), "Emperor explicitly requires legacy mesh");
+    Expect(!catalog->weapon_paint_uses_legacy_model.at(1353), "absent legacy flag means modern mesh, not unknown");
+    Expect(catalog->weapon_paint_compatibility.at(16) == std::vector<int>({844, 1353}),
+        "all repeated collection/loot sections merge and duplicate pairs are removed");
+    Expect(catalog->weapon_paint_compatibility.at(7) == std::vector<int>({711}),
+        "comments, foreign-platform pairs, malformed names and unknown IDs must not grant compatibility");
+    Expect(catalog->weapon_paint_compatibility.at(60) == std::vector<int>({711}),
+        "shared finishes retain each exact weapon; M4A4 and M4A1-S are distinct");
     Expect(catalog->keychain_kits.size() == 2, "text-backed catalog should expose parsed keychain kits");
 
     const auto printstream_it = std::find_if(
@@ -1566,6 +1644,41 @@ void TestCatalogFromGameText()
     Expect(m4a4_it->name == "M4A4", "known base weapons should prefer canonical catalog names over ambiguous raw ids");
 }
 
+void TestWeaponPaintCompatibility()
+{
+    using nskinzcs2::CatalogBuilder;
+    using nskinzcs2::WeaponPaintCompatibility;
+    nskinzcs2::model::Catalog catalog;
+    catalog.weapon_paint_kits = {{0, "-"}, {44, "共享涂装"}, {844, "皇帝"}, {1353, "破浪狂飙"}, {1040, "倒吊人"}};
+    catalog.weapon_paint_compatibility = {{16, {44, 844, 1353}}, {7, {44}}, {61, {1040}}};
+    const auto original = catalog.weapon_paint_kits.size();
+    const auto m4 = CatalogBuilder::BuildCompatibleWeaponPaintList(catalog, 16);
+    const auto ak = CatalogBuilder::BuildCompatibleWeaponPaintList(catalog, 7);
+    Expect(m4.size() == 4 && m4[2].name == "皇帝" && ak.size() == 2,
+        "UI filtering retains compatible IDs, localized names and No Change");
+    Expect(catalog.weapon_paint_kits.size() == original, "filtering must not reduce the full catalog");
+    Expect(CatalogBuilder::CheckWeaponPaintCompatibility(&catalog, 16, 844) == WeaponPaintCompatibility::Compatible,
+        "M4A4 Emperor must remain available");
+    Expect(CatalogBuilder::CheckWeaponPaintCompatibility(&catalog, 7, 844) == WeaponPaintCompatibility::Incompatible &&
+        CatalogBuilder::CheckWeaponPaintCompatibility(&catalog, 16, 1040) == WeaponPaintCompatibility::Incompatible,
+        "cross-weapon finishes must be rejected");
+    Expect(CatalogBuilder::CheckWeaponPaintCompatibility(&catalog, 61, 1040) == WeaponPaintCompatibility::Compatible,
+        "USP-S Traitor remains available");
+    Expect(CatalogBuilder::CheckWeaponPaintCompatibility(&catalog, 16, 999999) == WeaponPaintCompatibility::Incompatible &&
+        CatalogBuilder::CheckWeaponPaintCompatibility(&catalog, 16, -1) == WeaponPaintCompatibility::Incompatible,
+        "manual nonexistent/negative paint IDs must not bypass validation");
+    Expect(CatalogBuilder::CheckWeaponPaintCompatibility(nullptr, 16, 844) == WeaponPaintCompatibility::Unknown &&
+        CatalogBuilder::CheckWeaponPaintCompatibility(&catalog, 9, 844) == WeaponPaintCompatibility::Unknown,
+        "missing catalog or definition metadata must not authorize every finish");
+    Expect(CatalogBuilder::CheckWeaponPaintCompatibility(nullptr, 16, 0) == WeaponPaintCompatibility::Compatible,
+        "No Change and explicit Vanilla both remain usable without compatibility data");
+    catalog.weapon_paint_compatibility.clear();
+    Expect(CatalogBuilder::BuildCompatibleWeaponPaintList(catalog, 16).size() == 1,
+        "fallback/old snapshot must expose only No Change before the explicit Vanilla UI entry");
+    Expect(nskinzcs2::runtime::ProbeWeaponPaintCompatibilityForTests(),
+        "actual runtime entrypoints must reject incompatible paints before writes, binding or cached success");
+}
+
 void TestCatalogFromRealGameFilesIfProvided()
 {
     const char* items_game_env = std::getenv("NSKINZCS2_REAL_ITEMS_GAME");
@@ -1589,6 +1702,48 @@ void TestCatalogFromRealGameFilesIfProvided()
     Expect(catalog->keychain_kits.size() > 1, "real installed game files should provide parsed keychain kits");
     Expect(!catalog->keychain_visuals.empty(), "real installed game files should provide keychain model mappings");
     Expect(catalog->qualities.size() >= 5, "real installed game files should provide quality entries");
+    std::size_t compatible_pairs = 0;
+    std::size_t checked_weapons = 0;
+    for (const auto& weapon : catalog->base_items)
+    {
+        if (weapon.id == 42 || weapon.id == 5028) { continue; }
+        const auto found = catalog->weapon_paint_compatibility.find(weapon.id);
+        Expect(found != catalog->weapon_paint_compatibility.end() && !found->second.empty(),
+            "every supported gun must have exact compatibility pairs in installed game data");
+        Expect(std::is_sorted(found->second.begin(), found->second.end()), "compatibility IDs must be sorted");
+        Expect(std::adjacent_find(found->second.begin(), found->second.end()) == found->second.end(),
+            "compatibility IDs must not contain duplicates");
+        for (const auto paint : found->second)
+        {
+            Expect(paint > 0 && catalog->weapon_paint_uses_legacy_model.contains(paint),
+                "every compatible gun finish must have explicit modern/legacy metadata");
+        }
+        compatible_pairs += found->second.size();
+        ++checked_weapons;
+        const auto visible = nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(*catalog, weapon.id);
+        Expect(visible.size() == found->second.size() + 1, "every game-defined pair must remain visible exactly once");
+        std::cout << "compatible gun " << weapon.id << ": " << found->second.size() << " finishes\n";
+    }
+    using nskinzcs2::WeaponPaintCompatibility;
+    for (const auto paint : {844, 1353})
+    {
+        Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 16, paint) == WeaponPaintCompatibility::Compatible,
+            "real M4A4 legacy and Armory modern finish must both remain selectable");
+        Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 60, paint) == WeaponPaintCompatibility::Incompatible,
+            "M4A1-S must not inherit M4A4 finishes");
+    }
+    Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 61, 1040) == WeaponPaintCompatibility::Compatible,
+        "real USP-S Traitor must remain selectable");
+    Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 7, 44) == WeaponPaintCompatibility::Compatible &&
+        nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 3, 44) == WeaponPaintCompatibility::Compatible,
+        "real shared Case Hardened paint retains both AK-47 and Five-SeveN combinations");
+    std::cout << "compatibility coverage: guns=" << checked_weapons << ", pairs=" << compatible_pairs << '\n';
+    if (g_weapon_paint_only)
+    {
+        Expect(catalog->weapon_paint_uses_legacy_model.at(844), "installed Emperor uses legacy model");
+        Expect(!catalog->weapon_paint_uses_legacy_model.at(1353), "installed Full Throttle uses modern model");
+        std::cout << "installed M4A4 paint metadata: 1353=modern/mesh1; 844=legacy/mesh2\n";
+    }
     std::cout
         << "real catalog counts: weapon paints=" << catalog->weapon_paint_kits.size()
         << ", glove paints=" << catalog->glove_paint_kits.size()
@@ -4805,10 +4960,70 @@ void TestWeaponAppearanceModule()
     }
 }
 
+void TestM4A4ModernLegacyTransition()
+{
+    using namespace nskinzcs2::runtime;
+    nskinzcs2::model::Catalog catalog;
+    catalog.weapon_paint_uses_legacy_model = {{844, true}, {1353, false}};
+    Expect(ResolvePaintMeshGroupMask(true, 1353, &catalog) == 1, "Full Throttle uses modern mesh");
+    Expect(ResolvePaintMeshGroupMask(true, 844, &catalog) == 2, "The Emperor uses legacy mesh");
+    Expect(ResolvePaintMeshGroupMask(true, 0, &catalog) == 1, "explicit vanilla uses modern mesh");
+    Expect(ResolvePaintMeshGroupMask(false, 844, &catalog) == 1, "gun metadata cannot change knife/glove meshes");
+    Expect(ResolvePaintMeshGroupMask(true, 844, nullptr) == 2, "old snapshots retain backward-compatible fallback");
+    Expect(ResolvePaintMeshGroupMask(true, 999999, &catalog) == 2, "unknown paint is not misreported as known modern");
+
+    constexpr std::string_view m4 = "weapons/models/rifles/m4a1/weapon_m4a1.vmdl";
+    constexpr std::uint32_t handle = 0x300076A;
+    const auto accepts = [&](std::wstring_view type, std::string_view model, std::uint32_t owner,
+        bool under_arms = true, bool alias = false)
+    { return IsStandardWeaponHudRenderCandidate(type, model, owner, handle, under_arms, alias); };
+    Expect(accepts(L"C_CS2HudModelWeapon", m4, handle), "M4A4 HUD does not need a knife token or econ item view");
+    Expect(!accepts(L"C_CS2HudModelArms", m4, handle), "arms must never become gun render consumer");
+    Expect(!accepts(L"C_BaseModelEntity", m4, handle), "model filename alone cannot prove HUD ownership");
+    Expect(!accepts(L"C_CS2HudModelWeapon", m4, handle + 0x8000), "same slot with a different serial is rejected");
+    Expect(!accepts(L"C_CS2HudModelWeapon", m4, handle, false), "disconnected gun node is rejected");
+    Expect(!accepts(L"C_CS2HudModelWeapon", m4, handle, true, true), "world/arms aliases are rejected");
+    for (const auto model : {"characters/models/ct.vmdl", "weapons/models/shared/arms/ct.vmdl",
+        "weapons/models/knife/knife_m9/weapon_knife_m9.vmdl", "weapons/models/glove.vmdl", ""})
+    {
+        Expect(!accepts(L"C_CS2HudModelWeapon", model, handle), "non-gun model excluded from gun HUD chain");
+    }
+    Expect(ProbeStandardWeaponRenderOnlyBindingForTests(), "verified unindexed HUD survives production binding; unproven pointers do not");
+    Expect(ProbeStandardWeaponHudDiscoveryForTests(), "production HUD walker verifies ownership, serials, active weapon and uniqueness");
+    Expect(ProbeStandardWeaponHudPendingGateForTests(), "an expected but missing active HUD defers before writes and material refresh");
+    Expect(ProbeStandardWeaponAppearanceEpochForTests(), "only verified carrier/render generations invalidate completed refresh; stable or hidden HUDs do not");
+    nskinzcs2::model::CosmeticProfile profile;
+    profile.base_item = 16;
+    for (const int paint : {1353, 844, 1353, 844})
+    {
+        profile.paint_kit = paint;
+        profile.seed = 321;
+        profile.wear = 0.17f;
+        const auto payload = BuildWeaponAppearancePayload(profile, 123);
+        Expect(payload.fallback_paint_kit == paint && payload.fallback_seed == 321 && payload.fallback_wear == 0.17f,
+            "mesh family switching preserves requested finish/seed/wear");
+        Expect(ContainsRefreshAttribute(payload.temporary_attributes, 6, static_cast<float>(paint)),
+            "family switching does not turn the finish into paint zero");
+    }
+}
+
 int RunAllTests()
 {
     try
     {
+        if (g_weapon_paint_only)
+        {
+            RunNamedTest("TestCatalogStoreRoundTrip", TestCatalogStoreRoundTrip);
+            RunNamedTest("TestCatalogFromGameText", TestCatalogFromGameText);
+            RunNamedTest("TestWeaponPaintCompatibility", TestWeaponPaintCompatibility);
+            RunNamedTest("TestCatalogFromRealGameFilesIfProvided", TestCatalogFromRealGameFilesIfProvided);
+            RunNamedTest("TestM4A4ModernLegacyTransition", TestM4A4ModernLegacyTransition);
+            RunNamedTest("TestStandardWeaponAttributeSynchronization", TestStandardWeaponAttributeSynchronization);
+            RunNamedTest("TestWeaponMeshMaskNonblocking", TestWeaponMeshMaskNonblocking);
+            RunNamedTest("TestWeaponAppearanceModule", TestWeaponAppearanceModule);
+            std::cout << "weapon paint regression passed (no CS2 process)\n";
+            return EXIT_SUCCESS;
+        }
         if (g_mesh_benchmark_only)
         {
             const auto result = nskinzcs2::runtime::ProbeWeaponMeshMaskForTests();
@@ -4818,6 +5033,11 @@ int RunAllTests()
                 << " readonly_mismatch_rejected=" << result.mismatching_readonly_rejected
                 << " missing_dirty_rejected=" << result.missing_dirty_data_rejected << '\n';
             return result.both_masks_verified ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+        RunNamedTest("TestIndependentKnifeModel", RunKnifeModelTests);
+        if (g_knife_model_only)
+        {
+            return EXIT_SUCCESS;
         }
         RunNamedTest("TestCompatibilityManifest", TestCompatibilityManifest);
         RunNamedTest("TestCatalogStoreRoundTrip", TestCatalogStoreRoundTrip);
@@ -4831,6 +5051,7 @@ int RunAllTests()
         RunNamedTest("TestCatalogFallback", TestCatalogFallback);
         RunNamedTest("TestCatalogFromGameFiles", TestCatalogFromGameFiles);
         RunNamedTest("TestCatalogFromGameText", TestCatalogFromGameText);
+        RunNamedTest("TestWeaponPaintCompatibility", TestWeaponPaintCompatibility);
         RunNamedTest("TestCatalogFromRealGameFilesIfProvided", TestCatalogFromRealGameFilesIfProvided);
         RunNamedTest("TestDuplicateDetection", TestDuplicateDetection);
         RunNamedTest("TestVersionCandidateFiltering", TestVersionCandidateFiltering);
@@ -4860,6 +5081,7 @@ int RunAllTests()
         RunNamedTest("TestWeaponMeshMaskNonblocking", TestWeaponMeshMaskNonblocking);
         RunNamedTest("TestImmutableCatalogSnapshot", TestImmutableCatalogSnapshot);
         RunNamedTest("TestWeaponAppearanceModule", TestWeaponAppearanceModule);
+        RunNamedTest("TestM4A4ModernLegacyTransition", TestM4A4ModernLegacyTransition);
         RunNamedTest("TestDeferredRuntimeLogging", TestDeferredRuntimeLogging);
         std::cout << "nSkinzCS2 tests passed\n";
         return EXIT_SUCCESS;
@@ -4889,6 +5111,14 @@ void ParseArguments(const int argc, wchar_t** argv)
         else if (argument == L"--mesh-benchmark")
         {
             g_mesh_benchmark_only = true;
+        }
+        else if (argument == L"--knife-model-only")
+        {
+            g_knife_model_only = true;
+        }
+        else if (argument == L"--weapon-paint-only")
+        {
+            g_weapon_paint_only = true;
         }
     }
 }

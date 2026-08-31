@@ -8,6 +8,13 @@
 
 namespace nskinzcs2
 {
+enum class WeaponPaintCompatibility
+{
+    Compatible,
+    Incompatible,
+    Unknown,
+};
+
 class CatalogBuilder
 {
 public:
@@ -19,5 +26,9 @@ public:
         const std::filesystem::path& items_game_path,
         const std::filesystem::path& localization_path);
     static bool HasDuplicateIds(const std::vector<model::NamedId>& values);
+    static WeaponPaintCompatibility CheckWeaponPaintCompatibility(
+        const model::Catalog* catalog, int definition, int paint_kit) noexcept;
+    static std::vector<model::NamedId> BuildCompatibleWeaponPaintList(
+        const model::Catalog& catalog, int definition);
 };
 }

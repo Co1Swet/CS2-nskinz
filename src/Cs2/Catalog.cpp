@@ -1651,6 +1651,8 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
     const auto localization = BuildLocalizationMap(ParseLocalizationTokensSection(*tokens_section_text));
 
     std::unordered_map<int, std::string> base_item_names;
+    std::unordered_map<std::string, int> weapon_definitions_by_name;
+    std::unordered_map<std::string, std::vector<int>> paint_ids_by_name;
     std::unordered_map<int, std::string> knife_names;
     std::unordered_map<int, std::string> glove_names;
     std::unordered_map<int, NamedId> weapon_paint_kits;
@@ -1696,6 +1698,7 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
         else if (StartsWith(raw_name, "weapon_") && IsSupportedBaseWeaponId(id))
         {
             base_item_names[id] = display_name;
+            weapon_definitions_by_name.emplace(raw_name, id);
         }
 
         const auto model_player = FindFlatValue(item, "model_player");
@@ -1786,6 +1789,49 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
         }
 
         weapon_paint_kits[id] = entry;
+        catalog.weapon_paint_uses_legacy_model[id] = FindFlatValue(paint_kit, "use_legacy_model") == "1";
+        if (id > 0 && !raw_name.empty())
+        {
+            paint_ids_by_name[std::string(raw_name)].push_back(id);
+        }
+    }
+
+    // Use exact game-defined combinations, not localized names, paint prefixes,
+    // or model-age guesses. Collections alone miss loot-list-only variants.
+    // Merge every repeated section; shared finishes may name several weapons.
+    for (const auto section_name : {"item_sets", "client_loot_lists"})
+    {
+        for (const auto& section : ExtractNamedSectionTexts(items_game_text, section_name))
+        {
+            std::size_t start = 0;
+            while (start < section.size())
+            {
+                auto end = section.find('\n', start);
+                if (end == std::string::npos) { end = section.size(); }
+                const auto line = TrimView(std::string_view(section).substr(start, end - start));
+                start = end + 1;
+                if (line.empty() || StartsWith(line, "//") || !LineMatchesCurrentPlatform(line)) { continue; }
+                const auto values = ExtractQuotedStringsFromLine(line);
+                if (values.size() < 2 || !StartsWith(values[0], "[")) { continue; }
+                const auto close = values[0].find(']');
+                if (close == std::string::npos || close <= 1) { continue; }
+                const auto weapon = weapon_definitions_by_name.find(values[0].substr(close + 1));
+                const auto paints = paint_ids_by_name.find(values[0].substr(1, close - 1));
+                if (weapon == weapon_definitions_by_name.end() || paints == paint_ids_by_name.end()) { continue; }
+                auto& allowed = catalog.weapon_paint_compatibility[weapon->second];
+                allowed.insert(allowed.end(), paints->second.begin(), paints->second.end());
+            }
+        }
+    }
+    for (auto& [definition, paints] : catalog.weapon_paint_compatibility)
+    {
+        static_cast<void>(definition);
+        std::sort(paints.begin(), paints.end());
+        paints.erase(std::unique(paints.begin(), paints.end()), paints.end());
+    }
+    if (catalog.weapon_paint_compatibility.empty())
+    {
+        catalog.warnings.push_back("Weapon paint compatibility is unavailable; colored weapon finishes are blocked until local game data is loaded.");
     }
 
     if (!weapon_paint_kits.empty())
@@ -1930,6 +1976,37 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
     }
 
     return BuildCatalogFromGameText(*items_game_text, *localization_text);
+}
+
+nskinzcs2::WeaponPaintCompatibility nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(
+    const model::Catalog* catalog, const int definition, const int paint_kit) noexcept
+{
+    // Zero expresses either no change or explicit vanilla; both are independent
+    // of the paint compatibility catalog. Never turn a rejected paint into zero.
+    if (paint_kit == 0) { return WeaponPaintCompatibility::Compatible; }
+    if (paint_kit < 0 || definition <= 0) { return WeaponPaintCompatibility::Incompatible; }
+    if (catalog == nullptr) { return WeaponPaintCompatibility::Unknown; }
+    const auto found = catalog->weapon_paint_compatibility.find(definition);
+    if (found == catalog->weapon_paint_compatibility.end() || found->second.empty())
+    {
+        return WeaponPaintCompatibility::Unknown;
+    }
+    return std::binary_search(found->second.begin(), found->second.end(), paint_kit)
+        ? WeaponPaintCompatibility::Compatible : WeaponPaintCompatibility::Incompatible;
+}
+
+std::vector<nskinzcs2::model::NamedId> nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(
+    const model::Catalog& catalog, const int definition)
+{
+    std::vector<model::NamedId> values;
+    for (const auto& paint : catalog.weapon_paint_kits)
+    {
+        if (CheckWeaponPaintCompatibility(&catalog, definition, paint.id) == WeaponPaintCompatibility::Compatible)
+        {
+            values.push_back(paint);
+        }
+    }
+    return values;
 }
 
 bool nskinzcs2::CatalogBuilder::HasDuplicateIds(const std::vector<model::NamedId>& values)

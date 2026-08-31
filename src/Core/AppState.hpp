@@ -160,6 +160,13 @@ struct Catalog
     std::vector<NamedId> knife_items;
     std::vector<NamedId> glove_items;
     std::vector<NamedId> weapon_paint_kits;
+    // Parsed from each paint kit, not inferred from its numeric ID or age.
+    // Missing entry means metadata is unavailable (e.g. an old IPC snapshot).
+    std::unordered_map<int, bool> weapon_paint_uses_legacy_model;
+    // Exact [paint internal name]weapon internal name pairs from local game
+    // collections/loot lists. Definition -> sorted unique paint IDs.
+    // Missing definition means unknown, never "all paints are compatible".
+    std::unordered_map<int, std::vector<int>> weapon_paint_compatibility;
     std::vector<NamedId> glove_paint_kits;
     std::unordered_map<int, int> glove_paint_compatibility;
     std::vector<NamedId> sticker_kits;

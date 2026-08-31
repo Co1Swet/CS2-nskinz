@@ -152,6 +152,7 @@
     <ClInclude Include="src\Runtime\KnifeModel.hpp" />
     <ClInclude Include="src\Runtime\KnifeAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponAppearance.hpp" />
+    <ClInclude Include="src\Runtime\WeaponMaterialInit.hpp" />
     <ClInclude Include="src\UI\MainWindow.hpp" />
     <ClInclude Include="src\UI\ExternalUiHost.hpp" />
     <ClInclude Include="src\UI\UiText.hpp" />

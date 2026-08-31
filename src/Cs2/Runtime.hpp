@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -277,6 +278,8 @@ struct StandardWeaponAttributeProbeResult
     bool original_values_restored = false;
     std::size_t changed_slots = 0;
 };
+bool ProbeStandardWeaponStockFinishForTests();
+bool ProbeStandardWeaponMaterialCallsForTests(const std::filesystem::path& client_path);
 StandardWeaponAttributeProbeResult ProbeStandardWeaponAttributeSynchronizationForTests(
     const std::vector<std::pair<std::uint16_t, float>>& static_attributes,
     const std::vector<std::pair<std::uint16_t, float>>& dynamic_attributes,

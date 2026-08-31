@@ -10,6 +10,7 @@
 #include "Runtime/KnifeModel.hpp"
 #include "Runtime/KnifeAppearance.hpp"
 #include "Runtime/WeaponAppearance.hpp"
+#include "Runtime/WeaponMaterialInit.hpp"
 #include "MinHook.h"
 #include "../../third_party/MinHook/src/hde/hde64.h"
 
@@ -10026,6 +10027,9 @@ struct RuntimeOwnedAttributeBuffer
 struct WeaponSkinRefreshBinding
 {
     void* function = nullptr;
+    void* standard_clear_materials = nullptr;
+    void* standard_generate_materials = nullptr;
+    std::ptrdiff_t standard_material_owner_offset = 0;
     void* offset_patch_address = nullptr;
     std::uint16_t original_offset = 0;
     std::uint16_t original_companion_offset = 0;
@@ -10078,6 +10082,7 @@ struct StandardWeaponAppearanceEpoch
     StandardWeaponEntityEpoch carrier;
     StandardWeaponEntityEpoch render;
     StandardWeaponEntityEpoch hud;
+    std::uint64_t failed_material_signature = 0;
 };
 
 struct RenderedWorldWeaponTrace
@@ -15519,6 +15524,7 @@ bool TryTrackStandardWeaponAppearanceEpoch(
     {
         g_hook_state.applied_weapon_signatures.erase(carrier_index);
         g_hook_state.refreshed_weapon_signatures.erase(carrier_index);
+        previous.failed_material_signature = 0;
     }
     if (carrier_changed) { previous = {}; }
     previous.carrier = current.carrier;
@@ -28070,6 +28076,172 @@ struct StandardWeaponAttributeRestore
 std::mutex g_standard_weapon_attribute_mutex;
 std::unordered_map<void*, StandardWeaponAttributeRestore> g_standard_weapon_attribute_restores;
 
+struct StandardWeaponCreatedAttributes
+{
+    void* item_view = nullptr;
+    void* vector_address = nullptr;
+    StandardWeaponEntityEpoch carrier;
+    ClientSchemaOffsets offsets;
+    NetworkVectorView vector {};
+    std::size_t first = 0;
+    std::vector<std::pair<std::uint16_t, float>> values;
+};
+std::unordered_map<void*, StandardWeaponCreatedAttributes> g_standard_weapon_created_attributes;
+
+bool ReadStandardWeaponCarrierEpoch(void* entity, const ClientSchemaOffsets& offsets,
+    StandardWeaponEntityEpoch& epoch)
+{
+    epoch = {};
+    epoch.entity = entity;
+    return entity != nullptr && offsets.knife_creation_tick != 0 &&
+        TryReadHudBindingHandle(entity, offsets, epoch.handle) &&
+        SafeReadField(entity, offsets.knife_entity_identity, epoch.identity) &&
+        SafeReadField(entity, offsets.knife_creation_tick, epoch.creation_tick);
+}
+
+bool CreatedStandardWeaponAttributesStillOwned(const StandardWeaponCreatedAttributes& created)
+{
+    StandardWeaponEntityEpoch current;
+    NetworkVectorView vector {};
+    return ReadStandardWeaponCarrierEpoch(created.carrier.entity, created.offsets, current) &&
+        current == created.carrier &&
+        TryReadNetworkVectorView(created.vector_address, vector) &&
+        NetworkVectorViewsEqual(vector, created.vector) &&
+        vector.size == created.first + created.values.size();
+}
+
+// Construct only missing paint/seed/wear nodes using the engine's Schema
+// allocator/constructor. No external vector, copied vtable, provider identity
+// edit or fabricated material count. Existing dynamic attributes are retained.
+bool EnsureStandardWeaponFinishAttributes(void* entity, void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const std::vector<std::pair<std::uint16_t, float>>& desired)
+{
+    const auto positive_paint = std::find_if(desired.begin(), desired.end(), [](const auto& entry)
+        { return entry.first == kAttributePaintKit && entry.second > 0 && std::isfinite(entry.second); });
+    if (positive_paint == desired.end()) return true;
+    std::vector<std::pair<std::uint16_t, float>> missing;
+    for (const auto& entry : desired)
+    {
+        if (entry.first != kAttributePaintKit && entry.first != kAttributeSeed && entry.first != kAttributeWear) continue;
+        float actual = 0;
+        if (!std::isfinite(entry.second)) return false;
+        if (!TryReadAttributeValue(item_view, offsets, entry.first, actual)) missing.push_back(entry);
+    }
+    if (missing.empty()) return true;
+#ifndef NSKINZCS2_TESTS
+    if (GetCurrentThreadId() != g_hook_state.frame_stage_thread_id.load(std::memory_order_acquire) ||
+        g_hook_state.last_frame_stage.load() != kCs2FrameRenderPass) return false;
+#endif
+    StandardWeaponCreatedAttributes created;
+    created.item_view = item_view;
+    created.offsets = offsets;
+    created.values = missing;
+    const auto stride = ResolveEconItemAttributeStride(offsets);
+    if (missing.size() > 3 || item_view == nullptr || offsets.item_view_attribute_list == 0 ||
+        offsets.attribute_list_attributes == 0 || offsets.attribute_list_attributes_operation == nullptr ||
+        offsets.attribute_list_attributes_schema_tail_span < 0x18 ||
+        offsets.attribute_list_attributes_element_size != stride ||
+        !ShouldAllowDirectAttributeListWrites(offsets) ||
+        !ReadStandardWeaponCarrierEpoch(entity, offsets, created.carrier)) return false;
+    created.vector_address = static_cast<std::uint8_t*>(item_view) +
+        offsets.item_view_attribute_list + offsets.attribute_list_attributes;
+    NetworkVectorView before {};
+    if (!TryReadNetworkVectorView(created.vector_address, before) || before.size + missing.size() > 128) return false;
+    {
+        std::lock_guard<std::mutex> lock(g_standard_weapon_attribute_mutex);
+        auto existing = g_standard_weapon_created_attributes.find(item_view);
+        if (existing != g_standard_weapon_created_attributes.end())
+        {
+            // A live owned block must not be repeatedly grown after partial
+            // replication/foreign edits. An actually replaced epoch is safe to forget.
+            if (CreatedStandardWeaponAttributesStillOwned(existing->second)) return false;
+            g_standard_weapon_created_attributes.erase(existing);
+        }
+    }
+    created.first = static_cast<std::size_t>(before.size);
+    if (!TryInvokeNetworkVectorOperation(offsets.attribute_list_attributes_operation, 4,
+        created.vector_address, static_cast<std::int32_t>(before.size), static_cast<std::int32_t>(missing.size()))) return false;
+    if (!TryReadNetworkVectorView(created.vector_address, created.vector) ||
+        created.vector.size != before.size + missing.size() || created.vector.data == nullptr) return false;
+    const auto rollback = [&]()
+    {
+        if (CreatedStandardWeaponAttributesStillOwned(created))
+            TryInvokeNetworkVectorOperation(offsets.attribute_list_attributes_operation, 5,
+                created.vector_address, static_cast<std::int32_t>(created.first), static_cast<std::int32_t>(missing.size()));
+        return false;
+    };
+    for (std::size_t i = 0; i < missing.size(); ++i)
+    {
+        auto* node = created.vector.data + (created.first + i) * stride;
+        if (!CreatedStandardWeaponAttributesStillOwned(created) ||
+            !TryInvokeNetworkVectorElementMutation(offsets.attribute_list_attributes_operation,
+                created.vector_address, static_cast<std::int32_t>(created.first + i), node) ||
+            !SafeWriteField(node, offsets.econ_item_attribute_definition_index, missing[i].first) ||
+            !SafeWriteField(node, offsets.econ_item_attribute_value, missing[i].second) ||
+            (offsets.econ_item_attribute_initial_value != 0 &&
+                !SafeWriteField(node, offsets.econ_item_attribute_initial_value, missing[i].second))) return rollback();
+    }
+    if (!CreatedStandardWeaponAttributesStillOwned(created)) return false;
+    std::lock_guard<std::mutex> lock(g_standard_weapon_attribute_mutex);
+    g_standard_weapon_created_attributes[item_view] = std::move(created);
+    return true;
+}
+
+void UpdateCreatedStandardWeaponAttributeValues(void* item_view,
+    const std::vector<std::pair<std::uint16_t, float>>& desired)
+{
+    std::lock_guard<std::mutex> lock(g_standard_weapon_attribute_mutex);
+    auto it = g_standard_weapon_created_attributes.find(item_view);
+    if (it == g_standard_weapon_created_attributes.end()) return;
+    for (auto& value : it->second.values)
+    {
+        const auto match = std::find_if(desired.begin(), desired.end(), [&](const auto& entry) { return entry.first == value.first; });
+        if (match != desired.end()) value.second = match->second;
+    }
+}
+
+void ReleaseCreatedStandardWeaponAttributes(AttributeBindingReleaseMode mode, void* item_view)
+{
+    std::vector<StandardWeaponCreatedAttributes> releases;
+    {
+        std::lock_guard<std::mutex> lock(g_standard_weapon_attribute_mutex);
+        for (auto it = g_standard_weapon_created_attributes.begin(); it != g_standard_weapon_created_attributes.end();)
+        {
+            if (item_view == nullptr || it->first == item_view)
+            {
+                releases.push_back(std::move(it->second));
+                it = g_standard_weapon_created_attributes.erase(it);
+            }
+            else ++it;
+        }
+    }
+    if (mode != AttributeBindingReleaseMode::RestoreOriginal) return;
+#ifndef NSKINZCS2_TESTS
+    if (GetCurrentThreadId() != g_hook_state.frame_stage_thread_id.load(std::memory_order_acquire) ||
+        g_hook_state.last_frame_stage.load() != kCs2FrameRenderPass) return;
+#endif
+    for (const auto& created : releases)
+    {
+        if (!CreatedStandardWeaponAttributesStillOwned(created)) continue;
+        const auto stride = ResolveEconItemAttributeStride(created.offsets);
+        bool ours = true;
+        for (std::size_t i = 0; i < created.values.size(); ++i)
+        {
+            auto* node = created.vector.data + (created.first + i) * stride;
+            std::uint16_t definition = 0;
+            float value = 0, initial = 0;
+            ours = ours && SafeReadField(node, created.offsets.econ_item_attribute_definition_index, definition) &&
+                definition == created.values[i].first &&
+                SafeReadField(node, created.offsets.econ_item_attribute_value, value) && value == created.values[i].second &&
+                (created.offsets.econ_item_attribute_initial_value == 0 ||
+                    (SafeReadField(node, created.offsets.econ_item_attribute_initial_value, initial) && initial == value));
+        }
+        if (ours) TryInvokeNetworkVectorOperation(created.offsets.attribute_list_attributes_operation, 5,
+            created.vector_address, static_cast<std::int32_t>(created.first), static_cast<std::int32_t>(created.values.size()));
+    }
+}
+
 bool StandardWeaponAttributeSlotStillValid(
     const StandardWeaponAttributeSlot& slot,
     const ClientSchemaOffsets& offsets)
@@ -28182,8 +28354,9 @@ bool CollectStandardWeaponAttributeSlots(
             slots.push_back(slot);
         }
     }
-    // These scalar attributes have genuine entity fallback storage. Missing
-    // sticker/keychain attributes cannot be advertised as successfully applied.
+    // This scans existing slots only; missing scalar slots are NOT evidence
+    // that the material consumer can see them. Positive paints additionally
+    // call EnsureStandardWeaponFinishAttributes before synchronization.
     return std::all_of(desired_attributes.begin(), desired_attributes.end(), [&](const auto& desired)
     {
         return desired.first == kAttributePaintKit || desired.first == kAttributeSeed ||
@@ -28272,6 +28445,7 @@ bool SynchronizeStandardWeaponAttributes(
 
 void ReleaseStandardWeaponAttributeWrites(const AttributeBindingReleaseMode mode, void* item_view)
 {
+    ReleaseCreatedStandardWeaponAttributes(mode, item_view);
     std::unordered_map<void*, StandardWeaponAttributeRestore> restores;
     {
         std::lock_guard<std::mutex> lock(g_standard_weapon_attribute_mutex);
@@ -52723,8 +52897,8 @@ bool TryProcessPendingWeaponRefreshRequests(
         {
             LogProfileDiagnosticOnce(
                 request.desired_signature ^ 0x4E41545653544457ull,
-                L"Standard-weapon refresh uses verified in-place attributes, fallback fields and the native material gate; "
-                L"no CS2 attribute vector was grown, replaced, or retained.");
+                L"Standard-weapon refresh uses verified engine-owned paint records and targeted native material initialization; "
+                L"missing finish nodes use Schema construction, never external vector storage or registration metadata writes.");
         }
 
         scheduled_item_views.insert(effective_refresh_item_view);
@@ -54791,8 +54965,13 @@ bool ApplyProfileToEconItem(
     if (IsStandardWeaponProfile(profile))
     {
         std::size_t changed_slots = 0;
-        const auto synchronized = SynchronizeStandardWeaponAttributes(
-            item_view, offsets, BuildWeaponRefreshAttributesImpl(profile, keychain_profile), changed_slots);
+        const auto desired_attributes = BuildWeaponRefreshAttributesImpl(profile, keychain_profile);
+        std::vector<StandardWeaponAttributeSlot> readable_slots;
+        const auto synchronized = CollectStandardWeaponAttributeSlots(item_view, offsets, desired_attributes, readable_slots) &&
+            EnsureStandardWeaponFinishAttributes(econ_entity, item_view, offsets, desired_attributes) &&
+            SynchronizeStandardWeaponAttributes(item_view, offsets, desired_attributes, changed_slots);
+        if (synchronized) UpdateCreatedStandardWeaponAttributeValues(item_view, desired_attributes);
+        else ReleaseCreatedStandardWeaponAttributes(AttributeBindingReleaseMode::RestoreOriginal, item_view);
         if (!synchronized || changed_slots != 0)
         {
             std::wstringstream stream;
@@ -56623,6 +56802,18 @@ bool TryApplyStandardWeaponAppearancePipeline(
         return false;
     }
 
+    if (IsStandardWeaponProfile(profile))
+    {
+        const auto epoch = g_hook_state.standard_weapon_appearance_epochs.find(binding.resolved.carrier_entity_index);
+        if (epoch != g_hook_state.standard_weapon_appearance_epochs.end() &&
+            epoch->second.failed_material_signature == desired_signature)
+        {
+            UpdateWeaponAppearanceTelemetry({}, {},
+                L"Weapon material initialization failed for this appearance; retry suspended until Update or a new entity generation", {});
+            return false;
+        }
+    }
+
     if (keychain_profile != nullptr)
     {
         TryResolveWeaponKeychainModuleEntity(
@@ -57359,6 +57550,12 @@ bool TryApplyStandardWeaponAppearancePipeline(
 
     if (!applied)
     {
+        if (IsStandardWeaponProfile(profile))
+        {
+            const auto epoch = g_hook_state.standard_weapon_appearance_epochs.find(binding.resolved.carrier_entity_index);
+            if (epoch != g_hook_state.standard_weapon_appearance_epochs.end())
+                epoch->second.failed_material_signature = desired_signature;
+        }
         result.issue = L"weapon appearance apply stage failed before verification.";
         std::wstringstream stream;
         stream << L"Weapon appearance apply failed before verification: carrier_entity="
@@ -58737,11 +58934,8 @@ bool TryCaptureWeaponSkinRefreshInstructionWindow(
     //   cmp dword ptr [rbx+companion], 0
     //   jle skip
     //
-    // Positive finishes temporarily replace the first displacement with the
-    // attribute-vector count to request a rebuild. Explicit vanilla must run
-    // this exact native window unpatched so the stale composite material is
-    // detected and released by CS2 itself. Validate the complete instruction
-    // window before either path is allowed.
+    // This window stays unpatched. Standard guns decode its native callees
+    // for targeted initialization; the legacy global path retains this gate.
     std::array<std::uint8_t, 18> window {};
     if (!SafeReadBytes(patch_address - 2, window.data(), window.size()) ||
         window[0] != 0x83 || window[1] != 0xBB ||
@@ -58826,6 +59020,36 @@ bool TryResolveWeaponSkinRefreshBinding(
     }
 
     binding.function = function;
+    // Validate the complete native gate + call ABI, then resolve both rel32
+    // callees inside this client. Empty stock owners are skipped by the loop,
+    // but are accepted by its generator when called for a verified gun.
+    std::array<std::uint8_t, 42> material_calls {};
+    nskinzcs2::runtime::WeaponMaterialCalls decoded;
+    if (SafeReadBytes(function + 0x50, material_calls.data(), material_calls.size()) &&
+        nskinzcs2::runtime::DecodeWeaponMaterialCalls(material_calls, decoded))
+    {
+        auto* clear = function + 0x50 + 32 + decoded.clear_relative;
+        auto* generate = function + 0x50 + 42 + decoded.generate_relative;
+        constexpr std::array<std::uint8_t, 27> generator_entry {
+            0x40,0x55,0x53,0x41,0x57,0x48,0x8D,0xAC,0x24,0,0xFE,0xFF,0xFF,
+            0x48,0x81,0xEC,0,3,0,0,0x44,0x0F,0xB6,0xFA,0x48,0x8B,0xD9
+        };
+        std::array<std::uint8_t, generator_entry.size()> observed {};
+        constexpr std::array<std::uint8_t, 31> clear_entry {
+            0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x48,0x89,0x74,0x24,0x20,
+            0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xEC,0x20,0x44,0x0F,0xB6,0xF2,0x48,0x8B,0xF9
+        };
+        std::array<std::uint8_t, clear_entry.size()> observed_clear {};
+        if (PointerInModule(*module_span, clear) && PointerInModule(*module_span, generate) &&
+            IsExecutablePointer(clear) && IsExecutablePointer(generate) &&
+            SafeReadBytes(generate, observed.data(), observed.size()) && observed == generator_entry &&
+            SafeReadBytes(clear, observed_clear.data(), observed_clear.size()) && observed_clear == clear_entry)
+        {
+            binding.standard_clear_materials = clear;
+            binding.standard_generate_materials = generate;
+            binding.standard_material_owner_offset = decoded.owner_offset;
+        }
+    }
     binding.offset_patch_address = patch_address;
     binding.original_offset = original_offset;
     binding.patched_offset = patched_offset;
@@ -58882,19 +59106,85 @@ WeaponSkinRefreshCallResult TryCallWeaponSkinRefresh(
     // never left active while the game thread continues normal client work.
     {
         std::wstringstream stream;
-        stream << L"Dispatching RegenerateWeaponSkins synchronously on verified FRAME_RENDER_PASS game thread "
+        stream << L"Dispatching native weapon material refresh synchronously on verified FRAME_RENDER_PASS game thread "
             << current_thread_id
             << L" (native_material_gate=1, executable_patch=0).";
         nskinzcs2::Logger::Info(stream.str());
     }
-    const bool invoked = SafeInvokeVoidFunctionPointer(
-        binding.function,
-        static_cast<void*>(nullptr));
+    const auto has_nonstandard_request = std::any_of(requests.begin(), requests.end(), [](const auto& request)
+        { return !IsStandardWeaponProfile(request.profile); });
+    const bool invoked = !has_nonstandard_request || SafeInvokeVoidFunctionPointer(
+        binding.function, static_cast<void*>(nullptr));
 
     if (!invoked)
     {
         issue = L"RegenerateWeaponSkins faulted during the game-thread call.";
         return WeaponSkinRefreshCallResult::Faulted;
+    }
+
+    for (const auto& request : requests)
+    {
+        if (!IsStandardWeaponProfile(request.profile)) continue;
+        auto epoch = g_hook_state.standard_weapon_appearance_epochs.find(request.entity_index);
+        const auto fail = [&](const wchar_t* message)
+        {
+            issue = message;
+            if (epoch != g_hook_state.standard_weapon_appearance_epochs.end())
+                epoch->second.failed_material_signature = request.desired_signature;
+            return WeaponSkinRefreshCallResult::PatchFailed;
+        };
+        if (epoch != g_hook_state.standard_weapon_appearance_epochs.end() &&
+            epoch->second.failed_material_signature == request.desired_signature)
+            return fail(L"Standard-weapon material retry suspended for this failed appearance until Update/new generation.");
+        const auto& offsets = g_hook_state.schema_offsets;
+        StandardWeaponEntityEpoch current;
+        int primary = -1, companion = -1;
+        if (epoch == g_hook_state.standard_weapon_appearance_epochs.end() ||
+            !ReadStandardWeaponCarrierEpoch(request.econ_entity, offsets, current) ||
+            current != epoch->second.carrier || request.item_view !=
+                static_cast<std::uint8_t*>(request.econ_entity) + offsets.econ_entity_attribute_manager + offsets.attribute_container_item ||
+            binding.standard_clear_materials == nullptr || binding.standard_generate_materials == nullptr ||
+            !SafeReadField(request.econ_entity, binding.original_offset, primary) ||
+            !SafeReadField(request.econ_entity, binding.original_companion_offset, companion) ||
+            primary < 0 || primary > 128 || companion < 0 || companion > 128)
+            return fail(L"Standard-weapon material initialization rejected: native binding, carrier epoch or material counts invalid.");
+
+        const bool had_materials = nskinzcs2::runtime::StandardWeaponHasCompositeMaterial(primary, companion);
+        // A mixed knife/gun batch already used the global helper for existing
+        // owners. For gun-only work, touch only the requested world carrier.
+        const bool needs_direct = !has_nonstandard_request || !had_materials;
+        if (needs_direct)
+        {
+            if (had_materials && !SafeInvokeVoidFunctionPointer(binding.standard_clear_materials,
+                static_cast<std::uint8_t*>(request.econ_entity) + binding.standard_material_owner_offset, true))
+                return fail(L"Standard-weapon native material clear faulted; automatic retry suspended.");
+            int cleared_primary = -1, cleared_companion = -1;
+            if (!ReadStandardWeaponCarrierEpoch(request.econ_entity, offsets, current) ||
+                current != epoch->second.carrier ||
+                !SafeReadField(request.econ_entity, binding.original_offset, cleared_primary) ||
+                !SafeReadField(request.econ_entity, binding.original_companion_offset, cleared_companion) ||
+                cleared_primary != 0 || cleared_companion != 0)
+                return fail(L"Standard-weapon native clear did not leave an empty verified owner; generation skipped.");
+            if (request.profile.paint_kit > 0 &&
+                !VerifyAttributeValues(request.item_view, offsets, BuildWeaponRefreshAttributesImpl(request.profile)))
+                return fail(L"Standard-weapon paint/seed/wear records are missing before material initialization.");
+            if (!SafeInvokeVoidFunctionPointer(binding.standard_generate_materials, request.econ_entity, false))
+                return fail(L"Standard-weapon native material generator faulted; automatic retry suspended.");
+        }
+        int after_primary = -1, after_companion = -1;
+        if (!SafeReadField(request.econ_entity, binding.original_offset, after_primary) ||
+            !SafeReadField(request.econ_entity, binding.original_companion_offset, after_companion))
+            return fail(L"Standard-weapon generated material owner could not be read back.");
+        const bool material_created = nskinzcs2::runtime::StandardWeaponHasCompositeMaterial(after_primary, after_companion);
+        std::wstringstream stream;
+        stream << L"Standard-weapon native material initialization: entity=" << request.entity_index
+            << L", paint=" << request.profile.paint_kit << L", before=" << primary << L"/" << companion
+            << L", after=" << after_primary << L"/" << after_companion << L", direct=" << (needs_direct ? 1 : 0)
+            << L", material_created=" << (material_created ? 1 : 0) << L", visual_result_not_verified=1.";
+        LogProfileDiagnosticOnce(request.desired_signature ^ 0x53544F434B494E49ull, stream.str());
+        if (request.profile.paint_kit > 0 && !material_created)
+            return fail(L"Standard-weapon generator returned without a composite material; not recording appearance success.");
+        epoch->second.failed_material_signature = 0;
     }
 
     return WeaponSkinRefreshCallResult::Succeeded;
@@ -83120,6 +83410,211 @@ nskinzcs2::runtime::ProbeStandardWeaponAttributeSynchronizationForTests(
     };
     result.original_values_restored = bytes_equal(static_nodes, original_static) && bytes_equal(dynamic_nodes, original_dynamic);
     return result;
+}
+
+namespace
+{
+std::vector<RefreshEconItemAttribute> g_stock_probe_nodes;
+int g_stock_probe_appends = 0, g_stock_probe_erases = 0, g_stock_probe_mutations = 0;
+int g_stock_probe_fail_mutation = -1, g_stock_probe_generates = 0, g_stock_probe_clears = 0;
+bool g_stock_probe_generate_material = true;
+std::uintptr_t __fastcall StockAttributeProbeOperation(std::uint32_t operation,
+    void* vector_address, std::int32_t index, std::int32_t count)
+{
+    auto& vector = *static_cast<NetworkVectorView*>(vector_address);
+    if (operation == 4)
+    {
+        ++g_stock_probe_appends;
+        for (int i = 0; i < count; ++i)
+        {
+            RefreshEconItemAttribute node {};
+            node.vtable = 0x11223344;
+            node.owner = 0x55667788;
+            node.refundable_currency = 91;
+            g_stock_probe_nodes.push_back(node);
+        }
+    }
+    else if (operation == 5)
+    {
+        ++g_stock_probe_erases;
+        g_stock_probe_nodes.erase(g_stock_probe_nodes.begin() + index, g_stock_probe_nodes.begin() + index + count);
+    }
+    else if (operation == 2)
+    {
+        if (++g_stock_probe_mutations == g_stock_probe_fail_mutation) return 0;
+        return reinterpret_cast<std::uintptr_t>(vector.data + index * sizeof(RefreshEconItemAttribute));
+    }
+    else return 0;
+    vector = {g_stock_probe_nodes.size(), reinterpret_cast<std::uint8_t*>(g_stock_probe_nodes.data())};
+    return 0;
+}
+void __fastcall StockProbeClear(void* owner, bool clear)
+{
+    if (!clear) return;
+    ++g_stock_probe_clears;
+    SafeWriteField(owner, 0x4A0, 0);
+    SafeWriteField(owner, 0x4B8, 0);
+}
+void __fastcall StockProbeGenerate(void* entity, bool)
+{
+    ++g_stock_probe_generates;
+    float paint = 0;
+    const auto& offsets = g_hook_state.schema_offsets;
+    auto* item = static_cast<std::uint8_t*>(entity) + offsets.econ_entity_attribute_manager + offsets.attribute_container_item;
+    if (g_stock_probe_generate_material && TryReadAttributeValue(item, offsets, kAttributePaintKit, paint) && paint > 0)
+        SafeWriteField(entity, 0xAA8, 1);
+}
+}
+
+bool nskinzcs2::runtime::ProbeStandardWeaponStockFinishForTests()
+{
+    auto saved_offsets = g_hook_state.schema_offsets;
+    auto saved_epochs = std::move(g_hook_state.standard_weapon_appearance_epochs);
+    const auto saved_thread = g_hook_state.frame_stage_thread_id.load();
+    const auto saved_stage = g_hook_state.last_frame_stage.load();
+    struct Restore
+    {
+        ClientSchemaOffsets offsets;
+        decltype(saved_epochs)& epochs;
+        DWORD thread; int stage;
+        ~Restore()
+        {
+            ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::AbandonInstalled);
+            g_hook_state.schema_offsets = offsets;
+            g_hook_state.standard_weapon_appearance_epochs = std::move(epochs);
+            g_hook_state.frame_stage_thread_id.store(thread);
+            g_hook_state.last_frame_stage.store(stage);
+        }
+    } restore {saved_offsets, saved_epochs, saved_thread, saved_stage};
+    ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::AbandonInstalled);
+    g_hook_state.standard_weapon_appearance_epochs.clear();
+    g_hook_state.frame_stage_thread_id.store(GetCurrentThreadId());
+    g_hook_state.last_frame_stage.store(kCs2FrameRenderPass);
+    std::array<std::uint8_t, 0xC00> entity {};
+    std::array<std::uint8_t, 32> identity {};
+    void* item = entity.data() + 0x100;
+    ClientSchemaOffsets offsets;
+    offsets.knife_entity_identity = 16;
+    offsets.knife_identity_name_index = 0x14;
+    offsets.knife_creation_tick = 24;
+    offsets.econ_entity_attribute_manager = 0x80;
+    offsets.attribute_container_item = 0x80;
+    offsets.item_view_attribute_list = 0x40;
+    offsets.item_view_dynamic_attribute_list = 0x68;
+    offsets.attribute_list_attributes = 8;
+    offsets.econ_item_attribute_size = sizeof(RefreshEconItemAttribute);
+    offsets.econ_item_attribute_definition_index = offsetof(RefreshEconItemAttribute, definition_index);
+    offsets.econ_item_attribute_value = offsetof(RefreshEconItemAttribute, value);
+    offsets.econ_item_attribute_initial_value = offsetof(RefreshEconItemAttribute, initial_value);
+    offsets.attribute_list_attributes_element_size = sizeof(RefreshEconItemAttribute);
+    offsets.attribute_list_attributes_schema_tail_span = 0x18;
+    offsets.attribute_list_attributes_operation = StockAttributeProbeOperation;
+    g_hook_state.schema_offsets = offsets;
+    SafeWriteField(entity.data(), 16, static_cast<void*>(identity.data()));
+    SafeWriteField(entity.data(), 24, 100);
+    SafeWriteField(identity.data(), 0, static_cast<void*>(entity.data()));
+    SafeWriteField(identity.data(), 0x10, std::uint32_t(0x8064));
+    const std::vector<std::pair<std::uint16_t, float>> boom {{6,174}, {7,321}, {8,0.17f}};
+    const auto initialize = [&]()
+    {
+        ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::AbandonInstalled);
+        g_stock_probe_nodes.clear();
+        g_stock_probe_appends = g_stock_probe_erases = g_stock_probe_mutations = 0;
+        g_stock_probe_generates = g_stock_probe_clears = 0;
+        g_stock_probe_fail_mutation = -1;
+        g_stock_probe_generate_material = true;
+        SafeWriteField(item, 0x48, NetworkVectorView {});
+        SafeWriteField(item, 0x70, NetworkVectorView {});
+        SafeWriteField(entity.data(), 0xAA8, 0);
+        SafeWriteField(entity.data(), 0xAC0, 0);
+        g_hook_state.standard_weapon_appearance_epochs.clear();
+        return TryTrackStandardWeaponAppearanceEpoch(100, entity.data(), entity.data(), nullptr, offsets);
+    };
+    const auto apply = [&](const auto& desired)
+    {
+        std::size_t changed = 0;
+        if (!EnsureStandardWeaponFinishAttributes(entity.data(), item, offsets, desired) ||
+            !SynchronizeStandardWeaponAttributes(item, offsets, desired, changed)) return false;
+        UpdateCreatedStandardWeaponAttributeValues(item, desired);
+        return VerifyAttributeValues(item, offsets, desired);
+    };
+    if (!initialize() || !apply(boom) || g_stock_probe_nodes.size() != 3 || g_stock_probe_appends != 1) return false;
+    for (const auto& node : g_stock_probe_nodes)
+        if (node.vtable != 0x11223344 || node.owner != 0x55667788 || node.refundable_currency != 91) return false;
+    for (int i = 0; i < 1000; ++i) if (!apply(boom)) return false;
+    if (g_stock_probe_appends != 1 || g_stock_probe_mutations != 3) return false;
+
+    WeaponSkinRefreshBinding binding;
+    binding.function = reinterpret_cast<void*>(StockProbeGenerate); // Must not execute this global entry in a gun-only batch.
+    binding.standard_clear_materials = reinterpret_cast<void*>(StockProbeClear);
+    binding.standard_generate_materials = reinterpret_cast<void*>(StockProbeGenerate);
+    binding.standard_material_owner_offset = 0x608;
+    binding.original_offset = 0xAA8;
+    binding.original_companion_offset = 0xAC0;
+    model::CosmeticProfile profile;
+    profile.base_item = 9;
+    profile.paint_kit = 174;
+    profile.xuid = 76561199123336549ull;
+    profile.seed = 321; profile.wear = 0.17f;
+    PendingWeaponRefreshRequest request {100, entity.data(), item, item, profile, 174,
+        WeaponSkinRefreshTarget::PrimaryItemView, false, std::nullopt};
+    std::wstring issue;
+    if (TryCallWeaponSkinRefresh(binding, {request}, issue) != WeaponSkinRefreshCallResult::Succeeded ||
+        g_stock_probe_generates != 1 || g_stock_probe_clears != 0) return false;
+    if (TryCallWeaponSkinRefresh(binding, {request}, issue) != WeaponSkinRefreshCallResult::Succeeded ||
+        g_stock_probe_generates != 2 || g_stock_probe_clears != 1) return false;
+    auto changed = boom; changed[0].second = 819;
+    if (!apply(changed) || g_stock_probe_appends != 1) return false;
+    ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::RestoreOriginal);
+    if (!g_stock_probe_nodes.empty() || g_stock_probe_erases != 1) return false;
+
+    // Native initialization returning without materials must fail and latch,
+    // rather than turning one bad initialization into a per-frame retry loop.
+    if (!initialize() || !apply(boom)) return false;
+    g_stock_probe_generate_material = false;
+    if (TryCallWeaponSkinRefresh(binding, {request}, issue) == WeaponSkinRefreshCallResult::Succeeded) return false;
+    for (int i = 0; i < 1000; ++i)
+        if (TryCallWeaponSkinRefresh(binding, {request}, issue) == WeaponSkinRefreshCallResult::Succeeded) return false;
+    if (g_stock_probe_generates != 1) return false;
+    // A new generation invalidates the failure latch; a stale handle cannot be called.
+    SafeWriteField(identity.data(), 0x10, std::uint32_t(0x10064));
+    if (TryCallWeaponSkinRefresh(binding, {request}, issue) == WeaponSkinRefreshCallResult::Succeeded) return false;
+    ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::RestoreOriginal);
+    if (g_stock_probe_erases != 0) return false;
+    if (!TryTrackStandardWeaponAppearanceEpoch(100, entity.data(), entity.data(), nullptr, offsets) ||
+        g_hook_state.standard_weapon_appearance_epochs[100].failed_material_signature != 0) return false;
+
+    for (int failure = 1; failure <= 3; ++failure)
+    {
+        if (!initialize()) return false;
+        g_stock_probe_fail_mutation = failure;
+        if (apply(boom) || !g_stock_probe_nodes.empty() || g_stock_probe_erases != 1) return false;
+    }
+    if (!initialize()) return false;
+    auto invalid_offsets = offsets;
+    invalid_offsets.attribute_list_attributes_operation = nullptr;
+    if (EnsureStandardWeaponFinishAttributes(entity.data(), item, invalid_offsets, boom) || g_stock_probe_appends) return false;
+    if (!EnsureStandardWeaponFinishAttributes(entity.data(), item, invalid_offsets, {{6,0}}) || g_stock_probe_appends) return false;
+    return true;
+}
+
+bool nskinzcs2::runtime::ProbeStandardWeaponMaterialCallsForTests(const std::filesystem::path& client_path)
+{
+    // Map PE without resolving imports or running DllMain. Never invoke game code in this test.
+    const auto module = LoadLibraryExW(client_path.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+    if (module == nullptr) return false;
+    ClientSchemaOffsets offsets;
+    offsets.econ_entity_attribute_manager = 0x11A8;
+    offsets.attribute_container_item = 0x50;
+    offsets.item_view_attribute_list = 0x208;
+    offsets.attribute_list_attributes = 8;
+    WeaponSkinRefreshBinding binding;
+    std::wstring issue;
+    const bool verified = TryResolveWeaponSkinRefreshBinding(module, offsets, binding, issue) &&
+        binding.standard_clear_materials != nullptr && binding.standard_generate_materials != nullptr &&
+        binding.standard_material_owner_offset == 0x608;
+    FreeLibrary(module);
+    return verified;
 }
 
 nskinzcs2::runtime::ExactWorldWeaponBindingProbeResult

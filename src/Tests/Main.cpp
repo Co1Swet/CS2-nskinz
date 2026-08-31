@@ -8,6 +8,7 @@
 #include "Runtime/KnifeAnimation.hpp"
 #include "Runtime/KnifeAppearance.hpp"
 #include "Runtime/WeaponAppearance.hpp"
+#include "Runtime/WeaponMaterialInit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1732,6 +1733,8 @@ void TestCatalogFromRealGameFilesIfProvided()
         Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 60, paint) == WeaponPaintCompatibility::Incompatible,
             "M4A1-S must not inherit M4A4 finishes");
     }
+    Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 9, 174) == WeaponPaintCompatibility::Compatible &&
+        catalog->weapon_paint_uses_legacy_model.at(174), "real AWP BOOM remains compatible and uses legacy mesh 2");
     Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 61, 1040) == WeaponPaintCompatibility::Compatible,
         "real USP-S Traitor must remain selectable");
     Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 7, 44) == WeaponPaintCompatibility::Compatible &&
@@ -4649,7 +4652,7 @@ void TestStandardWeaponAttributeSynchronization()
         "all duplicate paint slots must be verified, not just the first match");
     const auto stock = ProbeStandardWeaponAttributeSynchronizationForTests({}, {}, desired, false);
     Expect(stock.synchronized && stock.matched_after && stock.changed_slots == 0,
-        "empty stock finish lists must remain empty and use real entity fallback fields");
+        "in-place-only scanning accepts absent scalar slots but is not proof of material readiness");
     const auto vanilla = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, {{6, 0}, {7, 0}, {8, 0.0000001f}});
     Expect(vanilla.synchronized && vanilla.matched_after && vanilla.original_values_restored,
         "explicit vanilla must synchronize paint zero without deleting or reallocating slots");
@@ -4667,6 +4670,37 @@ void TestStandardWeaponAttributeSynchronization()
         "missing attributes without entity fallback storage cannot count as applied");
     const auto invalid = ProbeStandardWeaponAttributeSynchronizationForTests({}, {{6, 1040}}, {{6, std::numeric_limits<float>::quiet_NaN()}});
     Expect(!invalid.synchronized && invalid.original_values_restored, "non-finite desired attributes must not be written");
+}
+
+void TestStandardWeaponStockInitialization()
+{
+    using namespace nskinzcs2::runtime;
+    Expect(ProbeStandardWeaponStockFinishForTests(),
+        "stock AWP BOOM: engine-owned attributes, native initialization, restore, stale identity and retry bounds");
+    constexpr std::array<std::uint8_t, 42> calls {
+        0x83,0xBB,0xA8,0x0A,0,0,0,0x7F,9,0x83,0xBB,0xC0,0x0A,0,0,0,0x7E,0x18,
+        0x48,0x8D,0x8B,8,6,0,0,0xB2,1,0xE8,0xE0,0xAE,0xC3,0,0x33,0xD2,0x48,0x8B,0xCB,
+        0xE8,0xD6,0xA6,0xFD,0xFF
+    };
+    WeaponMaterialCalls decoded;
+    Expect(DecodeWeaponMaterialCalls(calls, decoded), "native material loop call ABI must decode");
+    Expect(0x7FF0F0 + 32 + decoded.clear_relative == 0x1439FF0 &&
+        0x7FF0F0 + 42 + decoded.generate_relative == 0x7D97F0, "rel32 targets must preserve their signed displacement");
+    for (std::size_t i = 0; i < calls.size(); ++i)
+    {
+        Expect(!DecodeWeaponMaterialCalls(std::span(calls).first(i), decoded), "truncated instruction window rejected");
+        if ((i >= 28 && i < 32) || i >= 38) continue;
+        auto corrupt = calls; corrupt[i] ^= 1;
+        Expect(!DecodeWeaponMaterialCalls(corrupt, decoded), "changed gate/owner offset/call ABI rejected");
+    }
+    Expect(!StandardWeaponHasCompositeMaterial(0, 0) && StandardWeaponHasCompositeMaterial(1, 0) &&
+        StandardWeaponHasCompositeMaterial(0, 1) && !StandardWeaponHasCompositeMaterial(-1, 1) &&
+        !StandardWeaponHasCompositeMaterial(129, 0), "empty/invalid material containers cannot count as generated");
+    if (const auto* client = _wgetenv(L"NSKINZCS2_KNIFE_CLIENT_DLL"); client != nullptr)
+    {
+        Expect(ProbeStandardWeaponMaterialCallsForTests(client), "actual installed client must resolve both native material callees");
+        std::cout << "standard_weapon_material_native_evidence=PASS\n";
+    }
 }
 
 void TestStandardWeaponRefreshModel()
@@ -5019,6 +5053,7 @@ int RunAllTests()
             RunNamedTest("TestCatalogFromRealGameFilesIfProvided", TestCatalogFromRealGameFilesIfProvided);
             RunNamedTest("TestM4A4ModernLegacyTransition", TestM4A4ModernLegacyTransition);
             RunNamedTest("TestStandardWeaponAttributeSynchronization", TestStandardWeaponAttributeSynchronization);
+            RunNamedTest("TestStandardWeaponStockInitialization", TestStandardWeaponStockInitialization);
             RunNamedTest("TestWeaponMeshMaskNonblocking", TestWeaponMeshMaskNonblocking);
             RunNamedTest("TestWeaponAppearanceModule", TestWeaponAppearanceModule);
             std::cout << "weapon paint regression passed (no CS2 process)\n";
@@ -5076,6 +5111,7 @@ int RunAllTests()
         RunNamedTest("TestBuildMissingWeaponAttributeDefinitionIndices", TestBuildMissingWeaponAttributeDefinitionIndices);
         RunNamedTest("TestWeaponRefreshTargetMaterialRefreshGate", TestWeaponRefreshTargetMaterialRefreshGate);
         RunNamedTest("TestStandardWeaponRefreshModel", TestStandardWeaponRefreshModel);
+        RunNamedTest("TestStandardWeaponStockInitialization", TestStandardWeaponStockInitialization);
         RunNamedTest("TestStandardWeaponAttributeSynchronization", TestStandardWeaponAttributeSynchronization);
         RunNamedTest("TestKnifeRepeatedFieldRepair", TestKnifeRepeatedFieldRepair);
         RunNamedTest("TestWeaponMeshMaskNonblocking", TestWeaponMeshMaskNonblocking);

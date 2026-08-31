@@ -2,14 +2,14 @@
 
 ## 中文
 
-v0.4.3（2026-08-31）沿用 v0.4.2 的单 DLL 加载方案，并加入枪型/涂装兼容校验、新旧枪械网格及 HUD 绑定修复。旧版标签和下载资产保留。独立刀模链尚未完成可用的模型替换。
+v0.4.4（2026-08-31）沿用 v0.4.2 的单 DLL 加载方案，保留 v0.4.3 枪型兼容/网格/HUD 修复，新增原皮枪械属性及首次材质初始化修复。旧版标签和下载资产保留，暂停中的独立刀模续作不混入发布。详见 [v0.4.4 发布说明](releases/v0.4.4.md)。
 
 ### 使用要求
 
 - Windows 10/11 x64、正常工作的 CS2 和 HLAE；仅限 `-insecure` 离线 Demo。
 - 不需要额外安装 Visual C++ Redistributable、DirectX SDK / June 2010 运行库、.NET、Python 或 Visual Studio。
 - 每次只选择一个语言 DLL，放在可写文件夹。目录、配置和日志由 DLL 自动生成，不是需要单独下载的依赖。
-- 仍使用 v0.4.1 的游戏兼容基线：HLAE 2.191.1；Steam Build 25000182；CS2 ClientVersion 2000899 / Patch 1.41.7.8 / Source revision 10948930。本次没有重新进行游戏内换肤实测。
+- 游戏兼容基线：HLAE 2.191.1；Steam Build 25000182；CS2 ClientVersion 2000899 / Patch 1.41.7.8 / Source revision 10948930。v0.4.4 原皮 AWP → 嘣已由用户实测确认；不代表所有枪型/涂装组合都已画面验收。
 
 关闭并重新启动 HLAE/CS2，不要向已有旧 DLL 的进程重复加载新版。把中文版放在 `C:\nSkinzCS2\nSkinzCS2.zh-CN.dll` 后，在游戏控制台输入：
 
@@ -21,7 +21,9 @@ mirv_loadlibrary C:\nSkinzCS2\nSkinzCS2.zh-CN.dll
 
 没有空格的完整路径可以不加引号。路径有空格时只加一对英文半角双引号，例如 `mirv_loadlibrary "D:\My Tools\nSkinzCS2.zh-CN.dll"`。不要叠加两对引号，也不要使用中文弯引号。
 
-### 本次修改与验证
+### 保留的 v0.4.2 加载修复与验证
+
+以下为单 DLL 加载方案的历史验证。v0.4.4 的两份 DLL 已重新通过六项隔离加载和无窗口渲染检查；枪械回归范围见当前发布说明。
 
 旧版实际已经是 x64 `/MT`，没有直接导入 `MSVCP140.dll` 或 `VCRUNTIME140.dll`，所以不能仅凭 HLAE 的 `LoadLibraryA failed` 文案认定缺少 VC++ 运行库。HLAE 的命令实现使用 `LoadLibraryW`，但没有输出 `GetLastError`。
 
@@ -62,11 +64,11 @@ nSkinzCS2.LoadCheck.exe "C:\nSkinzCS2\nSkinzCS2.zh-CN.dll"
 
 ## English
 
-v0.4.3 (2026-08-31) retains v0.4.2's single-DLL loading and adds gun/paint compatibility, modern/legacy mesh and HUD binding fixes. Previous tags/assets are preserved. Independent knife-model replacement remains unfinished.
+v0.4.4 (2026-08-31) retains single-DLL loading and v0.4.3 gun compatibility/mesh/HUD fixes, adding stock-weapon attributes and initial material generation. Previous tags/assets are preserved; paused independent knife-model continuation is excluded. See the [v0.4.4 release notes](releases/v0.4.4.md).
 
 Only Windows 10/11 x64, CS2 and HLAE are required. No separate VC++ redistributable, legacy DirectX runtime/SDK, .NET, Python or compiler installation is needed. Use one language DLL, extracted into a writable folder, with HLAE `-insecure` offline demos only. Restart HLAE/CS2 before upgrading. Generated catalog/config/log files are not additional downloads.
 
-Compatibility baseline remains HLAE 2.191.1, Steam Build 25000182, CS2 ClientVersion 2000899 / Patch 1.41.7.8 / Source revision 10948930. In-game cosmetic behavior was not retested for this loading-only change.
+Compatibility baseline remains HLAE 2.191.1, Steam Build 25000182, CS2 ClientVersion 2000899 / Patch 1.41.7.8 / Source revision 10948930. The v0.4.4 stock AWP → BOOM case is user-confirmed, not exhaustive visual certification of every gun/finish.
 
 ```text
 mirv_loadlibrary C:\nSkinzCS2\nSkinzCS2.dll
@@ -76,7 +78,9 @@ Replace the example path with the extracted DLL location; use `nSkinzCS2.zh-CN.d
 
 A full path without spaces needs no quotes. For spaces, use exactly one pair of ASCII double quotes, e.g. `mirv_loadlibrary "D:\My Tools\nSkinzCS2.dll"`. Never double-wrap the path or use typographic quotes.
 
-v0.4.1 already used x64 `/MT` and did not directly import VC++ runtime DLLs. The new fix additionally replaces runtime `D3DCompile` with embedded, precompiled DXBC, removing `D3DCOMPILER_47.dll` entirely rather than delaying or externally supplying it. Static CRT thread notifications are no longer disabled. Both DLLs now import only Windows components listed above.
+The following describes the retained v0.4.2 loading fix and historical checks. Both v0.4.4 DLLs have also passed the six isolated loader cases and offscreen rendering; see the current release notes for firearm regressions.
+
+v0.4.1 already used x64 `/MT` and did not directly import VC++ runtime DLLs. v0.4.2 additionally replaced runtime `D3DCompile` with embedded, precompiled DXBC, removing `D3DCOMPILER_47.dll` entirely rather than delaying or externally supplying it. Static CRT thread notifications are no longer disabled. Both DLLs now import only Windows components listed above.
 
 Local background tests passed: six new-binary loader cases covering both languages, standard/System32-only search and a deliberately incompatible compiler fixture; two old-binary controls; and actual headless ImGui WARP rendering/pixel readback with three resource recreations. Tests exclude developer PATH entries and config sidecars and cover Unicode/spaced paths. The old binary returned error 127 with the incompatible compiler fixture; both new binaries loaded. System files were not modified and the fixture is not distributed. Text/catalog checks, import auditing and shader reproducibility checks also passed.
 

@@ -101,6 +101,7 @@
     <ClInclude Include="src\Runtime\KnifeModel.hpp" />
     <ClInclude Include="src\Runtime\KnifeAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponAppearance.hpp" />
+    <ClInclude Include="src\Runtime\WeaponMaterialInit.hpp" />
     <ClInclude Include="third_party\MinHook\include\MinHook.h" />
     <ClInclude Include="third_party\json\json.hpp" />
   </ItemGroup>

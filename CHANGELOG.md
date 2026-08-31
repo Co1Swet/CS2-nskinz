@@ -1,5 +1,18 @@
 # Changelog / 更新记录
 
+## v0.4.4 — 2026-08-31
+
+- Fixed missing stock-weapon paint/seed/wear attributes and first-time native material initialization; stock AWP → BOOM is user-confirmed.
+- 修复原皮枪械缺少涂装/种子/磨损属性及首次材质生成入口；原皮 AWP → 嘣已由用户实测确认。
+- Shared across supported firearms, with owned-record rollback, stale-entity checks and bounded failure retries; no per-finish visual guarantee.
+- 普通枪械共用修复，保留所属记录撤销、失效实体校验和失败重试限制；不宣称所有涂装已逐个实测。
+- Nine targeted checks, all 46 native regression entries and isolated loader/rendering checks passed. Catalog coverage remains 34 guns / 1,449 compatible pairs.
+- 9 个定向检查、46 项完整原生回归及隔离加载/渲染检查通过；目录覆盖 34 枪型 / 1,449 个合法组合。
+- Published the exact tested English/Chinese DLLs with static `/MT` and embedded shaders. Paused knife-model continuation is excluded; CS2/HLAE baseline unchanged.
+- 原样发布已测试中英 DLL，保留静态 `/MT` 和内嵌着色器；不混入暂停中的刀模续作，CS2/HLAE 基线不变。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.4.4.md).
+
 ## v0.4.3 — 2026-08-31
 
 - Fixed target-paint modern/legacy mesh selection and high-slot first-person HUD lookup, including M4A4 Full Throttle → The Emperor.

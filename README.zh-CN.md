@@ -19,8 +19,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz%20v0.4.5%20EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz%20v0.4.5%20zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz-v0.4.5-EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz-v0.4.5-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.5"><img src="https://img.shields.io/badge/版本说明-v0.4.5-8250df?style=for-the-badge" alt="版本说明"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/提交问题-f85149?style=for-the-badge" alt="提交问题"></a>
 </p>
@@ -33,7 +33,7 @@
 - 删除朋友日志中出现的两次完整实体扫描；通过已验证的 CS2 分块布局直接按索引读取，并在探测实体上界时同步填充缓存。
 - 重复点击“更新”时复用已由引擎构造、随后安全清零的尾部节点，不再每次扩张向量。
 - 当前独立刀模链已随源码和运行时进入本版，但明确标记为**实验功能**：刀模、切刀和检视已有进展，首次重建动作、队友发刀/拾取刀及所有 HUD 交接尚未完成验收。
-- 发布文件命名为 `Lyan_nskinz v0.4.5 EN.dll` 和 `Lyan_nskinz v0.4.5 zh-CN.dll`，两者继续使用静态 `/MT` 与内嵌面板着色器。
+- 编译输出及双语 ZIP 内文件命名为 `Lyan_nskinz v0.4.5 EN.dll` 和 `Lyan_nskinz v0.4.5 zh-CN.dll`，两者继续使用静态 `/MT` 与内嵌面板着色器。GitHub 会规范化带空格的附件名，因此单独下载的 DLL 使用稳定的连字符别名。
 
 用户提供的 v0.4.4 日志显示枪械请求结束于 `changed_slots=0, verified=0`，同时外观轮询平均约 31 毫秒；v0.4.5 分别修复这两个原因。完整原生回归、当前客户端二进制只读签名检查和隔离加载检查已通过；朋友该 Demo 的画面验收仍需用户复测。详见[中英双语 v0.4.5 发布说明](docs/releases/v0.4.5.md)。
 
@@ -102,13 +102,13 @@ v0.4.5 已内嵌预编译面板着色器并保留 `/MT`。除 Windows 10/11 x64�
 3. 在 HLAE 中加载 DLL：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz v0.4.5 zh-CN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.4.5-zh-CN.dll"
 ```
 
 英文版：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz v0.4.5 EN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.4.5-EN.dll"
 ```
 
 上述示例要求 DLL 位于 D 盘根目录，请改成实际完整路径。v0.4.5 文件名包含空格，必须使用一对英文半角双引号；不要叠加两对引号或使用中文弯引号。
@@ -182,7 +182,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 **为什么刀上仍有旧材质？** 部分 Demo 物品带有编译后的第一人称材质，当前 v0.4.5 原皮路径无法保证全部清除，详见上面的已知限制。
 
-**应该下载哪个 DLL？** 英文界面使用 `Lyan_nskinz v0.4.5 EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz v0.4.5 zh-CN.dll`；两者兼容同一套 CS2 基线。
+**应该下载哪个 DLL？** 单独下载时，英文界面使用 `Lyan_nskinz-v0.4.5-EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz-v0.4.5-zh-CN.dll`；双语 ZIP 内保留用户指定的带空格编译文件名。两者兼容同一套 CS2 基线。
 
 **仓库能打开，但图片显示破图标怎么办？** 某些网络无法访问 GitHub 的 raw 图片域名。本 README 已使用 GitHub 推荐的相对图片路径；如果仍然加载失败，可临时用管理员身份打开记事本，编辑 `C:\Windows\System32\drivers\etc\hosts`，追加：
 

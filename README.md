@@ -19,8 +19,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz%20v0.4.5%20EN.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz%20v0.4.5%20zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz-v0.4.5-EN.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz-v0.4.5-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.5"><img src="https://img.shields.io/badge/Release%20notes-v0.4.5-8250df?style=for-the-badge" alt="Release notes"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/Report%20an%20issue-f85149?style=for-the-badge" alt="Report an issue"></a>
 </p>
@@ -33,7 +33,7 @@
 - Removed the duplicate full entity scan seen in the supplied log. The verified CS2 chunk layout now provides direct indexed lookup, and live-ceiling discovery fills the cache in the same pass.
 - Repeated Update operations reuse the neutral engine-owned attribute tail instead of growing the vector each time.
 - Included the current independent knife-model chain as an **experimental** source/runtime feature. Model, deploy and inspect replacement have progressed, but first-deploy continuity, dropped/teammate-issued knives and every HUD handoff are not certified complete.
-- Release binaries are named `Lyan_nskinz v0.4.5 EN.dll` and `Lyan_nskinz v0.4.5 zh-CN.dll`; both retain static `/MT` and embedded UI shaders.
+- Compiled/ZIP binaries are named `Lyan_nskinz v0.4.5 EN.dll` and `Lyan_nskinz v0.4.5 zh-CN.dll`; both retain static `/MT` and embedded UI shaders. GitHub normalizes spaces in direct attachment names, so the standalone download assets use stable hyphenated aliases.
 
 The supplied v0.4.4 log showed a firearm request ending at `changed_slots=0, verified=0` while cosmetic polling averaged about 31 ms. v0.4.5 directly addresses both causes. The complete native regression suite, current-client read-only signature checks and isolated loading checks pass; rendered acceptance on the affected friend's demo remains a user validation boundary. See the [bilingual v0.4.5 release notes](docs/releases/v0.4.5.md).
 
@@ -89,13 +89,13 @@ v0.4.5 embeds precompiled UI shaders and retains `/MT`. No additional runtime in
 3. In HLAE, load the DLL:
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz v0.4.5 EN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.4.5-EN.dll"
 ```
 
 For the Simplified Chinese UI:
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz v0.4.5 zh-CN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.4.5-zh-CN.dll"
 ```
 
 These examples require the DLL to be in the root of drive D. Use your actual full path. Paths without spaces need no quotes; if there are spaces, use exactly one pair of ASCII quotes, e.g. `mirv_loadlibrary "D:\My Tools\nSkinzCS2.dll"`. Never double-wrap the path or use typographic quotes.
@@ -169,7 +169,7 @@ Planned work includes a more complete vanilla-material reset, broader knife mode
 
 **Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.5 vanilla path cannot always clear; this is the documented limitation above.
 
-**Which build should I use?** Use `Lyan_nskinz v0.4.5 EN.dll` for English or `Lyan_nskinz v0.4.5 zh-CN.dll` for the Chinese UI and catalog names. Both DLLs target the same CS2 compatibility baseline.
+**Which build should I use?** Download `Lyan_nskinz-v0.4.5-EN.dll` for English or `Lyan_nskinz-v0.4.5-zh-CN.dll` for the Chinese UI and catalog names. The combined ZIP retains the requested compiled filenames with spaces. Both DLLs target the same CS2 compatibility baseline.
 
 **The repository opens, but its images show broken icons.** Some networks cannot reach GitHub's raw asset host. The README already uses GitHub-relative image paths; as a temporary Windows network workaround, open `C:\Windows\System32\drivers\etc\hosts` in Notepad **as Administrator** and add these lines:
 

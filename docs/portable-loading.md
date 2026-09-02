@@ -19,6 +19,8 @@ mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.4.5 zh-CN.dll"
 
 英文版只需把文件名改为 `Lyan_nskinz v0.4.5 EN.dll`。路径是示例，必须指向已经解压的真实 DLL；不要直接指向 ZIP、GitHub 网页或另一台电脑的路径。v0.4.5 文件名含空格，必须保留示例中的一对英文半角双引号。
 
+双语 ZIP 保留上述编译输出名。GitHub 会规范化带空格的附件名，因此单独下载使用 `Lyan_nskinz-v0.4.5-EN.dll` / `Lyan_nskinz-v0.4.5-zh-CN.dll`；加载时按磁盘上的实际文件名填写。
+
 没有空格的完整路径可以不加引号。路径有空格时只加一对英文半角双引号，例如 `mirv_loadlibrary "D:\My Tools\Lyan_nskinz v0.4.5 zh-CN.dll"`。不要叠加两对引号，也不要使用中文弯引号。
 
 ### 保留的 v0.4.2 加载修复与验证
@@ -75,6 +77,8 @@ mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.4.5 EN.dll"
 ```
 
 Replace the example path with the extracted DLL location; use `Lyan_nskinz v0.4.5 zh-CN.dll` for Chinese. These filenames contain spaces, so keep exactly one pair of ASCII double quotes.
+
+The bilingual ZIP preserves those compiled output names. GitHub normalizes spaces in attachment names, so standalone downloads use `Lyan_nskinz-v0.4.5-EN.dll` / `Lyan_nskinz-v0.4.5-zh-CN.dll`; load the actual filename on disk.
 
 A full path without spaces needs no quotes. For spaces, use exactly one pair of ASCII double quotes, e.g. `mirv_loadlibrary "D:\My Tools\Lyan_nskinz v0.4.5 EN.dll"`. Never double-wrap the path or use typographic quotes.
 

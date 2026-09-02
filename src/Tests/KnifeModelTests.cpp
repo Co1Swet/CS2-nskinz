@@ -1,5 +1,6 @@
 #include "Runtime/KnifeModel.hpp"
 #include "Runtime/KnifeAppearance.hpp"
+#include "Runtime/KnifeFinish.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -103,7 +104,7 @@ void AssetsAndRequestIsolation()
 
 void BindingGates()
 {
-    for (int gate = 0; gate < 11; ++gate)
+    for (int gate = 0; gate < 15; ++gate)
     {
         auto o = Ready();
         KnifeModelController state;
@@ -122,6 +123,10 @@ void BindingGates()
         case 8: o.native_pair_adapter_verified = false; break;
         case 9: o.safe_point = false; break;
         case 10: o.binding.body_animation_controller = o.binding.arms.address; break;
+        case 11: o.binding.graph_instance = o.binding.weapon_graph_controller; break;
+        case 12: o.binding.graph_instance = o.binding.body_animation_controller; break;
+        case 13: o.binding.hud_weapon.handle = o.binding.arms.handle; break;
+        case 14: o.binding.arms.creation_tick = std::numeric_limits<int>::min(); break;
         }
         Check(state.Tick(request, o, adapter) != KnifeModelPhase::Applied, "unproven binding cannot apply");
         Check(adapter.captures == 0 && adapter.applies == 0, "gate performs no native work");
@@ -262,6 +267,36 @@ void DriftAndNativeNoOp()
     Check(no_op.applies == 0 && no_op.captures == 0, "same-model native no-op");
 }
 
+void FinishGenerationBudget()
+{
+    const auto o = Ready();
+    KnifeFinishKey key {o.binding, 508, 1, 568};
+    KnifeFinishLatch latch;
+    Check(!latch.Begin(false, key, 100) && latch.Attempts() == 0, "do not paint the source or incomplete HUD");
+    Check(latch.Begin(true, key, 100) && latch.Pending(key), "first target-model finish initializes once and waits");
+    for (int i = 0; i < 10000; ++i)
+        Check(!latch.Begin(true, key, 100 + i) && latch.Pending(key), "pending finish never regenerates materials");
+    Check(!latch.TimedOut(key, 3100, 3000) && latch.TimedOut(key, 3101, 3000), "pending finish has one bounded timeout");
+    latch.Complete();
+    for (int i = 0; i < 10000; ++i)
+        Check(!latch.Begin(true, key, 5000 + i) && latch.Applied(key), "steady finish never regenerates materials");
+    ++key.appearance_signature;
+    Check(latch.Begin(true, key, 20000), "paint/seed/wear edit initializes without changing the model generation");
+    latch.Fail();
+    for (int i = 0; i < 10000; ++i)
+        Check(!latch.Begin(true, key, 20001 + i) && latch.Failed(key), "native failure is latched, not a frame-time loop");
+    ++key.model_generation;
+    Check(latch.Begin(true, key, 40000), "same paint on a new model generation cannot reuse the old finish cache");
+    ++key.binding.hud_weapon.handle;
+    Check(latch.Begin(true, key, 40001), "recreated HUD needs a new material transfer");
+    ++key.binding.xuid;
+    Check(latch.Begin(true, key, 40002), "same paint on another player is independent");
+    key.target_definition = 515;
+    Check(latch.Begin(true, key, 40003), "same paint on another model is independent");
+    latch.Reset();
+    Check(latch.Begin(true, key, 40004), "explicit disable discards only the finish latch");
+}
+
 void GraphRebuildIsNotEntityReuse()
 {
     auto o = Ready();
@@ -293,5 +328,6 @@ void RunKnifeModelTests()
     HolsterAndCapabilityLoss();
     DriftAndNativeNoOp();
     GraphRebuildIsNotEntityReuse();
-    std::cout << "independent knife model: 10 test groups passed\n";
+    FinishGenerationBudget();
+    std::cout << "independent knife model: 11 test groups passed\n";
 }

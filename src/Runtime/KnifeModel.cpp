@@ -47,6 +47,14 @@ const KnifeModelAsset* FindKnifeModelAsset(const int definition) noexcept
     return found == kAssets.end() ? nullptr : &*found;
 }
 
+const KnifeModelAsset* FindKnifeModelAssetByPath(std::string_view path) noexcept
+{
+    if (path.ends_with(".vmdl_c")) path.remove_suffix(2);
+    const auto found = std::find_if(kAssets.begin(), kAssets.end(),
+        [path](const auto& asset) { return asset.model == path; });
+    return found == kAssets.end() ? nullptr : &*found;
+}
+
 KnifeModelRequest BuildKnifeModelRequest(const model::KnifeProfile& profile) noexcept
 {
     if (!profile.enabled || profile.xuid == 0 ||
@@ -60,7 +68,8 @@ KnifeModelRequest BuildKnifeModelRequest(const model::KnifeProfile& profile) noe
 
 bool KnifeModelEntityIdentity::Valid() const noexcept
 {
-    return address != 0 && handle != 0xFFFFFFFFu && handle != 0xFFFFFFFEu && creation_tick >= 0;
+    return address != 0 && handle != 0xFFFFFFFFu && handle != 0xFFFFFFFEu &&
+        creation_tick != std::numeric_limits<int>::min();
 }
 
 bool KnifeModelBinding::Valid() const noexcept
@@ -75,8 +84,11 @@ bool KnifeModelBinding::Valid() const noexcept
         world.address != hud_weapon.address && world.address != arms.address &&
         hud_weapon.address != arms.address && pawn.address != world.address &&
         pawn.address != hud_weapon.address && pawn.address != arms.address &&
+        pawn.handle != world.handle && pawn.handle != hud_weapon.handle && pawn.handle != arms.handle &&
+        world.handle != hud_weapon.handle && world.handle != arms.handle && hud_weapon.handle != arms.handle &&
         weapon_graph_controller != 0 && body_animation_controller != 0 && graph_instance != 0 &&
-        weapon_graph_controller != body_animation_controller && !aliases_entity(weapon_graph_controller) &&
+        weapon_graph_controller != body_animation_controller && graph_instance != weapon_graph_controller &&
+        graph_instance != body_animation_controller && !aliases_entity(weapon_graph_controller) &&
         !aliases_entity(body_animation_controller) && !aliases_entity(graph_instance);
 }
 
@@ -248,6 +260,7 @@ const wchar_t* KnifeModelPhaseText(const KnifeModelPhase phase) noexcept
     case KnifeModelPhase::WaitingSafePoint: return L"Knife model: waiting for game-thread safe point.";
     case KnifeModelPhase::NativeModel: return L"Knife model: target already equals the native knife type; no model writes.";
     case KnifeModelPhase::Applied: return L"Knife model: model + animation pair verified.";
+    case KnifeModelPhase::WaitingHudRebuild: return L"Knife model: world prepared; waiting for the native replacement HUD.";
     case KnifeModelPhase::Faulted: return L"Knife model: transaction failed; retry blocked for this request/lifecycle.";
     default: return L"Knife model: unknown state.";
     }

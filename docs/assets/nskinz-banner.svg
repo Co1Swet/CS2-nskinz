@@ -37,7 +37,7 @@
     <text x="84" y="140" font-size="64" font-weight="700" letter-spacing="2">nSkinzCS2</text>
     <text x="88" y="191" font-size="24" fill="#9fdcf5" letter-spacing="1.5">OFFLINE DEMO COSMETIC TOOLKIT FOR HLAE</text>
     <text x="88" y="244" font-size="19" fill="#c5d3e6">Weapons · Knives · Gloves · Keychains · XUID profiles</text>
-    <text x="88" y="300" font-size="18" fill="#7fe3ff">v0.4.4  /  Windows x64  /  C++20  /  D3D11 + ImGui</text>
+    <text x="88" y="300" font-size="18" fill="#7fe3ff">v0.4.5  /  Windows x64  /  C++20  /  D3D11 + ImGui</text>
   </g>
   <g transform="translate(1035 70)" fill="none" stroke="#9feaff" stroke-width="3" opacity=".75">
     <path d="M0 0h78l26 26-26 26H0L-26 26Z"/>

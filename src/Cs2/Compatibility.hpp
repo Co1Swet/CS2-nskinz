@@ -11,9 +11,9 @@
 
 namespace nskinzcs2::compatibility
 {
-inline constexpr std::string_view kVerifiedClientVersion = "2000885";
-inline constexpr std::string_view kVerifiedPatchVersion = "1.41.7.6";
-inline constexpr std::string_view kVerifiedSourceRevision = "10924896";
+inline constexpr std::string_view kVerifiedClientVersion = "2000899";
+inline constexpr std::string_view kVerifiedPatchVersion = "1.41.7.8";
+inline constexpr std::string_view kVerifiedSourceRevision = "10948930";
 inline constexpr std::string_view kVerifiedHlaeVersion = "2.191.1.0";
 
 inline constexpr char kSource2ClientInterface[] = "Source2Client002";
@@ -25,7 +25,7 @@ inline constexpr std::size_t kFrameStageNotifyVtableIndex = 36;
 // pending forever even though FrameStageNotify callbacks are active.
 inline constexpr int kFrameStartStage = 0;
 inline constexpr int kFrameRenderPassStage = 12;
-// Source2EngineToClient001 layout used by HLAE 2.191.1 / CS2 build 2000885.
+// Source2EngineToClient001 layout used by HLAE 2.191.1 / CS2 build 2000899.
 inline constexpr std::size_t kEngineIsPlayingDemoVtableIndex = 42;
 inline constexpr std::size_t kEngineGetDemoFilePathVtableIndex = 43;
 inline constexpr std::size_t kEngineGetLevelNameShortVtableIndex = 65;
@@ -41,13 +41,20 @@ inline constexpr char kEntitySystemRootPattern[] =
     "40 55 53 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 33 D2 E8 ?? ?? ?? ??";
 inline constexpr char kGetEntityFromIndexPattern[] =
     "4C 8D 49 10 81 FA FE 7F 00 00";
+// Build 2000899 CUtlVector<CEconItemAttribute>::AddToTail(const T&).  This is
+// the engine-owned construction path used when a stock demo weapon has no
+// paint/seed/wear records and Schema does not expose a network-vector callback.
+// Runtime additionally validates the complete fixed instruction window and
+// the reflected 0x48/0x30/0x34/0x38 element layout before calling it.
+inline constexpr char kEconItemAttributeAppendPattern[] =
+    "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 4C 63 31 48 8B EA 48 8B F9 44 3B 71 10 0F 85 ?? ?? ?? ?? F7 41 14 00 00 00 40";
 inline constexpr char kAttributeHelperPattern[] =
     "48 83 EC ? E8 ? ? ? ? 48 85 C0 0F 84 ? ? ? ? 48 8B 10";
 inline constexpr char kResourceSystemQueryPattern[] =
     "48 83 EC 38 41 B1 01 C6 44 24 20 01 E8 ? ? ? ? 48 83 C4 38 C3";
 inline constexpr char kBindModelPattern[] =
     "48 8B C4 53 57 48 83 EC 68 48 89 70 18 41 0F B6 D8 4C 89 70 20 48 8B F9 4C 89 78 E8 4C 8B F2 48 8B 41 30 45 8B F9 48 85 C0 74 33";
-// Current build 2000885 no longer exposes a callable create function in the
+// Current build 2000899 no longer exposes a callable create function in the
 // fd26f92 ClientClass chain. These four signatures identify one internally
 // cross-referenced CGameEntitySystem creation chain; model_and_finish remains
 // fail-closed unless every member is unique and its call targets agree.
@@ -74,7 +81,7 @@ inline constexpr char kWearableDefinitionRefreshThunkPattern[] =
 // owner binding have succeeded.
 inline constexpr char kBaseModelEntitySetModelPattern[] =
     "40 53 48 83 EC ?? 48 8B D9 4C 8B C2 48 8B 0D ?? ?? ?? ?? 48 8D 54 24 ?? 48 8B 01 FF 50 ?? 48 8B 54 24 ?? 48 8B CB E8 ?? ?? ?? ?? 48 83 C4 ?? 5B C3";
-// Reference-only high-level model-provider binding entry for build 2000885.
+// Reference-only high-level model-provider binding entry for build 2000899.
 // m_pGameSceneNode is the scene outer: its current vtable slot 10 owns the
 // direct call and passes that object in R8, its embedded CSkeletonInstance at
 // outer+0x140 in RCX, and outer+0x10 in R9. Runtime model initialization remains

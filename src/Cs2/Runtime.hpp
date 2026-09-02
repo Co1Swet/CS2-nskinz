@@ -252,6 +252,7 @@ struct WeaponMeshMaskProbeResult
 WeaponMeshMaskProbeResult ProbeWeaponMeshMaskForTests();
 bool ProbeStandardWeaponRenderOnlyBindingForTests();
 bool ProbeStandardWeaponHudDiscoveryForTests();
+bool ProbeIndependentKnifeHudBindingForTests();
 bool ProbeStandardWeaponHudPendingGateForTests();
 bool ProbeStandardWeaponAppearanceEpochForTests();
 bool ProbeWeaponPaintCompatibilityForTests();

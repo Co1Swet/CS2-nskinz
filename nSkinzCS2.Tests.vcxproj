@@ -55,7 +55,7 @@
       <ConformanceMode>true</ConformanceMode>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PrecompiledHeader />
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_TESTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -76,7 +76,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>
       <PrecompiledHeader />
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_TESTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -99,6 +99,13 @@
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
     <ClInclude Include="src\Runtime\KnifeAnimation.hpp" />
     <ClInclude Include="src\Runtime\KnifeModel.hpp" />
+    <ClInclude Include="src\Runtime\KnifeGraph.hpp" />
+    <ClInclude Include="src\Runtime\KnifeResources.hpp" />
+    <ClInclude Include="src\Runtime\KnifeNative.hpp" />
+    <ClInclude Include="src\Runtime\KnifeLifecycle.hpp" />
+    <ClInclude Include="src\Runtime\KnifeFinish.hpp" />
+    <ClInclude Include="src\Runtime\KnifePair.hpp" />
+    <ClInclude Include="src\Runtime\KnifeUpdateProbe.hpp" />
     <ClInclude Include="src\Runtime\KnifeAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponMaterialInit.hpp" />
@@ -116,6 +123,14 @@
     <ClCompile Include="src\Runtime\GloveAppearance.cpp" />
     <ClCompile Include="src\Runtime\KnifeAnimation.cpp" />
     <ClCompile Include="src\Runtime\KnifeModel.cpp" />
+    <ClCompile Include="src\Runtime\KnifeGraph.cpp" />
+    <ClCompile Include="src\Runtime\KnifeResources.cpp" />
+    <ClCompile Include="src\Runtime\KnifeNative.cpp" />
+    <ClCompile Include="src\Runtime\KnifeLifecycle.cpp" />
+    <ClCompile Include="src\Runtime\KnifePair.cpp" />
+    <ClCompile Include="src\Runtime\KnifeUpdateProbe.cpp" />
+    <ClCompile Include="src\Tests\KnifePairTests.cpp" />
+    <ClCompile Include="src\Tests\KnifeGraphTests.cpp" />
     <ClCompile Include="src\Tests\KnifeModelTests.cpp" />
     <ClCompile Include="src\Runtime\KnifeAppearance.cpp" />
     <ClCompile Include="src\Runtime\WeaponAppearance.cpp" />

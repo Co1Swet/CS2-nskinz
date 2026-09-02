@@ -1,5 +1,20 @@
 # Changelog / 更新记录
 
+## v0.4.5 — 2026-09-02
+
+- Fixed stock-firearm updates on clients where paint/seed/wear attributes do not yet exist by using the byte-verified native attribute-vector append path.
+- 修复原皮枪械尚无涂装、种子和磨损属性时更新无效的问题，使用经过字节校验的引擎原生属性向量追加入口。
+- Reused neutralized native tail records on repeated Update and retained fail-closed checks, avoiding duplicate attributes or unsafe writes on unknown layouts.
+- 重复点击“更新”时复用已中和的原生尾部记录，并保留未知布局拒绝写入，避免属性重复增长或越界修改。
+- Removed a duplicate full entity traversal from cosmetic polling by combining verified entity-ceiling discovery with cache population, addressing the reported periodic stutter.
+- 合并经过验证的实体上限探测与缓存填充，移除外观轮询中的第二次全实体遍历，针对朋友机器上报告的间歇卡顿原因进行修复。
+- Updated the verified compatibility baseline to CS2 Steam Build 25000182 / ClientVersion 2000899 / Patch 1.41.7.8 / Source revision 10948930.
+- 更新兼容基线至 CS2 Steam Build 25000182 / ClientVersion 2000899 / Patch 1.41.7.8 / Source revision 10948930。
+- Published statically linked bilingual binaries as `Lyan_nskinz v0.4.5 EN.dll` and `Lyan_nskinz v0.4.5 zh-CN.dll`. The current independent knife-model chain is included as experimental source/runtime and is not claimed fully stable for first-deploy, teammate-issued/dropped-knife or HUD handoffs.
+- 以 `Lyan_nskinz v0.4.5 EN.dll` 与 `Lyan_nskinz v0.4.5 zh-CN.dll` 发布静态链接双语版本。当前独立刀模链随源码和运行时收录，但仍属实验功能，不宣称首次切刀、队友发刀/丢刀及 HUD 交接已完全稳定。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.4.5.md).
+
 ## v0.4.4 — 2026-08-31
 
 - Fixed missing stock-weapon paint/seed/wear attributes and first-time native material initialization; stock AWP → BOOM is user-confirmed.

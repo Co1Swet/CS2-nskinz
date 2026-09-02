@@ -23,6 +23,8 @@
 #include <stdexcept>
 
 void RunKnifeModelTests();
+void RunKnifeGraphTests();
+void RunKnifePairTests();
 
 namespace
 {
@@ -2416,6 +2418,7 @@ void TestWearableFactoryConfirmation()
 void TestKnifeAppearanceModule()
 {
     using nskinzcs2::runtime::BuildKnifeAppearanceRequest;
+    using nskinzcs2::runtime::BuildKnifeFinishRequest;
     using nskinzcs2::runtime::BuildKnifeProfileApplySignature;
     using nskinzcs2::runtime::EvaluateKnifeApplyGate;
     using nskinzcs2::runtime::EvaluateKnifeRenderVerification;
@@ -2490,6 +2493,19 @@ void TestKnifeAppearanceModule()
     auto no_change_request = vanilla_request;
     no_change_request.explicit_vanilla_finish = false;
     Expect(vanilla_request.explicit_vanilla_finish, "knife request should preserve explicit vanilla intent");
+    auto model_without_finish = model_and_finish_profile;
+    model_without_finish.paint_kit = 0;
+    model_without_finish.explicit_vanilla_finish = false;
+    Expect(BuildKnifeAppearanceRequest(model_without_finish).explicit_vanilla_finish &&
+        BuildKnifeFinishRequest(model_without_finish).explicit_vanilla_finish,
+        "model plus dash must use the target knife's stock material, never its source finish");
+    model_without_finish.mode = nskinzcs2::model::KnifeProfileMode::FinishOnly;
+    Expect(!BuildKnifeFinishRequest(model_without_finish).explicit_vanilla_finish,
+        "finish-only dash must still mean no paint modification");
+    model_without_finish.mode = nskinzcs2::model::KnifeProfileMode::ModelAndFinish;
+    model_without_finish.model_definition = 0;
+    Expect(!BuildKnifeAppearanceRequest(model_without_finish).explicit_vanilla_finish,
+        "an unselected model must not imply destructive paint removal");
     Expect(
         BuildKnifeProfileApplySignature(vanilla_request, vanilla_request.xuid, 42, 0x55ull) !=
             BuildKnifeProfileApplySignature(no_change_request, no_change_request.xuid, 42, 0x55ull),
@@ -5070,6 +5086,8 @@ int RunAllTests()
             return result.both_masks_verified ? EXIT_SUCCESS : EXIT_FAILURE;
         }
         RunNamedTest("TestIndependentKnifeModel", RunKnifeModelTests);
+        RunNamedTest("TestKnifeGraphParameter", RunKnifeGraphTests);
+        RunNamedTest("TestKnifePairTransaction", RunKnifePairTests);
         if (g_knife_model_only)
         {
             return EXIT_SUCCESS;

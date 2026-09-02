@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 
 namespace nskinzcs2::runtime
@@ -29,13 +30,14 @@ struct KnifeModelAsset
 // Excludes unreleased definition 524 (its VData aliases the default T model).
 const std::array<KnifeModelAsset, 22>& KnifeModelAssets() noexcept;
 const KnifeModelAsset* FindKnifeModelAsset(int definition) noexcept;
+const KnifeModelAsset* FindKnifeModelAssetByPath(std::string_view path) noexcept;
 KnifeModelRequest BuildKnifeModelRequest(const model::KnifeProfile& profile) noexcept;
 
 struct KnifeModelEntityIdentity
 {
     std::uintptr_t address = 0;
     std::uint32_t handle = 0xFFFFFFFFu; // Include serial, never only the slot index.
-    int creation_tick = -1;
+    int creation_tick = std::numeric_limits<int>::min(); // Unread, not the native -1 sentinel.
     bool operator==(const KnifeModelEntityIdentity&) const = default;
     bool Valid() const noexcept;
 };
@@ -79,6 +81,7 @@ enum class KnifeModelPhase
     NativeModel,
     Applied,
     Faulted,
+    WaitingHudRebuild,
 };
 
 // The native implementation owns resource references and the restore snapshot.

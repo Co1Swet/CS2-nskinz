@@ -108,7 +108,10 @@ KnifeAppearanceRequest BuildKnifeAppearanceRequest(const nskinzcs2::model::Knife
         ? ResolveKnifeRuntimeModelDefinition(profile)
         : 0;
     request.paint_kit = profile.paint_kit;
-    request.explicit_vanilla_finish = profile.explicit_vanilla_finish;
+    // A new model must not inherit the recorded source knife's paint. Keep
+    // saved dash intent untouched; only a valid model request derives vanilla.
+    request.explicit_vanilla_finish = profile.explicit_vanilla_finish ||
+        (request.mode == KnifeSlotMode::ModelAndFinish && profile.paint_kit == 0);
     request.quality = profile.quality;
     request.seed = profile.seed;
     request.stat_trak = profile.stat_trak;

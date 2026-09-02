@@ -36,7 +36,7 @@ body:
     id: release
     attributes:
       label: nSkinzCS2 release / nSkinzCS2 版本
-      placeholder: "v0.4.1"
+      placeholder: "v0.4.5"
     validations:
       required: true
   - type: textarea

@@ -63,14 +63,14 @@
   <PropertyGroup>
     <IntDir>$(ProjectDir)build\$(Configuration)\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\$(Configuration)\</OutDir>
-    <TargetName>nSkinzCS2</TargetName>
+    <TargetName>Lyan_nskinz v0.4.5 EN</TargetName>
     <VCToolsVersion>14.44.35207</VCToolsVersion>
     <IncludePath>$(ProjectDir)src;$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;$(ProjectDir)third_party\json;$(ProjectDir)third_party\MinHook\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseZhCn|x64'">
     <IntDir>$(ProjectDir)build\ReleaseZhCn\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\Release\</OutDir>
-    <TargetName>nSkinzCS2.zh-CN</TargetName>
+    <TargetName>Lyan_nskinz v0.4.5 zh-CN</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -80,7 +80,7 @@
       <ConformanceMode>true</ConformanceMode>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PrecompiledHeader />
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -102,7 +102,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <PrecompiledHeader />
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -126,7 +126,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <PrecompiledHeader />
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;NSKINZCS2_UI_LANG_ZH_CN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
@@ -150,6 +150,13 @@
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
     <ClInclude Include="src\Runtime\KnifeAnimation.hpp" />
     <ClInclude Include="src\Runtime\KnifeModel.hpp" />
+    <ClInclude Include="src\Runtime\KnifeGraph.hpp" />
+    <ClInclude Include="src\Runtime\KnifeResources.hpp" />
+    <ClInclude Include="src\Runtime\KnifeNative.hpp" />
+    <ClInclude Include="src\Runtime\KnifeLifecycle.hpp" />
+    <ClInclude Include="src\Runtime\KnifeFinish.hpp" />
+    <ClInclude Include="src\Runtime\KnifePair.hpp" />
+    <ClInclude Include="src\Runtime\KnifeUpdateProbe.hpp" />
     <ClInclude Include="src\Runtime\KnifeAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponMaterialInit.hpp" />
@@ -179,6 +186,12 @@
     <ClCompile Include="src\Runtime\GloveAppearance.cpp" />
     <ClCompile Include="src\Runtime\KnifeAnimation.cpp" />
     <ClCompile Include="src\Runtime\KnifeModel.cpp" />
+    <ClCompile Include="src\Runtime\KnifeGraph.cpp" />
+    <ClCompile Include="src\Runtime\KnifeResources.cpp" />
+    <ClCompile Include="src\Runtime\KnifeNative.cpp" />
+    <ClCompile Include="src\Runtime\KnifeLifecycle.cpp" />
+    <ClCompile Include="src\Runtime\KnifePair.cpp" />
+    <ClCompile Include="src\Runtime\KnifeUpdateProbe.cpp" />
     <ClCompile Include="src\Runtime\KnifeAppearance.cpp" />
     <ClCompile Include="src\Runtime\WeaponAppearance.cpp" />
     <ClCompile Include="src\UI\MainWindow.cpp" />

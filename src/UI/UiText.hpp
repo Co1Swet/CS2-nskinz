@@ -83,6 +83,7 @@ enum class UiTextId : std::size_t
     KnifeFinishOnlyRuntime,
     KnifeFinishOnlyFallback,
     KnifeFinishOnlyDescription,
+    KnifeModelDevelopmentPending,
     AddGlove,
     RemoveGlove,
     GloveModel,
@@ -163,6 +164,7 @@ enum class UiTextId : std::size_t
     CompatibleWeaponPaintCount,
     WeaponPaintCompatibilityUnknown,
     WeaponPaintIncompatible,
+    KnifeTargetVanillaHint,
     Count,
 };
 
@@ -245,6 +247,7 @@ inline constexpr UiTextTable kEnglishTexts {
     "Knife finish-only runtime path active.",
     "Model+finish requested path swap, but runtime is currently using finish-only.",
     "Finish-only preserves the watched player's live knife model and only writes finish fields.",
+    "Experimental knife model chain: paired world/HUD replacement and native animation maintenance. Gameplay/inspection still require visual verification; see runtime status below.",
     "Add Glove",
     "Remove Glove",
     "Glove Model",
@@ -325,6 +328,7 @@ inline constexpr UiTextTable kEnglishTexts {
     "Compatible finishes: %d (full catalog retained)",
     "Compatibility data for this weapon is unavailable. Wait for the local game catalog to load; only No Change and Vanilla are available meanwhile.",
     "The saved finish is not compatible with this weapon and will not be applied. Select a compatible finish; the saved ID has not been cleared.",
+    "With a knife model selected, '-' uses that model's vanilla finish. Select a paint kit to apply model + finish together. Default CT/T knives can also be replaced.",
 };
 
 inline constexpr UiTextTable kChineseTexts {
@@ -402,6 +406,7 @@ inline constexpr UiTextTable kChineseTexts {
     "刀的仅饰面运行时路径已生效。",
     "已请求模型+饰面路径替换，但当前运行时仍在使用仅饰面路径。",
     "仅饰面模式会保留观察目标玩家当前的刀模型，只写入饰面字段。",
+    "实验性刀模链：成对替换世界刀身/HUD，并维护原生动画参数。切刀及检视动作仍需画面验证；具体结果见下方运行状态。",
     "新增手套配置",
     "删除手套配置",
     "手套模型",
@@ -482,6 +487,7 @@ inline constexpr UiTextTable kChineseTexts {
     "此枪型可用涂装：%d（完整目录已保留）",
     "缺少此枪型的涂装兼容数据。请等待本地游戏目录加载；期间仅可选择“不修改”和“原皮／无涂装”。",
     "当前保存的涂装不适用于此枪型，已阻止应用。请选择兼容涂装；原有涂装 ID 未被清除。",
+    "选定刀模型后，涂装选“-”表示目标刀型的原皮；选定涂装则同时替换模型和涂装。CT、T 默认匕首也可换成其它刀型。",
 };
 }
 

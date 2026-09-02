@@ -1798,6 +1798,8 @@ private:
         const bool runtime_model_swap_degraded =
             status.knife_runtime_path == L"Knife model swap degraded";
         const bool runtime_degraded = runtime_model_swap_degraded && !status.knife_runtime_reason.empty();
+        const bool runtime_model_development =
+            status.knife_runtime_path == L"Independent knife model (experimental)";
 
         char name_buffer[64] {};
         CopyToBuffer(profile.name, name_buffer, sizeof(name_buffer));
@@ -1846,6 +1848,7 @@ private:
                 // model must never silently switch finish-only/model modes.
                 PushWorkingConfig();
             }
+            ImGui::TextWrapped("%s", Ui(UiTextId::KnifeTargetVanillaHint));
         }
 
         if (ComboFinishByIntent(
@@ -1891,6 +1894,12 @@ private:
         if (missing_model_definition)
         {
             ImGui::TextWrapped("%s", Ui(UiTextId::KnifeModelRequired));
+        }
+        else if (model_and_finish_requested && runtime_model_development)
+        {
+            ImGui::TextColored(ImVec4(0.94f, 0.68f, 0.25f, 1.0f), "%s", Ui(UiTextId::KnifeModelDevelopmentPending));
+            if (!status.knife_runtime_reason.empty())
+                ImGui::TextWrapped("%s", Narrow(status.knife_runtime_reason).c_str());
         }
         else if (runtime_model_swap_active)
         {

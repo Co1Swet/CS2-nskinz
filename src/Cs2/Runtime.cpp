@@ -8,6 +8,12 @@
 #include "Runtime/GloveAppearance.hpp"
 #include "Runtime/KnifeAnimation.hpp"
 #include "Runtime/KnifeModel.hpp"
+#include "Runtime/KnifeGraph.hpp"
+#include "Runtime/KnifeResources.hpp"
+#include "Runtime/KnifeNative.hpp"
+#include "Runtime/KnifeLifecycle.hpp"
+#include "Runtime/KnifeFinish.hpp"
+#include "Runtime/KnifeUpdateProbe.hpp"
 #include "Runtime/KnifeAppearance.hpp"
 #include "Runtime/WeaponAppearance.hpp"
 #include "Runtime/WeaponMaterialInit.hpp"
@@ -10068,6 +10074,32 @@ struct TrackedWeaponAppearanceRestorePoint
     std::uint64_t owner_xuid = 0;
 };
 
+// A model-and-finish knife must expose its target item definition before the
+// native equip path constructs C_CS2HudModelWeapon and selects the deploy
+// graph.  Applying it after the knife is active necessarily loses the first
+// source-knife deploy frames and leaves the weapon-selection HUD on the source
+// definition.  This single watched-player lease keeps the holstered world
+// carrier pre-armed while retaining an exact restore snapshot.
+struct IndependentKnifePrearmState
+{
+    bool active = false;
+    std::uint64_t scene_epoch = 0;
+    std::uint64_t xuid = 0;
+    std::uint32_t pawn_handle = kInvalidEntityHandle;
+    void* pawn_entity = nullptr;
+    std::uint32_t world_handle = kInvalidEntityHandle;
+    int world_creation_tick = 0;
+    int world_entity_index = -1;
+    void* world_entity = nullptr;
+    void* item_view = nullptr;
+    int source_definition = 0;
+    int target_definition = 0;
+    int source_model_definition = 0;
+    bool target_world_model_written = false;
+    std::uint64_t appearance_signature = 0;
+    nskinzcs2::runtime::WeaponAppearanceSnapshot snapshot {};
+};
+
 struct StandardWeaponEntityEpoch
 {
     void* entity = nullptr;
@@ -10182,6 +10214,7 @@ using NetworkVectorOperationFn = std::uintptr_t (__fastcall*)(
     void* vector,
     std::int32_t index,
     std::int32_t count);
+using EconItemAttributeAppendFn = std::int32_t (__fastcall*)(void* vector, const void* source);
 
 bool IsKnownDefinitionIndex(const int definition_index, const std::unordered_set<int>& known_definition_indices);
 std::vector<std::uint32_t> CollectWeaponServiceWeaponHandles(void* weapon_services, const ClientSchemaOffsets& offsets);
@@ -11707,6 +11740,10 @@ struct ClientSchemaOffsets
     std::ptrdiff_t knife_body_animation_controller = 0;
     std::ptrdiff_t knife_main_graph_controller = 0;
     std::ptrdiff_t knife_graph_instance = 0;
+    std::ptrdiff_t knife_graph_weapon_type = 0;
+    std::ptrdiff_t knife_secondary_slots = 0;
+    std::ptrdiff_t knife_secondary_skeletons = 0;
+    std::ptrdiff_t knife_secondary_master_count = 0;
     std::ptrdiff_t controller_steam_id = 0;
     std::ptrdiff_t controller_pawn = 0;
     std::ptrdiff_t pawn_controller = 0;
@@ -11797,6 +11834,7 @@ struct ClientSchemaOffsets
     std::ptrdiff_t item_view_custom_name_override = 0;
     std::ptrdiff_t attribute_list_attributes = 0;
     NetworkVectorOperationFn attribute_list_attributes_operation = nullptr;
+    EconItemAttributeAppendFn attribute_list_attributes_native_append = nullptr;
     std::size_t attribute_list_attributes_element_size = 0;
     std::size_t attribute_list_attributes_schema_tail_span = 0;
     std::ptrdiff_t econ_item_attribute_definition_index = 0;
@@ -11807,6 +11845,7 @@ struct ClientSchemaOffsets
     std::ptrdiff_t team_preview_gloves_item = 0;
     std::ptrdiff_t team_preview_weapon_item = 0;
     std::ptrdiff_t game_scene_node_child = 0;
+    std::ptrdiff_t knife_scene_node_parent = 0;
     std::ptrdiff_t game_scene_node_next_sibling = 0;
     std::ptrdiff_t game_scene_node_owner = 0;
     std::size_t econ_item_attribute_size = 0;
@@ -11863,6 +11902,7 @@ struct EntitySystemBindings
 {
     void** entity_list_storage = nullptr;
     GetEntityFromIndexFn get_entity_from_index = nullptr;
+    bool direct_chunk_layout_verified = false;
 
     bool IsReady() const noexcept
     {
@@ -12177,11 +12217,23 @@ struct HookState
     // Never reset these on cosmetic edits/manual material refreshes.
     std::atomic<std::uint64_t> knife_model_scene_epoch {1};
     nskinzcs2::runtime::KnifeModelController independent_knife_model;
+    nskinzcs2::runtime::KnifeUpdateProbe knife_update_probe;
+    nskinzcs2::runtime::KnifeUpdateTiming knife_update_last_timing;
+    std::uint64_t knife_update_next_log_millis = 0;
+    bool knife_update_install_logged = false;
+    bool knife_model_last_native_binding_verified = false;
+    bool knife_model_last_observer_verified = false;
+    bool knife_resource_last_ready = false;
+    bool knife_native_last_read = false;
+    bool knife_native_last_evidence = false;
+    nskinzcs2::runtime::KnifeResourcePair knife_resource_last_pair;
     std::uint64_t knife_model_next_probe_millis = 0;
     nskinzcs2::runtime::KnifeModelRequest knife_model_last_probe_request;
     nskinzcs2::runtime::KnifeModelBinding knife_model_last_probe_binding;
     nskinzcs2::runtime::KnifeModelPhase knife_model_last_probe_phase =
         nskinzcs2::runtime::KnifeModelPhase::Disabled;
+    nskinzcs2::runtime::KnifeGraphProbeStatus knife_graph_last_probe_status =
+        nskinzcs2::runtime::KnifeGraphProbeStatus::BindingInvalid;
     std::atomic<DWORD> frame_stage_thread_id {0};
     std::atomic<std::uint64_t> next_runtime_poll_millis {0};
     std::atomic<std::uint64_t> resource_handle_query_earliest_safe_tick {0};
@@ -12245,6 +12297,7 @@ struct HookState
     std::mutex demo_keychain_controller_mutex;
     DemoKeychainControllerState demo_keychain_controller;
     std::unordered_map<void*, TrackedWeaponAppearanceRestorePoint> tracked_weapon_restore_points;
+    IndependentKnifePrearmState independent_knife_prearm;
     std::unordered_set<std::uint64_t> warned_glove_signatures;
     std::unordered_set<std::uint64_t> warned_runtime_signatures;
     std::atomic<std::uint64_t> source2_client_provider_generation {1};
@@ -14803,6 +14856,10 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
     lookup("CBodyComponentBaseAnimGraph", "m_animationController", offsets.knife_body_animation_controller);
     lookup("CBaseAnimGraph", "m_pMainGraphController", offsets.knife_main_graph_controller);
     lookup("CBaseAnimGraphController", "m_pGraphInstanceAG2", offsets.knife_graph_instance);
+    lookup("CCS2WeaponGraphController", "m_weaponType", offsets.knife_graph_weapon_type);
+    lookup("CBaseAnimGraphController", "m_vecSecondarySkeletonSlotIDs", offsets.knife_secondary_slots);
+    lookup("CBaseAnimGraphController", "m_vecSecondarySkeletons", offsets.knife_secondary_skeletons);
+    lookup("CBaseAnimGraphController", "m_nSecondarySkeletonMasterCount", offsets.knife_secondary_master_count);
     success = success && lookup("CBasePlayerController", "m_steamID", offsets.controller_steam_id);
     success = success && lookup("CBasePlayerController", "m_hPawn", offsets.controller_pawn);
     success = success && lookup("C_BasePlayerPawn", "m_hController", offsets.pawn_controller);
@@ -15023,6 +15080,7 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
     lookup("C_CSGO_TeamPreviewCharacterPosition", "m_glovesItem", offsets.team_preview_gloves_item);
     lookup("C_CSGO_TeamPreviewCharacterPosition", "m_weaponItem", offsets.team_preview_weapon_item);
     lookup("CGameSceneNode", "m_pChild", offsets.game_scene_node_child);
+    lookup("CGameSceneNode", "m_pParent", offsets.knife_scene_node_parent);
     lookup("CGameSceneNode", "m_pNextSibling", offsets.game_scene_node_next_sibling);
     lookup("CGameSceneNode", "m_pOwner", offsets.game_scene_node_owner);
     lookup("CModelState", "m_hModel", offsets.model_state_model_handle);
@@ -15037,9 +15095,52 @@ bool TryResolveSchemaOffsetsFromSystem(schema::System* schema_system, ClientSche
     return success;
 }
 
+bool TryGetEntityFromIndexDirect(void* entity_list, const int entity_index, void*& entity)
+{
+    entity = nullptr;
+    if (entity_list == nullptr || entity_index < 0 || entity_index > 0x7FFE)
+    {
+        return true;
+    }
+
+    __try
+    {
+        const auto chunk_index = static_cast<std::size_t>(entity_index >> 9);
+        if (chunk_index > 0x3F)
+        {
+            return true;
+        }
+        auto* const chunks = static_cast<std::uint8_t*>(entity_list) + 0x10;
+        std::uint8_t* chunk = nullptr;
+        if (!SafeReadValue(chunks + chunk_index * sizeof(void*), chunk) || chunk == nullptr)
+        {
+            return true;
+        }
+        auto* const identity = chunk +
+            static_cast<std::size_t>(entity_index & 0x1FF) * 0x70;
+        std::uint32_t handle = kInvalidEntityHandle;
+        if (!SafeReadField(identity, 0x10, handle) ||
+            static_cast<int>(handle & 0x7FFFu) != entity_index)
+        {
+            return true;
+        }
+        return SafeReadValue(identity, entity);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        entity = nullptr;
+        return false;
+    }
+}
+
 bool TryGetEntityFromIndex(void* entity_list, const int entity_index, void*& entity)
 {
     entity = nullptr;
+
+    if (g_hook_state.entity_system.direct_chunk_layout_verified)
+    {
+        return TryGetEntityFromIndexDirect(entity_list, entity_index, entity);
+    }
 
     __try
     {
@@ -16593,6 +16694,11 @@ void RunRuntimeCleanupStep(
     LogRuntimeCleanupStepBoundary(phase, step_name, L"end");
 }
 
+void DisableIndependentKnifeUpdateProbeCleanupStep() noexcept
+{
+    g_hook_state.knife_update_probe.Disable();
+}
+
 void RunRuntimeCleanupSequence(
     const wchar_t* phase,
     const bool clear_runtime_interfaces,
@@ -16601,6 +16707,7 @@ void RunRuntimeCleanupSequence(
     nskinzcs2::Logger::Info(std::wstring(phase) + L": started.");
     RunRuntimeCleanupStep(phase, L"RemoveConsolePlayerCapture", RemoveConsolePlayerCaptureCleanupStep);
     RunRuntimeCleanupStep(phase, L"frame_stage_patch.Remove", RemoveFrameStagePatchCleanupStep);
+    RunRuntimeCleanupStep(phase, L"DisableIndependentKnifeUpdateProbe", DisableIndependentKnifeUpdateProbeCleanupStep);
     RunRuntimeCleanupStep(phase, L"connect_patch.Remove", RemoveConnectPatchCleanupStep);
     RunRuntimeCleanupStep(
         phase,
@@ -22458,6 +22565,13 @@ bool RestoreTrackedWeaponAppearanceRestorePoints(
     const ClientSchemaOffsets& offsets,
     const AttributeBindingReleaseMode mode,
     const wchar_t* reason = nullptr);
+bool RestoreIndependentKnifePrearmState(
+    const ClientSchemaOffsets& offsets,
+    AttributeBindingReleaseMode mode,
+    const wchar_t* reason = nullptr);
+bool RestoreIndependentKnifePrearmWorldModel(
+    const IndependentKnifePrearmState& state,
+    const ClientSchemaOffsets& offsets);
 void TryRestoreAndClearKnifeModelPathState(
     const ClientSchemaOffsets& offsets,
     const wchar_t* reason = nullptr,
@@ -22766,6 +22880,10 @@ void ResetAppliedStateCaches(
     g_hook_state.last_applied_demo_tick = -1;
     ResetDemoKeychainControllerState();
     ReleaseRuntimeCreatedKeychainModuleEntities(g_hook_state.schema_offsets, L"reset");
+    RestoreIndependentKnifePrearmState(
+        g_hook_state.schema_offsets,
+        attribute_binding_release_mode,
+        L"reset");
     RestoreTrackedWeaponAppearanceRestorePoints(
         g_hook_state.schema_offsets,
         attribute_binding_release_mode,
@@ -22856,6 +22974,29 @@ bool TryInvokeNetworkVectorElementMutation(
     }
 }
 
+bool TryInvokeEconItemAttributeNativeAppend(
+    const EconItemAttributeAppendFn append,
+    void* vector,
+    const void* source,
+    std::int32_t& appended_index) noexcept
+{
+    appended_index = -1;
+    if (append == nullptr || vector == nullptr || source == nullptr)
+    {
+        return false;
+    }
+    __try
+    {
+        appended_index = append(vector, source);
+        return appended_index >= 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        appended_index = -1;
+        return false;
+    }
+}
+
 void RestoreAppliedCosmeticStateForOriginalFrameStage(
     const AttributeBindingReleaseMode mode = AttributeBindingReleaseMode::RestoreOriginal,
     const wchar_t* reason = nullptr)
@@ -22866,6 +23007,10 @@ void RestoreAppliedCosmeticStateForOriginalFrameStage(
     ReleaseRuntimeCreatedKeychainModuleEntities(
         g_hook_state.schema_offsets,
         reason != nullptr ? reason : L"frame_stage_restore");
+    RestoreIndependentKnifePrearmState(
+        g_hook_state.schema_offsets,
+        mode,
+        reason);
     RestoreTrackedWeaponAppearanceRestorePoints(
         g_hook_state.schema_offsets,
         mode,
@@ -22993,6 +23138,10 @@ void PrepareAppliedCosmeticStateForDemoSeekBeforeOriginalFrameStage(const wchar_
     ReleaseRuntimeCreatedKeychainModuleEntities(
         g_hook_state.schema_offsets,
         reason != nullptr ? reason : L"demo_seek_prepare");
+    RestoreIndependentKnifePrearmState(
+        g_hook_state.schema_offsets,
+        AttributeBindingReleaseMode::AbandonInstalled,
+        reason);
     RestoreTrackedWeaponAppearanceRestorePoints(
         g_hook_state.schema_offsets,
         AttributeBindingReleaseMode::AbandonInstalled,
@@ -24664,9 +24813,17 @@ KnifeAnimationHookOutcome TryProcessKnifeAnimationHook(
     return KnifeAnimationHookOutcome::ObservedNoTrigger;
 }
 
-int ResolveDynamicEntityScanUpperBound(void* entity_list, std::wstring& issue)
+int ResolveDynamicEntityScanUpperBound(
+    void* entity_list,
+    std::wstring& issue,
+    std::vector<void*>* populated_cache = nullptr)
 {
     issue.clear();
+    if (populated_cache != nullptr)
+    {
+        populated_cache->clear();
+        populated_cache->reserve(4097);
+    }
 
     const auto previous_highest = std::max(g_hook_state.runtime_entities.highest_live_entity_index, 0);
     const auto minimum_scan_limit = std::min(kMaxEntityIndex, std::max(4096, previous_highest + 256));
@@ -24684,6 +24841,10 @@ int ResolveDynamicEntityScanUpperBound(void* entity_list, std::wstring& issue)
             issue = L"GetEntityFromIndex raised an exception while probing the live entity ceiling.";
             return -1;
         }
+        if (populated_cache != nullptr)
+        {
+            populated_cache->push_back(entity);
+        }
 
         if (entity != nullptr)
         {
@@ -24699,6 +24860,18 @@ int ResolveDynamicEntityScanUpperBound(void* entity_list, std::wstring& issue)
             {
                 break;
             }
+        }
+    }
+
+    if (populated_cache != nullptr)
+    {
+        if (highest_live_entity_index >= 0)
+        {
+            populated_cache->resize(static_cast<std::size_t>(highest_live_entity_index + 1));
+        }
+        else
+        {
+            populated_cache->clear();
         }
     }
 
@@ -26016,6 +26189,7 @@ void ReleaseRuntimeCreatedKeychainModuleEntities(
 bool HasDemoSeekSensitiveRuntimeMutations()
 {
     if (!g_hook_state.tracked_weapon_restore_points.empty() ||
+        g_hook_state.independent_knife_prearm.active ||
         g_hook_state.knife_model_path_state.active ||
         g_hook_state.pending_knife_rebuild_state.active ||
         g_hook_state.pending_knife_post_refresh_verification.active ||
@@ -28085,6 +28259,7 @@ struct StandardWeaponCreatedAttributes
     NetworkVectorView vector {};
     std::size_t first = 0;
     std::vector<std::pair<std::uint16_t, float>> values;
+    bool native_append = false;
 };
 std::unordered_map<void*, StandardWeaponCreatedAttributes> g_standard_weapon_created_attributes;
 
@@ -28138,10 +28313,18 @@ bool EnsureStandardWeaponFinishAttributes(void* entity, void* item_view,
     created.offsets = offsets;
     created.values = missing;
     const auto stride = ResolveEconItemAttributeStride(offsets);
+    const auto schema_append_ready =
+        offsets.attribute_list_attributes_operation != nullptr &&
+        offsets.attribute_list_attributes_element_size == stride;
+    const auto native_append_ready =
+        offsets.attribute_list_attributes_native_append != nullptr &&
+        stride == 0x48 &&
+        offsets.econ_item_attribute_definition_index == 0x30 &&
+        offsets.econ_item_attribute_value == 0x34 &&
+        offsets.econ_item_attribute_initial_value == 0x38;
     if (missing.size() > 3 || item_view == nullptr || offsets.item_view_attribute_list == 0 ||
-        offsets.attribute_list_attributes == 0 || offsets.attribute_list_attributes_operation == nullptr ||
+        offsets.attribute_list_attributes == 0 || (!schema_append_ready && !native_append_ready) ||
         offsets.attribute_list_attributes_schema_tail_span < 0x18 ||
-        offsets.attribute_list_attributes_element_size != stride ||
         !ShouldAllowDirectAttributeListWrites(offsets) ||
         !ReadStandardWeaponCarrierEpoch(entity, offsets, created.carrier)) return false;
     created.vector_address = static_cast<std::uint8_t*>(item_view) +
@@ -28160,23 +28343,102 @@ bool EnsureStandardWeaponFinishAttributes(void* entity, void* item_view,
         }
     }
     created.first = static_cast<std::size_t>(before.size);
-    if (!TryInvokeNetworkVectorOperation(offsets.attribute_list_attributes_operation, 4,
-        created.vector_address, static_cast<std::int32_t>(before.size), static_cast<std::int32_t>(missing.size()))) return false;
-    if (!TryReadNetworkVectorView(created.vector_address, created.vector) ||
-        created.vector.size != before.size + missing.size() || created.vector.data == nullptr) return false;
+    created.native_append = !schema_append_ready;
+    bool reused_native_tail = false;
+    if (created.native_append && before.data != nullptr && before.size >= missing.size())
+    {
+        // A previous RestoreOriginal cannot shrink the engine-owned vector
+        // without a verified erase callback, so it leaves its appended tail
+        // as definition/value zero. Reuse that constructed tail instead of
+        // growing the vector on every Update. Only a contiguous neutral tail
+        // with the exact reflected node layout is eligible.
+        const auto candidate_first = static_cast<std::size_t>(before.size - missing.size());
+        reused_native_tail = true;
+        for (std::size_t i = 0; i < missing.size(); ++i)
+        {
+            auto* node = before.data + (candidate_first + i) * stride;
+            std::uint16_t definition = 0;
+            float value = 0.0f;
+            float initial_value = 0.0f;
+            if (!SafeReadField(node, offsets.econ_item_attribute_definition_index, definition) ||
+                !SafeReadField(node, offsets.econ_item_attribute_value, value) ||
+                !SafeReadField(node, offsets.econ_item_attribute_initial_value, initial_value) ||
+                definition != 0 || value != 0.0f || initial_value != 0.0f)
+            {
+                reused_native_tail = false;
+                break;
+            }
+        }
+        if (reused_native_tail)
+        {
+            created.first = candidate_first;
+            created.vector = before;
+        }
+    }
+    if (schema_append_ready)
+    {
+        if (!TryInvokeNetworkVectorOperation(offsets.attribute_list_attributes_operation, 4,
+            created.vector_address, static_cast<std::int32_t>(before.size), static_cast<std::int32_t>(missing.size()))) return false;
+        if (!TryReadNetworkVectorView(created.vector_address, created.vector) ||
+            created.vector.size != before.size + missing.size() || created.vector.data == nullptr) return false;
+    }
     const auto rollback = [&]()
     {
-        if (CreatedStandardWeaponAttributesStillOwned(created))
+        if (CreatedStandardWeaponAttributesStillOwned(created) && !created.native_append)
             TryInvokeNetworkVectorOperation(offsets.attribute_list_attributes_operation, 5,
                 created.vector_address, static_cast<std::int32_t>(created.first), static_cast<std::int32_t>(missing.size()));
+        else if (created.native_append)
+        {
+            NetworkVectorView current {};
+            if (TryReadNetworkVectorView(created.vector_address, current) &&
+                current.data != nullptr && current.size >= created.first)
+            {
+                const auto appended = std::min<std::size_t>(
+                    missing.size(), static_cast<std::size_t>(current.size) - created.first);
+                for (std::size_t i = 0; i < appended; ++i)
+                {
+                    auto* node = current.data + (created.first + i) * stride;
+                    SafeWriteField(node, offsets.econ_item_attribute_definition_index, std::uint16_t {0});
+                    SafeWriteField(node, offsets.econ_item_attribute_value, 0.0f);
+                    SafeWriteField(node, offsets.econ_item_attribute_initial_value, 0.0f);
+                }
+            }
+        }
         return false;
     };
+    if (created.native_append && !reused_native_tail)
+    {
+        for (std::size_t i = 0; i < missing.size(); ++i)
+        {
+            std::array<std::uint8_t, 0x48> source {};
+            if (!SafeWriteField(source.data(), offsets.econ_item_attribute_definition_index, missing[i].first) ||
+                !SafeWriteField(source.data(), offsets.econ_item_attribute_value, missing[i].second) ||
+                !SafeWriteField(source.data(), offsets.econ_item_attribute_initial_value, missing[i].second))
+                return rollback();
+            std::int32_t appended_index = -1;
+            if (!TryInvokeEconItemAttributeNativeAppend(
+                    offsets.attribute_list_attributes_native_append,
+                    created.vector_address,
+                    source.data(),
+                    appended_index) ||
+                appended_index != static_cast<std::int32_t>(created.first + i))
+                return rollback();
+            NetworkVectorView current {};
+            if (!TryReadNetworkVectorView(created.vector_address, current) ||
+                current.data == nullptr || current.size != created.first + i + 1)
+                return rollback();
+        }
+        if (!TryReadNetworkVectorView(created.vector_address, created.vector) ||
+            created.vector.data == nullptr || created.vector.size != created.first + missing.size())
+            return rollback();
+    }
     for (std::size_t i = 0; i < missing.size(); ++i)
     {
         auto* node = created.vector.data + (created.first + i) * stride;
         if (!CreatedStandardWeaponAttributesStillOwned(created) ||
-            !TryInvokeNetworkVectorElementMutation(offsets.attribute_list_attributes_operation,
-                created.vector_address, static_cast<std::int32_t>(created.first + i), node) ||
+            (!created.native_append &&
+                !TryInvokeNetworkVectorElementMutation(offsets.attribute_list_attributes_operation,
+                    created.vector_address, static_cast<std::int32_t>(created.first + i), node)) ||
             !SafeWriteField(node, offsets.econ_item_attribute_definition_index, missing[i].first) ||
             !SafeWriteField(node, offsets.econ_item_attribute_value, missing[i].second) ||
             (offsets.econ_item_attribute_initial_value != 0 &&
@@ -28237,8 +28499,21 @@ void ReleaseCreatedStandardWeaponAttributes(AttributeBindingReleaseMode mode, vo
                 (created.offsets.econ_item_attribute_initial_value == 0 ||
                     (SafeReadField(node, created.offsets.econ_item_attribute_initial_value, initial) && initial == value));
         }
-        if (ours) TryInvokeNetworkVectorOperation(created.offsets.attribute_list_attributes_operation, 5,
-            created.vector_address, static_cast<std::int32_t>(created.first), static_cast<std::int32_t>(created.values.size()));
+        if (ours && !created.native_append)
+        {
+            TryInvokeNetworkVectorOperation(created.offsets.attribute_list_attributes_operation, 5,
+                created.vector_address, static_cast<std::int32_t>(created.first), static_cast<std::int32_t>(created.values.size()));
+        }
+        else if (ours && created.native_append)
+        {
+            for (std::size_t i = 0; i < created.values.size(); ++i)
+            {
+                auto* node = created.vector.data + (created.first + i) * stride;
+                SafeWriteField(node, created.offsets.econ_item_attribute_definition_index, std::uint16_t {0});
+                SafeWriteField(node, created.offsets.econ_item_attribute_value, 0.0f);
+                SafeWriteField(node, created.offsets.econ_item_attribute_initial_value, 0.0f);
+            }
+        }
     }
 }
 
@@ -28283,10 +28558,21 @@ bool WriteStandardWeaponAttributeSlot(
         return false;
     }
 #endif
-    return StandardWeaponAttributeSlotStillValid(slot, offsets) &&
-        TryInvokeNetworkVectorElementMutation(
-            offsets.attribute_list_attributes_operation,
-            slot.vector_address, slot.index, slot.attribute) &&
+    if (!StandardWeaponAttributeSlotStillValid(slot, offsets))
+    {
+        return false;
+    }
+    const auto mutation_ready =
+        offsets.attribute_list_attributes_operation != nullptr
+            ? TryInvokeNetworkVectorElementMutation(
+                  offsets.attribute_list_attributes_operation,
+                  slot.vector_address, slot.index, slot.attribute)
+            : offsets.attribute_list_attributes_native_append != nullptr &&
+                  ResolveEconItemAttributeStride(offsets) == 0x48 &&
+                  offsets.econ_item_attribute_definition_index == 0x30 &&
+                  offsets.econ_item_attribute_value == 0x34 &&
+                  offsets.econ_item_attribute_initial_value == 0x38;
+    return mutation_ready &&
         StandardWeaponAttributeSlotStillValid(slot, offsets) &&
         SafeWriteField(slot.attribute, offsets.econ_item_attribute_value, value) &&
         (offsets.econ_item_attribute_initial_value == 0 ||
@@ -28401,9 +28687,18 @@ bool SynchronizeStandardWeaponAttributes(
     {
         return true;
     }
-    if (offsets.attribute_list_attributes_operation == nullptr ||
-        offsets.attribute_list_attributes_schema_tail_span < 0x18 ||
-        offsets.attribute_list_attributes_element_size != ResolveEconItemAttributeStride(offsets))
+    const auto stride = ResolveEconItemAttributeStride(offsets);
+    const auto schema_mutation_ready =
+        offsets.attribute_list_attributes_operation != nullptr &&
+        offsets.attribute_list_attributes_element_size == stride;
+    const auto native_mutation_ready =
+        offsets.attribute_list_attributes_native_append != nullptr &&
+        stride == 0x48 &&
+        offsets.econ_item_attribute_definition_index == 0x30 &&
+        offsets.econ_item_attribute_value == 0x34 &&
+        offsets.econ_item_attribute_initial_value == 0x38;
+    if (offsets.attribute_list_attributes_schema_tail_span < 0x18 ||
+        (!schema_mutation_ready && !native_mutation_ready))
     {
         return false;
     }
@@ -36435,12 +36730,17 @@ bool TryResetExplicitVanillaKnifeGeneratorPayload(
     constexpr char kGeneratorPayloadDestructorPattern[] =
         "48 83 EC 28 48 89 5C 24 30 48 89 74 24 38 48 8B F1 48 83 E9 80 "
         "48 89 7C 24 40 E8 ?? ?? ?? ?? 48 83 7E 70 00";
-    auto* move_assign = FindUniquePattern(
-        *client_text,
-        kGeneratorPayloadMoveAssignPattern);
-    auto* destroy = FindUniquePattern(
-        *client_text,
-        kGeneratorPayloadDestructorPattern);
+    // Render-pass/game-thread owned. Resolve once per module, not two full
+    // client text scans each time a model-only knife is drawn again.
+    static HMODULE payload_module = nullptr;
+    static void* move_assign = nullptr;
+    static void* destroy = nullptr;
+    if (payload_module != client_module)
+    {
+        payload_module = client_module;
+        move_assign = FindUniquePattern(*client_text, kGeneratorPayloadMoveAssignPattern);
+        destroy = FindUniquePattern(*client_text, kGeneratorPayloadDestructorPattern);
+    }
     if (move_assign == nullptr || destroy == nullptr ||
         !PointerInModule(*client_span, move_assign) ||
         !PointerInModule(*client_span, destroy) ||
@@ -56329,6 +56629,122 @@ bool RestoreWeaponAppearanceSnapshot(
     return restored;
 }
 
+bool RestoreIndependentKnifePrearmState(
+    const ClientSchemaOffsets& offsets,
+    const AttributeBindingReleaseMode mode,
+    const wchar_t* reason)
+{
+    auto state = g_hook_state.independent_knife_prearm;
+    if (!state.active)
+    {
+        return false;
+    }
+
+    if (mode != AttributeBindingReleaseMode::RestoreOriginal)
+    {
+        g_hook_state.independent_knife_prearm = {};
+        std::wstringstream stream;
+        stream << L"Abandoned holstered knife pre-arm lease without dereferencing pre-seek state"
+            << L": xuid=" << state.xuid
+            << L", entity=" << state.world_entity_index
+            << L", source=" << state.source_definition
+            << L", target=" << state.target_definition;
+        if (reason != nullptr && *reason != L'\0') stream << L", reason=" << reason;
+        nskinzcs2::Logger::Info(stream.str());
+        return false;
+    }
+
+    void* services = nullptr;
+    std::uint32_t active_handle = kInvalidEntityHandle;
+    const bool knife_is_active = state.pawn_entity != nullptr &&
+        SafeReadField(state.pawn_entity, offsets.pawn_weapon_services, services) && services != nullptr &&
+        SafeReadField(services, offsets.weapon_services_active_weapon, active_handle) &&
+        active_handle == state.world_handle;
+    if (knife_is_active)
+    {
+        // Restoring the definition under a live target graph would recreate
+        // the same mixed first-deploy/HUD state that pre-arming prevents.
+        // Keep the lease until the knife is holstered; the regular render-pass
+        // poll will retire it before a later equip.
+        std::wstringstream stream;
+        stream << L"Deferred holstered knife pre-arm restore while target knife is active"
+            << L": xuid=" << state.xuid
+            << L", entity=" << state.world_entity_index;
+        if (reason != nullptr && *reason != L'\0') stream << L", reason=" << reason;
+        LogProfileDiagnosticOnce(state.appearance_signature ^ 0x4445464552524544ull, stream.str());
+        return false;
+    }
+
+    g_hook_state.independent_knife_prearm = {};
+
+    std::uint32_t live_handle = kInvalidEntityHandle;
+    std::uint32_t live_owner = kInvalidEntityHandle;
+    int live_creation_tick = 0;
+    int live_definition = 0;
+    auto* live_item_view = ResolveWeaponItemView(state.world_entity, offsets);
+    const bool same_generation =
+        state.scene_epoch == g_hook_state.knife_model_scene_epoch.load() &&
+        state.world_entity != nullptr && state.item_view != nullptr &&
+        TryReadHudBindingHandle(state.world_entity, offsets, live_handle) &&
+        live_handle == state.world_handle &&
+        SafeReadField(state.world_entity, offsets.knife_creation_tick, live_creation_tick) &&
+        live_creation_tick == state.world_creation_tick &&
+        SafeReadField(state.world_entity, offsets.base_owner_entity, live_owner) &&
+        live_owner == state.pawn_handle &&
+        live_item_view == state.item_view &&
+        TryReadItemDefinitionIndex(live_item_view, offsets, live_definition) &&
+        (live_definition == state.source_definition || live_definition == state.target_definition);
+
+    bool restored = false;
+    bool model_restored = !state.target_world_model_written;
+    if (same_generation)
+    {
+        RuntimeWeaponAppearanceBinding binding {};
+        binding.resolved.owner_xuid = state.xuid;
+        binding.resolved.carrier_entity_index = state.world_entity_index;
+        binding.resolved.render_entity_index = state.world_entity_index;
+        binding.resolved.hud_entity_index = -1;
+        binding.resolved.valid = true;
+        binding.carrier_entity = state.world_entity;
+        binding.carrier_item_view = state.item_view;
+        binding.render_entity = state.world_entity;
+        restored = RestoreWeaponAppearanceSnapshot(
+            binding,
+            offsets,
+            state.snapshot,
+            state.appearance_signature ^ 0x50524541524D5253ull);
+        if (restored && state.target_world_model_written)
+        {
+            model_restored = RestoreIndependentKnifePrearmWorldModel(state, offsets);
+            restored = model_restored;
+        }
+    }
+    ReleaseCreatedStandardWeaponAttributes(
+        restored ? AttributeBindingReleaseMode::RestoreOriginal : AttributeBindingReleaseMode::AbandonInstalled,
+        state.item_view);
+    if (same_generation && !restored)
+    {
+        // Do not forget an incomplete rollback. A later render pass can either
+        // repair the still-desired pre-arm state or finish retiring it after
+        // pause/config transitions have settled.
+        g_hook_state.independent_knife_prearm = state;
+    }
+
+    std::wstringstream stream;
+    stream << L"Released holstered knife pre-arm lease"
+        << L": xuid=" << state.xuid
+        << L", entity=" << state.world_entity_index
+        << L", source=" << state.source_definition
+        << L", target=" << state.target_definition
+        << L", same_generation=" << (same_generation ? 1 : 0)
+        << L", model_restored=" << (model_restored ? 1 : 0)
+        << L", retry_retained=" << (same_generation && !restored ? 1 : 0)
+        << L", restored=" << (restored ? 1 : 0);
+    if (reason != nullptr && *reason != L'\0') stream << L", reason=" << reason;
+    nskinzcs2::Logger::Info(stream.str());
+    return restored;
+}
+
 bool TryMirrorWeaponAppearanceScalarsToRenderProxy(
     const int source_entity_index,
     void* source_entity,
@@ -58875,6 +59291,52 @@ bool TryResolveSchemaOffsets(HMODULE schema_module, void* schema_interface, Clie
     return TryResolveSchemaOffsetsFromSystem(schema_system, offsets);
 }
 
+bool TryResolveEconItemAttributeNativeAppend(
+    HMODULE client_module,
+    ClientSchemaOffsets& offsets)
+{
+    offsets.attribute_list_attributes_native_append = nullptr;
+    const auto text_span = GetTextSectionSpan(client_module);
+    if (!text_span.has_value() ||
+        offsets.attribute_list_attributes_schema_tail_span < 0x18 ||
+        ResolveEconItemAttributeStride(offsets) != 0x48 ||
+        offsets.econ_item_attribute_definition_index != 0x30 ||
+        offsets.econ_item_attribute_value != 0x34 ||
+        offsets.econ_item_attribute_initial_value != 0x38)
+    {
+        return false;
+    }
+
+    auto* const append = FindUniquePattern(
+        *text_span,
+        nskinzcs2::compatibility::kEconItemAttributeAppendPattern);
+    if (append == nullptr || !IsExecutablePointer(append))
+    {
+        return false;
+    }
+
+    // Check the fixed constructor/copy tail as well as the unique entry
+    // signature. This proves that the function grows a 0x48-byte vector,
+    // constructs an engine-owned CEconItemAttribute, and copies only the
+    // reflected scalar fields from the supplied source record.
+    constexpr std::array<std::uint8_t, 48> kCopyTail {{
+        0x48,0x8D,0x1C,0xC8,0x8B,0x0D,0xD4,0x7F,0x4E,0x01,0x48,0x8D,
+        0x05,0x8D,0xB3,0xAC,0x00,0x48,0x89,0x03,0x65,0x48,0x8B,0x04,
+        0x25,0x58,0x00,0x00,0x00,0x48,0x89,0x73,0x08,0x48,0x8B,0x3C,
+        0xC8,0xB8,0x6C,0x00,0x00,0x00,0x40,0x38,0x34,0x38,0x75,0x05,
+    }};
+    std::array<std::uint8_t, kCopyTail.size()> observed_tail {};
+    if (!SafeReadBytes(append + 0xE2, observed_tail.data(), observed_tail.size()) ||
+        observed_tail != kCopyTail)
+    {
+        return false;
+    }
+
+    offsets.attribute_list_attributes_native_append =
+        reinterpret_cast<EconItemAttributeAppendFn>(append);
+    return true;
+}
+
 bool TryResolveEntitySystemBindings(HMODULE client_module, EntitySystemBindings& bindings)
 {
     const auto text_span = GetTextSectionSpan(client_module);
@@ -58900,6 +59362,20 @@ bool TryResolveEntitySystemBindings(HMODULE client_module, EntitySystemBindings&
     }
 
     bindings.get_entity_from_index = reinterpret_cast<GetEntityFromIndexFn>(get_entity);
+    constexpr std::array<std::uint8_t, 86> kDirectChunkGetter {{
+        0x4C,0x8D,0x49,0x10,0x81,0xFA,0xFE,0x7F,0x00,0x00,0x77,0x47,
+        0x8B,0xCA,0xC1,0xF9,0x09,0x83,0xF9,0x3F,0x77,0x3D,0x48,0x63,
+        0xC1,0x4D,0x8B,0x04,0xC1,0x4D,0x85,0xC0,0x74,0x31,0x8B,0xC2,
+        0x25,0xFF,0x01,0x00,0x00,0x48,0x6B,0xC0,0x70,0x49,0x03,0xC0,
+        0x74,0x21,0x8B,0x40,0x10,0x25,0xFF,0x7F,0x00,0x00,0x3B,0xC2,
+        0x75,0x15,0x48,0x63,0xC1,0x81,0xE2,0xFF,0x01,0x00,0x00,0x48,
+        0x6B,0xCA,0x70,0x49,0x03,0x0C,0xC1,0x48,0x8B,0x01,0xC3,0x33,
+        0xC0,0xC3,
+    }};
+    std::array<std::uint8_t, kDirectChunkGetter.size()> observed_getter {};
+    bindings.direct_chunk_layout_verified =
+        SafeReadBytes(get_entity, observed_getter.data(), observed_getter.size()) &&
+        observed_getter == kDirectChunkGetter;
     return bindings.IsReady();
 }
 
@@ -77802,7 +78278,7 @@ public:
 
 bool ReadKnifeModelEntityIdentity(
     void* entity, const std::vector<void*>& entities, const ClientSchemaOffsets& offsets,
-    nskinzcs2::runtime::KnifeModelEntityIdentity& result)
+    nskinzcs2::runtime::KnifeModelEntityIdentity& result, void* entity_list = nullptr)
 {
     result = {};
     // CEntityIdentity::handle is not exposed by Schema. The read-only 2000899
@@ -77823,8 +78299,35 @@ bool ReadKnifeModelEntityIdentity(
         return false;
     }
     const auto index = HandleToEntityIndex(result.handle);
-    return index >= 0 && static_cast<std::size_t>(index) < entities.size() &&
-        entities[static_cast<std::size_t>(index)] == entity;
+    if (index < 0) { return false; }
+    if (static_cast<std::size_t>(index) < entities.size() && entities[static_cast<std::size_t>(index)] == entity)
+    {
+        return true;
+    }
+    // Client-only arms/HUD slots are often beyond the sparse network cache.
+    // Resolve just this identity's slot; never enlarge or scan the whole cache.
+    void* native_entity = nullptr;
+    if (entity_list == nullptr || g_hook_state.entity_system.get_entity_from_index == nullptr ||
+        !TryGetEntityFromIndex(entity_list, index, native_entity) || native_entity != entity)
+    { return false; }
+    std::uint32_t confirmed_handle = kInvalidEntityHandle;
+    int confirmed_tick = std::numeric_limits<int>::min();
+    return TryReadHudBindingHandle(entity, offsets, confirmed_handle) && confirmed_handle == result.handle &&
+        SafeReadField(entity, offsets.knife_creation_tick, confirmed_tick) && confirmed_tick == result.creation_tick;
+}
+
+void* ResolveKnifeModelEntityHandle(void* entity_list, const std::vector<void*>& entities,
+    const std::uint32_t handle, const ClientSchemaOffsets& offsets)
+{
+    const auto index = HandleToEntityIndex(handle);
+    if (index < 0 || handle == 0xFFFFFFFEu) { return nullptr; }
+    void* entity = static_cast<std::size_t>(index) < entities.size() ? entities[index] : nullptr;
+    std::uint32_t actual = kInvalidEntityHandle;
+    if (TryReadHudBindingHandle(entity, offsets, actual) && actual == handle) { return entity; }
+    entity = nullptr;
+    if (entity_list == nullptr || g_hook_state.entity_system.get_entity_from_index == nullptr ||
+        !TryGetEntityFromIndex(entity_list, index, entity)) { return nullptr; }
+    return TryReadHudBindingHandle(entity, offsets, actual) && actual == handle ? entity : nullptr;
 }
 
 void* FindIndependentKnifeHudWeapon(
@@ -77836,8 +78339,9 @@ void* FindIndependentKnifeHudWeapon(
     {
         return nullptr;
     }
-    // Fixed-size bounded walk, no entity-wide scan, no resource queries, no heap.
-    std::array<void*, 64> pending {};
+    // Fixed-size bounded scene walk, no entity-wide scan or resource queries.
+    struct Edge { void* node = nullptr; void* parent = nullptr; };
+    std::array<Edge, 64> pending {};
     std::array<void*, 64> visited {};
     std::size_t count = 0;
     std::size_t seen = 0;
@@ -77846,29 +78350,42 @@ void* FindIndependentKnifeHudWeapon(
     {
         return nullptr;
     }
-    pending[count++] = node;
+    void* root = node;
+    void* child = nullptr;
+    if (offsets.knife_scene_node_parent == 0 ||
+        !SafeReadField(root, offsets.game_scene_node_child, child) || child == nullptr) { return nullptr; }
+    pending[count++] = {child, root};
     void* result = nullptr;
     while (count != 0 && seen < visited.size())
     {
-        node = pending[--count];
+        const auto edge = pending[--count];
+        node = edge.node;
+        void* actual_parent = nullptr;
+        if (node == root || !SafeReadField(node, offsets.knife_scene_node_parent, actual_parent) ||
+            actual_parent != edge.parent) { return nullptr; }
         if (std::find(visited.begin(), visited.begin() + seen, node) != visited.begin() + seen)
         {
-            continue;
+            return nullptr; // A cycle/duplicate edge cannot prove unique ownership.
         }
         visited[seen++] = node;
         for (const auto link : {offsets.game_scene_node_child, offsets.game_scene_node_next_sibling})
         {
             void* next = nullptr;
-            if (SafeReadField(node, link, next) && next != nullptr && count < pending.size())
+            if (!SafeReadField(node, link, next)) { return nullptr; }
+            if (next != nullptr)
             {
-                pending[count++] = next;
+                if (count == pending.size()) { return nullptr; }
+                pending[count++] = {next, link == offsets.game_scene_node_child ? node : edge.parent};
             }
         }
         void* candidate = nullptr;
+        void* candidate_scene = nullptr;
         std::uint32_t owner = kInvalidEntityHandle;
         if (SafeReadField(node, offsets.game_scene_node_owner, candidate) && candidate != nullptr &&
             candidate != arms && SafeReadField(candidate, offsets.base_owner_entity, owner) &&
-            owner == weapon_handle && DescribeObservedPawnClassName(candidate) == L"C_CS2HudModelWeapon")
+            owner == weapon_handle &&
+            SafeReadField(candidate, offsets.base_entity_game_scene_node, candidate_scene) && candidate_scene == node &&
+            DescribeObservedPawnClassName(candidate) == L"C_CS2HudModelWeapon")
         {
             if (result != nullptr && result != candidate)
             {
@@ -77880,20 +78397,1083 @@ void* FindIndependentKnifeHudWeapon(
     return count == 0 ? result : nullptr; // A truncated walk cannot prove uniqueness.
 }
 
+bool VerifyKnifeGraphNativeLayout(const ClientSchemaOffsets& offsets)
+{
+    using namespace nskinzcs2::runtime;
+    if (offsets.knife_graph_weapon_type != 0xE8 || offsets.knife_graph_instance != 0x448 ||
+        offsets.knife_secondary_slots != 0x20 || offsets.knife_secondary_skeletons != 0x38 ||
+        offsets.knife_secondary_master_count != 0x50) { return false; }
+    const auto client = GetModuleSpan(GetModuleHandleW(L"client.dll"));
+    const auto animation = GetModuleSpan(GetModuleHandleW(L"animationsystem.dll"));
+    if (!client || !animation || client->size < kKnifeWeaponTypeUpdateRva + kKnifeWeaponTypeUpdateSize ||
+        client->size < kKnifeBodyGraphConstructionRva + kKnifeBodyGraphConstructionSize ||
+        client->size < kKnifeBodyGraphUseRva + kKnifeBodyGraphUseSize ||
+        client->size < kKnifeSecondaryHandleAppendRva + kKnifeSecondaryHandleAppendSize ||
+        client->size < kKnifeSecondarySlotAppendRva + kKnifeSecondarySlotAppendSize ||
+        animation->size < kKnifeGraphNodeDestructionRva + kKnifeGraphNodeDestructionSize ||
+        animation->size < kKnifeIdNodeConstructionRva + kKnifeIdNodeConstructionSize) { return false; }
+    std::array<std::uint8_t, kKnifeWeaponTypeUpdateSize> update {};
+    std::array<std::uint8_t, kKnifeGraphNodeDestructionSize> destruction {};
+    std::array<std::uint8_t, kKnifeIdNodeConstructionSize> construction {};
+    std::array<std::uint8_t, kKnifeBodyGraphConstructionSize> body_construction {};
+    std::array<std::uint8_t, kKnifeBodyGraphUseSize> body_use {};
+    std::array<std::uint8_t, kKnifeSecondaryHandleAppendSize> secondary_handles {};
+    std::array<std::uint8_t, kKnifeSecondarySlotAppendSize> secondary_slots {};
+    return SafeReadBytes(client->base + kKnifeWeaponTypeUpdateRva, update.data(), update.size()) &&
+        SafeReadBytes(animation->base + kKnifeGraphNodeDestructionRva, destruction.data(), destruction.size()) &&
+        SafeReadBytes(animation->base + kKnifeIdNodeConstructionRva, construction.data(), construction.size()) &&
+        SafeReadBytes(client->base + kKnifeBodyGraphConstructionRva, body_construction.data(), body_construction.size()) &&
+        SafeReadBytes(client->base + kKnifeBodyGraphUseRva, body_use.data(), body_use.size()) &&
+        SafeReadBytes(client->base + kKnifeSecondaryHandleAppendRva, secondary_handles.data(), secondary_handles.size()) &&
+        SafeReadBytes(client->base + kKnifeSecondarySlotAppendRva, secondary_slots.data(), secondary_slots.size()) &&
+        MatchesKnifeGraphLayoutEvidence(update, destruction, construction) &&
+        MatchesKnifeBodyGraphLayoutEvidence(body_construction, body_use) &&
+        MatchesKnifeSecondaryLayoutEvidence(secondary_handles, secondary_slots);
+}
+
+std::uintptr_t FindExistingKnifeGraphSymbol(const char* name) noexcept
+{
+    // Find, never Make: no registration or caller-owned replacement strings.
+    using FindSymbol = const char* (__fastcall*)(const char*);
+    const auto module = GetModuleSpan(GetModuleHandleW(L"tier0.dll"));
+    if (!module) { return 0; }
+    auto function = reinterpret_cast<FindSymbol>(GetProcAddress(reinterpret_cast<HMODULE>(module->base), "_FindGlobalSymbol"));
+    if (function == nullptr || !PointerInModule(*module, reinterpret_cast<void*>(function)) ||
+        !IsExecutablePointer(reinterpret_cast<void*>(function))) { return 0; }
+    __try { return reinterpret_cast<std::uintptr_t>(function(name)); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+class NativeKnifeGraphReader final : public nskinzcs2::runtime::KnifeGraphReader
+{
+public:
+    bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept override
+    { return SafeReadBytes(reinterpret_cast<void*>(address), output, size); }
+    bool IsIdParameterNode(std::uintptr_t node) noexcept override
+    {
+        void* table = nullptr;
+        const auto module = GetModuleSpan(GetModuleHandleW(L"animationsystem.dll"));
+        // The validated ID constructor's LEA resolves to this exact vtable;
+        // its RTTI was checked offline. No virtual call or allocating RTTI log.
+        return module && module->size > nskinzcs2::runtime::kKnifeIdNodeVtableRva &&
+            SafeReadValue(reinterpret_cast<void*>(node), table) &&
+            table == module->base + nskinzcs2::runtime::kKnifeIdNodeVtableRva;
+    }
+};
+
+bool ReadIndependentKnifeResourcePair(
+    const nskinzcs2::runtime::KnifeModelBinding& binding,
+    void* entity_list, const std::vector<void*>& entities,
+    const ClientSchemaOffsets& offsets, nskinzcs2::runtime::KnifeResourcePair& resources,
+    int& world_definition, int& hud_definition)
+{
+    using namespace nskinzcs2::runtime;
+    resources = {}; world_definition = hud_definition = 0;
+    const auto client = GetModuleSpan(GetModuleHandleW(L"client.dll"));
+    NativeKnifeGraphReader reader;
+    if (!binding.Valid() || !client || offsets.model_state_model_handle <= 0 ||
+        offsets.skeleton_instance_model_state <= 0 ||
+        offsets.skeleton_instance_model_state + offsets.model_state_model_handle != 0x1E0 ||
+        !VerifyKnifeResourceEvidence(reinterpret_cast<std::uintptr_t>(client->base), client->size, reader)) return false;
+    const auto alive = [&]
+    {
+        if (binding.scene_epoch != g_hook_state.knife_model_scene_epoch.load() ||
+            g_hook_state.pending_runtime_reset_after_seek.load()) return false;
+        for (const auto& captured : {binding.pawn, binding.world, binding.hud_weapon, binding.arms})
+        {
+            KnifeModelEntityIdentity current;
+            if (!ReadKnifeModelEntityIdentity(reinterpret_cast<void*>(captured.address), entities, offsets, current, entity_list) ||
+                current != captured) return false;
+        }
+        return true;
+    };
+    if (!alive()) return false;
+    KnifeResourceFields fields;
+    std::array<std::string, 3> names;
+    const std::array<std::uintptr_t, 3> addresses {binding.world.address, binding.hud_weapon.address, binding.arms.address};
+    const std::array<std::uintptr_t*, 3> outputs {&fields.world, &fields.hud, &fields.arms};
+    for (std::size_t i = 0; i < addresses.size(); ++i)
+    {
+        const auto entity = reinterpret_cast<void*>(addresses[i]);
+        void* scene = nullptr; void* owner = nullptr;
+        std::uintptr_t state = 0;
+        if (!SafeReadField(entity, offsets.base_entity_game_scene_node, scene) || !scene ||
+            !SafeReadField(scene, offsets.game_scene_node_owner, owner) || owner != entity ||
+            !TryResolveEntityModelStateAddress(entity, offsets, state) ||
+            !TryReadEntityModelNameString(entity, offsets, names[i]) || names[i].empty()) return false;
+        *outputs[i] = state + offsets.model_state_model_handle;
+    }
+    const auto* world = FindKnifeModelAssetByPath(names[0]);
+    const auto* hud = FindKnifeModelAssetByPath(names[1]);
+    if (!world || !hud || FindKnifeModelAssetByPath(names[2])) return false;
+    world_definition = world->definition; hud_definition = hud->definition;
+    KnifeResourcePair result;
+    if (!ProbeKnifeResourcePair(binding, fields, true, reader, result)) return false;
+    for (std::size_t i = 0; i < addresses.size(); ++i)
+    {
+        std::string current;
+        if (!TryReadEntityModelNameString(reinterpret_cast<void*>(addresses[i]), offsets, current) || current != names[i]) return false;
+    }
+    if (!alive()) return false;
+    resources = result;
+    return true;
+}
+
+const std::vector<void*>& EmptyKnifeEntityCache()
+{ static const std::vector<void*> empty; return empty; }
+
+// A persistent host must not retain Poll's temporary entity-cache reference.
+// Every callback resolves exact full handles; it never scans all game entities.
+class IndependentKnifeNativeHost final : public nskinzcs2::runtime::KnifeNativeHost
+{
+public:
+    explicit IndependentKnifeNativeHost(const ClientSchemaOffsets& offsets) : offsets_(offsets) {}
+    void Refresh(void* list, bool authorized)
+    { list_ = list; authorized_ = authorized; layout_ = VerifyKnifeGraphNativeLayout(offsets_); }
+    void Enter(const nskinzcs2::runtime::KnifeUpdateEvent& event) noexcept { event_ = event; in_callback_ = true; }
+    void Leave() noexcept { in_callback_ = false; }
+    bool Read(std::uintptr_t address, void* output, std::size_t size) noexcept override
+    { return reader_.Read(address, output, size); }
+    bool IsIdParameterNode(std::uintptr_t node) noexcept override { return reader_.IsIdParameterNode(node); }
+    bool Environment() const noexcept
+    {
+        return in_callback_ && authorized_ && layout_ &&
+            GetCurrentThreadId() == g_hook_state.frame_stage_thread_id.load() && g_hook_state.demo_playing.load() &&
+            !g_hook_state.pending_runtime_reset_after_seek.load() && !g_hook_state.runtime_faulted.load();
+    }
+    bool AtSafePoint(const nskinzcs2::runtime::KnifeModelBinding& binding) noexcept override
+    {
+        return Environment() && event_.phase == nskinzcs2::runtime::KnifeUpdatePhase::AfterWeapon &&
+            event_.arms == binding.arms.address && event_.controller == binding.weapon_graph_controller &&
+            event_.world == binding.world.address;
+    }
+    std::uint64_t SceneEpoch() noexcept override { return g_hook_state.knife_model_scene_epoch.load(); }
+    bool AtRetirementPoint() noexcept override
+    { return Environment() && event_.arms && event_.phase != nskinzcs2::runtime::KnifeUpdatePhase::AfterArms; }
+    nskinzcs2::runtime::KnifeBladePresence EntityPresence(const nskinzcs2::runtime::KnifeModelEntityIdentity& captured) noexcept
+    {
+        using Presence = nskinzcs2::runtime::KnifeBladePresence;
+        if (!list_ || !captured.Valid()) return Presence::Unreadable;
+        void* current = nullptr;
+        if (!TryGetEntityFromIndex(list_, HandleToEntityIndex(captured.handle), current)) return Presence::Unreadable;
+        if (!current) return Presence::Gone;
+        std::uint32_t handle = kInvalidEntityHandle;
+        if (!TryReadHudBindingHandle(current, offsets_, handle)) return Presence::Unreadable;
+        if (current != reinterpret_cast<void*>(captured.address) || handle != captured.handle) return Presence::Replaced;
+        int tick = 0;
+        if (!SafeReadField(current, offsets_.knife_creation_tick, tick)) return Presence::Unreadable;
+        return tick == captured.creation_tick ? Presence::Live : Presence::Replaced;
+    }
+    nskinzcs2::runtime::KnifeBladePresence BladePresence(const nskinzcs2::runtime::KnifeNativeContext& context,
+        nskinzcs2::runtime::KnifeBladeRole role) noexcept override
+    {
+        using namespace nskinzcs2::runtime;
+        if (!layout_ || context.binding.scene_epoch != SceneEpoch()) return KnifeBladePresence::Unreadable;
+        const auto index = role == KnifeBladeRole::World ? 0u : 1u;
+        const auto& entity = index == 0 ? context.binding.world : context.binding.hud_weapon;
+        const auto presence = EntityPresence(entity);
+        if (presence != KnifeBladePresence::Live) return presence;
+        void* scene = nullptr; void* owner = nullptr;
+        if (!SafeReadField(reinterpret_cast<void*>(entity.address), offsets_.base_entity_game_scene_node, scene) || !scene ||
+            !SafeReadField(scene, offsets_.game_scene_node_owner, owner)) return KnifeBladePresence::Unreadable;
+        const auto field = index == 0 ? context.resources.world : context.resources.hud;
+        if (owner != reinterpret_cast<void*>(entity.address) || field != reinterpret_cast<std::uintptr_t>(scene) + 0x1E0 ||
+            context.model_names[index] != field + 8) return KnifeBladePresence::Replaced;
+        if (index == 1)
+        {
+            std::uint32_t owner_handle = kInvalidEntityHandle;
+            if (!SafeReadField(reinterpret_cast<void*>(entity.address), offsets_.base_owner_entity, owner_handle))
+                return KnifeBladePresence::Unreadable;
+            if (owner_handle != context.binding.world.handle) return KnifeBladePresence::Replaced;
+        }
+        return KnifeBladePresence::Live;
+    }
+    bool AttachmentsValid(const nskinzcs2::runtime::KnifeModelBinding& binding) noexcept override
+    {
+        void* root = nullptr; void* scene = nullptr;
+        if (!SafeReadField(reinterpret_cast<void*>(binding.arms.address), offsets_.base_entity_game_scene_node, root) || !root ||
+            !SafeReadField(reinterpret_cast<void*>(binding.hud_weapon.address), offsets_.base_entity_game_scene_node, scene) || !scene)
+            return false;
+        std::array<void*, 64> visited {};
+        for (std::size_t i = 0; i < visited.size(); ++i)
+        {
+            if (!scene) return false;
+            if (scene == root) return i != 0;
+            if (std::find(visited.begin(), visited.begin() + i, scene) != visited.begin() + i) return false;
+            visited[i] = scene;
+            if (!SafeReadField(scene, offsets_.knife_scene_node_parent, scene)) return false;
+        }
+        return false;
+    }
+    bool ReadWorldItemDefinition(const nskinzcs2::runtime::KnifeNativeContext& context,
+        int& definition) noexcept override
+    {
+        definition = 0;
+        if (!layout_ || context.binding.scene_epoch != SceneEpoch() ||
+            BladePresence(context, nskinzcs2::runtime::KnifeBladeRole::World) !=
+                nskinzcs2::runtime::KnifeBladePresence::Live) return false;
+        auto* item = ResolveWeaponItemView(reinterpret_cast<void*>(context.binding.world.address), offsets_);
+        return item && TryReadItemDefinitionIndex(item, offsets_, definition) &&
+            (definition == context.source_definition || definition == context.target_definition);
+    }
+    bool CompareExchangeWorldItemDefinition(const nskinzcs2::runtime::KnifeNativeContext& context,
+        int expected, int desired) noexcept override
+    {
+        if (!Environment() || context.binding.scene_epoch != SceneEpoch() ||
+            (expected != context.source_definition && expected != context.target_definition) ||
+            (desired != context.source_definition && desired != context.target_definition) ||
+            (!AtSafePoint(context.binding) && !AtRetirementPoint()) ||
+            BladePresence(context, nskinzcs2::runtime::KnifeBladeRole::World) !=
+                nskinzcs2::runtime::KnifeBladePresence::Live) return false;
+        auto* item = ResolveWeaponItemView(reinterpret_cast<void*>(context.binding.world.address), offsets_);
+        int before = 0, after = 0;
+        return item && offsets_.item_view_definition_index != 0 &&
+            TryReadItemDefinitionIndex(item, offsets_, before) && before == expected &&
+            SafeWriteField(item, offsets_.item_view_definition_index, static_cast<std::uint16_t>(desired)) &&
+            TryReadItemDefinitionIndex(item, offsets_, after) && after == desired;
+    }
+    bool WorldBindingAlive(const nskinzcs2::runtime::KnifeNativeContext& context) noexcept override
+    {
+        using namespace nskinzcs2::runtime;
+        const auto& b = context.binding;
+        if (!layout_ || !b.Valid() || b.scene_epoch != SceneEpoch() || g_hook_state.pending_runtime_reset_after_seek.load() ||
+            EntityPresence(b.pawn) != KnifeBladePresence::Live || BladePresence(context, KnifeBladeRole::World) != KnifeBladePresence::Live)
+            return false;
+        const auto world = reinterpret_cast<void*>(b.world.address);
+        const auto pawn = reinterpret_cast<void*>(b.pawn.address);
+        void* services = nullptr; std::uint32_t owner = kInvalidEntityHandle, active = kInvalidEntityHandle;
+        std::uintptr_t table = 0, notification = 0;
+        int definition = 0;
+        if (!SafeReadValue(world, table) || !table || !SafeReadValue(reinterpret_cast<void*>(table + 0x780), notification) ||
+            notification != context.client + kKnifeWorldModelNotifyRva ||
+            !TryReadItemDefinitionIndex(ResolveWeaponItemView(world, offsets_), offsets_, definition) ||
+            (definition != context.source_definition && definition != context.target_definition) ||
+            !SafeReadField(world, offsets_.base_owner_entity, owner) || owner != b.pawn.handle ||
+            !SafeReadField(pawn, offsets_.pawn_weapon_services, services) || !services ||
+            !SafeReadField(services, offsets_.weapon_services_active_weapon, active) || active != b.world.handle) return false;
+        std::uint32_t controller_handle = kInvalidEntityHandle, pawn_handle = kInvalidEntityHandle;
+        std::uint64_t xuid = 0;
+        if (!SafeReadField(pawn, offsets_.pawn_controller, controller_handle)) return false;
+        const auto controller = ResolveKnifeModelEntityHandle(list_, EmptyKnifeEntityCache(), controller_handle, offsets_);
+        return controller && SafeReadField(controller, offsets_.controller_steam_id, xuid) && xuid == b.xuid &&
+            SafeReadField(controller, offsets_.controller_pawn, pawn_handle) && pawn_handle == b.pawn.handle;
+    }
+    bool BindingAlive(const nskinzcs2::runtime::KnifeNativeContext& context) noexcept override
+    {
+        const auto& binding = context.binding;
+        if (!layout_ || !binding.Valid() || binding.scene_epoch != g_hook_state.knife_model_scene_epoch.load() ||
+            g_hook_state.pending_runtime_reset_after_seek.load() || offsets_.model_state_model_handle != 0xA0 ||
+            offsets_.model_state_model_name != 0xA8 || offsets_.skeleton_instance_model_state != 0x140) return false;
+        for (const auto& captured : {binding.pawn, binding.world, binding.hud_weapon, binding.arms})
+        {
+            nskinzcs2::runtime::KnifeModelEntityIdentity current;
+            if (!ReadKnifeModelEntityIdentity(reinterpret_cast<void*>(captured.address), EmptyKnifeEntityCache(), offsets_, current, list_) ||
+                current != captured) return false;
+        }
+        const std::array addresses {binding.world.address, binding.hud_weapon.address, binding.arms.address};
+        const std::array fields {context.resources.world, context.resources.hud, context.resources.arms};
+        for (std::size_t i = 0; i < addresses.size(); ++i)
+        {
+            void* scene = nullptr; void* owner = nullptr;
+            if (!SafeReadField(reinterpret_cast<void*>(addresses[i]), offsets_.base_entity_game_scene_node, scene) || !scene ||
+                !SafeReadField(scene, offsets_.game_scene_node_owner, owner) ||
+                owner != reinterpret_cast<void*>(addresses[i]) || fields[i] != reinterpret_cast<std::uintptr_t>(scene) + 0x1E0 ||
+                context.model_names[i] != fields[i] + 8) return false;
+        }
+        std::uint32_t owner = kInvalidEntityHandle, active = kInvalidEntityHandle, arms_handle = kInvalidEntityHandle;
+        void* services = nullptr;
+        if (!SafeReadField(reinterpret_cast<void*>(binding.world.address), offsets_.base_owner_entity, owner) || owner != binding.pawn.handle ||
+            !SafeReadField(reinterpret_cast<void*>(binding.hud_weapon.address), offsets_.base_owner_entity, owner) || owner != binding.world.handle ||
+            !SafeReadField(reinterpret_cast<void*>(binding.arms.address), offsets_.base_owner_entity, owner) || owner != binding.pawn.handle ||
+            !SafeReadField(reinterpret_cast<void*>(binding.pawn.address), offsets_.pawn_weapon_services, services) || !services ||
+            !SafeReadField(services, offsets_.weapon_services_active_weapon, active) || active != binding.world.handle ||
+            !SafeReadField(reinterpret_cast<void*>(binding.pawn.address), offsets_.pawn_hud_model_arms, arms_handle) ||
+            arms_handle != binding.arms.handle) return false;
+        std::uintptr_t graph_controller = 0;
+        if (!SafeReadField(reinterpret_cast<void*>(binding.arms.address), offsets_.knife_main_graph_controller, graph_controller) ||
+            graph_controller != binding.weapon_graph_controller) return false;
+        // Direct pawn <-> controller <-> SteamID proof replaces reliance on a
+        // legacy observer relay. The actual native callback must ALSO match.
+        std::uint32_t controller_handle = kInvalidEntityHandle, pawn_handle = kInvalidEntityHandle;
+        std::uint64_t xuid = 0;
+        if (!SafeReadField(reinterpret_cast<void*>(binding.pawn.address), offsets_.pawn_controller, controller_handle)) return false;
+        auto* player_controller = ResolveKnifeModelEntityHandle(list_, EmptyKnifeEntityCache(), controller_handle, offsets_);
+        if (!player_controller || !SafeReadField(player_controller, offsets_.controller_steam_id, xuid) || xuid != binding.xuid ||
+            !SafeReadField(player_controller, offsets_.controller_pawn, pawn_handle) || pawn_handle != binding.pawn.handle) return false;
+        for (const auto [entity, controller] : {
+            std::pair {binding.arms.address, binding.body_animation_controller},
+            std::pair {binding.hud_weapon.address, context.hud_body_controller}})
+        {
+            void* body = nullptr; void* body_scene = nullptr; void* scene = nullptr;
+            if (!SafeReadField(reinterpret_cast<void*>(entity), offsets_.knife_body_component, body) || !body ||
+                reinterpret_cast<std::uintptr_t>(body) + offsets_.knife_body_animation_controller != controller ||
+                !SafeReadField(body, offsets_.knife_body_scene_node, body_scene) || !body_scene ||
+                !SafeReadField(reinterpret_cast<void*>(entity), offsets_.base_entity_game_scene_node, scene) || scene != body_scene)
+                return false;
+        }
+        return true;
+    }
+    nskinzcs2::runtime::KnifeRetirementGraph RetirementGraph(const nskinzcs2::runtime::KnifeNativeContext& context,
+        nskinzcs2::runtime::KnifeModelBinding& current) noexcept override
+    {
+        using namespace nskinzcs2::runtime;
+        current = context.binding;
+        for (const auto& entity : {current.arms, current.hud_weapon})
+        {
+            const auto presence = EntityPresence(entity);
+            if (presence == KnifeBladePresence::Gone || presence == KnifeBladePresence::Replaced) return KnifeRetirementGraph::Absent;
+            if (presence != KnifeBladePresence::Live) return KnifeRetirementGraph::Unreadable;
+        }
+        void* body = nullptr; std::uintptr_t graph_controller = 0;
+        if (!SafeReadField(reinterpret_cast<void*>(current.arms.address), offsets_.knife_body_component, body) || !body ||
+            reinterpret_cast<std::uintptr_t>(body) + offsets_.knife_body_animation_controller != current.body_animation_controller ||
+            !SafeReadField(reinterpret_cast<void*>(current.arms.address), offsets_.knife_main_graph_controller, graph_controller) ||
+            graph_controller != current.weapon_graph_controller ||
+            !ReadKnifeBodyGraph(current.body_animation_controller, layout_, reader_, current.graph_instance))
+            return KnifeRetirementGraph::Unreadable;
+        // Prove absence instead of treating any failed secondary probe as gone.
+        int count = 0, capacity = 0; std::uintptr_t handles = 0;
+        if (!SafeReadField(reinterpret_cast<void*>(current.body_animation_controller), offsets_.knife_secondary_skeletons, count) ||
+            !SafeReadField(reinterpret_cast<void*>(current.body_animation_controller), offsets_.knife_secondary_skeletons + 8, handles) ||
+            !SafeReadField(reinterpret_cast<void*>(current.body_animation_controller), offsets_.knife_secondary_skeletons + 16, capacity) ||
+            count < 0 || count > 64 || capacity < count || capacity > 32768 || (count && !handles))
+            return KnifeRetirementGraph::Unreadable;
+        int matches = 0;
+        for (int i = 0; i < count; ++i)
+        {
+            std::uint32_t handle = kInvalidEntityHandle;
+            if (!SafeReadValue(reinterpret_cast<void*>(handles + static_cast<std::size_t>(i) * 4), handle))
+                return KnifeRetirementGraph::Unreadable;
+            if (handle == current.hud_weapon.handle) ++matches;
+        }
+        if (!matches) return KnifeRetirementGraph::Absent;
+        KnifeSecondarySkeleton secondary;
+        return matches == 1 && AttachmentsValid(current) &&
+            ProbeKnifeSecondarySkeleton(current, context.hud_body_controller, context.slot_symbol, layout_, reader_, secondary)
+            ? KnifeRetirementGraph::Live : KnifeRetirementGraph::Unreadable;
+    }
+private:
+    void* list_ = nullptr;
+    const ClientSchemaOffsets& offsets_;
+    bool layout_ = false, authorized_ = false, in_callback_ = false;
+    nskinzcs2::runtime::KnifeUpdateEvent event_ {nskinzcs2::runtime::KnifeUpdatePhase::AfterArms};
+    NativeKnifeGraphReader reader_;
+};
+
+struct IndependentKnifeSession
+{
+    IndependentKnifeNativeHost host {g_hook_state.schema_offsets};
+    nskinzcs2::runtime::KnifeLifecycle lifecycle {host};
+    nskinzcs2::runtime::KnifeFinishLatch finish;
+    nskinzcs2::runtime::KnifeLifecycleStatistics logged;
+    std::uint64_t next_log = 0;
+    std::uint64_t callback_count = 0, callback_ticks = 0, max_callback_ticks = 0, max_steady_ticks = 0;
+    LARGE_INTEGER clock_frequency {};
+};
+IndependentKnifeSession& GetIndependentKnifeSession()
+{ static IndependentKnifeSession session; return session; }
+
+// This is a finish adapter, not a model adapter. It is called only after a
+// verified target world/HUD pair exists and never calls SetModel/Recollect,
+// changes the econ definition/shared VData, or dispatches the global refresher.
+bool SynchronizeIndependentKnifeFinishAttributes(void* world, void* item,
+    const ClientSchemaOffsets& offsets, const nskinzcs2::model::CosmeticProfile& profile)
+{
+    const auto desired = BuildWeaponRefreshAttributesImpl(profile);
+    std::size_t changed = 0;
+    // CT 42/T 59 normally have no attribute 6/7/8 nodes. Use the same proven
+    // engine-owned Schema construction as stock guns; never replace a vector.
+    if (!EnsureStandardWeaponFinishAttributes(world, item, offsets, desired) ||
+        !SynchronizeStandardWeaponAttributes(item, offsets, desired, changed)) return false;
+    UpdateCreatedStandardWeaponAttributeValues(item, desired);
+    if (profile.paint_kit > 0)
+    {
+        const std::vector<std::pair<std::uint16_t, float>> finish {
+            {kAttributePaintKit, static_cast<float>(profile.paint_kit)},
+            {kAttributeSeed, static_cast<float>(profile.seed)}, {kAttributeWear, profile.wear}};
+        if (!VerifyAttributeValues(item, offsets, finish)) return false;
+    }
+    return VerifyStandardWeaponAttributes(item, offsets, desired);
+}
+
+bool IndependentKnifePrearmMutationAuthorized() noexcept
+{
+    if (!g_hook_state.demo_playing.load() || g_hook_state.demo_paused.load() ||
+        g_hook_state.pending_runtime_reset_after_seek.load() || g_hook_state.runtime_faulted.load() ||
+        GetCurrentThreadId() != g_hook_state.frame_stage_thread_id.load() ||
+        g_hook_state.last_frame_stage.load() != kCs2FrameRenderPass ||
+        GetHlaeSource2Module() == nullptr)
+        return false;
+    const std::wstring_view command_line(GetCommandLineW());
+    for (auto position = command_line.find(L"-insecure"); position != std::wstring_view::npos;
+        position = command_line.find(L"-insecure", position + 1))
+    {
+        const auto end = position + 9;
+        const auto separator = [](const wchar_t c) { return c == L' ' || c == L'\t'; };
+        if ((position == 0 || separator(command_line[position - 1])) &&
+            (end == command_line.size() || separator(command_line[end])))
+            return true;
+    }
+    return false;
+}
+
+bool TrySetIndependentKnifePrearmWorldModel(
+    const IndependentKnifePrearmState& state,
+    const ClientSchemaOffsets& offsets,
+    const int expected_model_definition,
+    const int desired_model_definition,
+    const int expected_item_definition,
+    void* entity_list,
+    const std::vector<void*>* entities)
+{
+    using namespace nskinzcs2::runtime;
+    if (!state.active || !IndependentKnifePrearmMutationAuthorized() ||
+        state.scene_epoch != g_hook_state.knife_model_scene_epoch.load() ||
+        state.world_entity == nullptr || state.pawn_entity == nullptr ||
+        FindKnifeModelAsset(expected_model_definition) == nullptr ||
+        FindKnifeModelAsset(desired_model_definition) == nullptr)
+        return false;
+    if (entity_list == nullptr) entity_list = g_hook_state.runtime_entities.last_entity_list;
+    if (entity_list == nullptr) return false;
+
+    std::uint32_t world_handle = kInvalidEntityHandle;
+    std::uint32_t owner_handle = kInvalidEntityHandle;
+    int creation_tick = 0;
+    int item_definition = 0;
+    void* services = nullptr;
+    std::uint32_t active_handle = kInvalidEntityHandle;
+    auto* item = ResolveWeaponItemView(state.world_entity, offsets);
+    if (!TryReadHudBindingHandle(state.world_entity, offsets, world_handle) ||
+        world_handle != state.world_handle ||
+        !SafeReadField(state.world_entity, offsets.knife_creation_tick, creation_tick) ||
+        creation_tick != state.world_creation_tick ||
+        !SafeReadField(state.world_entity, offsets.base_owner_entity, owner_handle) ||
+        owner_handle != state.pawn_handle || item != state.item_view ||
+        !TryReadItemDefinitionIndex(item, offsets, item_definition) ||
+        item_definition != expected_item_definition ||
+        !SafeReadField(state.pawn_entity, offsets.pawn_weapon_services, services) || services == nullptr ||
+        !SafeReadField(services, offsets.weapon_services_active_weapon, active_handle) ||
+        active_handle == state.world_handle)
+        return false;
+
+    // Wait for the old first-person HUD carrier to be gone. Calling SetModel
+    // while that source HUD is still attached would recreate the mid-deploy
+    // destruction/handoff that this pre-arm path is designed to avoid.
+    if (entities != nullptr)
+    {
+        for (auto* candidate : *entities)
+        {
+            std::uint32_t candidate_owner = kInvalidEntityHandle;
+            if (candidate != nullptr && candidate != state.world_entity &&
+                DescribeObservedPawnClassName(candidate) == L"C_CS2HudModelWeapon" &&
+                SafeReadField(candidate, offsets.base_owner_entity, candidate_owner) &&
+                candidate_owner == state.world_handle)
+                return false;
+        }
+    }
+
+    std::string current_model_name;
+    if (!TryReadEntityModelNameString(state.world_entity, offsets, current_model_name)) return false;
+    const auto* current_model = FindKnifeModelAssetByPath(current_model_name);
+    if (current_model == nullptr) return false;
+    if (current_model->definition == desired_model_definition) return true;
+    if (current_model->definition != expected_model_definition) return false;
+
+    const auto client = GetModuleSpan(GetModuleHandleW(L"client.dll"));
+    if (!client) return false;
+    auto& host = GetIndependentKnifeSession().host;
+    host.Refresh(entity_list, true);
+    std::uintptr_t table = 0;
+    std::uintptr_t notification = 0;
+    if (!VerifyKnifeNativeEvidence(reinterpret_cast<std::uintptr_t>(client->base), client->size, host) ||
+        !SafeReadValue(state.world_entity, table) || table == 0 ||
+        !SafeReadValue(reinterpret_cast<void*>(table + 0x780), notification) ||
+        notification != reinterpret_cast<std::uintptr_t>(client->base) + kKnifeWorldModelNotifyRva ||
+        !host.InvokeSetModel(
+            reinterpret_cast<std::uintptr_t>(client->base) + kKnifeSetModelRva,
+            reinterpret_cast<std::uintptr_t>(state.world_entity),
+            FindKnifeModelAsset(desired_model_definition)->model.data()))
+        return false;
+
+    current_model_name.clear();
+    int confirmed_definition = 0;
+    std::uint32_t confirmed_owner = kInvalidEntityHandle;
+    std::uint32_t confirmed_active = kInvalidEntityHandle;
+    const auto* confirmed_model =
+        TryReadEntityModelNameString(state.world_entity, offsets, current_model_name)
+        ? FindKnifeModelAssetByPath(current_model_name)
+        : nullptr;
+    return confirmed_model != nullptr && confirmed_model->definition == desired_model_definition &&
+        TryReadItemDefinitionIndex(ResolveWeaponItemView(state.world_entity, offsets), offsets, confirmed_definition) &&
+        confirmed_definition == expected_item_definition &&
+        SafeReadField(state.world_entity, offsets.base_owner_entity, confirmed_owner) &&
+        confirmed_owner == state.pawn_handle &&
+        SafeReadField(services, offsets.weapon_services_active_weapon, confirmed_active) &&
+        confirmed_active != state.world_handle;
+}
+
+bool RestoreIndependentKnifePrearmWorldModel(
+    const IndependentKnifePrearmState& state,
+    const ClientSchemaOffsets& offsets)
+{
+    std::string current_model_name;
+    const auto* current_model = state.world_entity != nullptr &&
+        TryReadEntityModelNameString(state.world_entity, offsets, current_model_name)
+        ? nskinzcs2::runtime::FindKnifeModelAssetByPath(current_model_name)
+        : nullptr;
+    if (current_model == nullptr) return false;
+    if (current_model->definition == state.source_model_definition) return true;
+    return TrySetIndependentKnifePrearmWorldModel(
+        state,
+        offsets,
+        current_model->definition,
+        state.source_model_definition,
+        state.source_definition,
+        nullptr,
+        nullptr);
+}
+
+enum class IndependentKnifePrearmResult
+{
+    NotApplicable,
+    AlreadyActive,
+    Applied,
+    Maintained,
+    Failed,
+};
+
+IndependentKnifePrearmResult TryPrearmHolsteredIndependentKnife(
+    const nskinzcs2::model::KnifeProfile& profile,
+    const RuntimePlayerBinding& player,
+    void* entity_list,
+    const std::vector<void*>& entities,
+    const int world_entity_index,
+    void* world,
+    void* item,
+    const int live_definition,
+    const ClientSchemaOffsets& offsets)
+{
+    using namespace nskinzcs2::runtime;
+    const auto request = BuildKnifeAppearanceRequest(profile);
+    if (request.mode != KnifeSlotMode::ModelAndFinish || request.model_definition == 0 ||
+        request.xuid == 0 || request.xuid != player.xuid || world == nullptr || item == nullptr ||
+        world_entity_index < 0 || FindKnifeModelAsset(request.model_definition) == nullptr)
+        return IndependentKnifePrearmResult::NotApplicable;
+
+    KnifeModelEntityIdentity world_identity;
+    std::uint32_t owner_handle = kInvalidEntityHandle;
+    void* services = nullptr;
+    std::uint32_t actual_active_handle = kInvalidEntityHandle;
+    if (!ReadKnifeModelEntityIdentity(world, entities, offsets, world_identity, entity_list) ||
+        HandleToEntityIndex(world_identity.handle) != world_entity_index ||
+        !SafeReadField(world, offsets.base_owner_entity, owner_handle) ||
+        owner_handle != player.pawn_handle ||
+        !SafeReadField(player.pawn_entity, offsets.pawn_weapon_services, services) || services == nullptr ||
+        !SafeReadField(services, offsets.weapon_services_active_weapon, actual_active_handle))
+        return IndependentKnifePrearmResult::Failed;
+
+    // Never alter the definition under an already-running source deploy.  The
+    // native active-pair transaction owns that case.  Pre-arming exists to make
+    // the NEXT equip start from the target definition before animation/HUD
+    // construction.
+    if (actual_active_handle == world_identity.handle)
+        return IndependentKnifePrearmResult::AlreadyActive;
+
+    auto& lease = g_hook_state.independent_knife_prearm;
+    const bool same_entity_lease = lease.active &&
+        lease.scene_epoch == g_hook_state.knife_model_scene_epoch.load() &&
+        lease.xuid == player.xuid && lease.pawn_handle == player.pawn_handle &&
+        lease.world_handle == world_identity.handle &&
+        lease.world_creation_tick == world_identity.creation_tick &&
+        lease.world_entity == world && lease.item_view == item;
+    if (lease.active && !same_entity_lease)
+    {
+        // A different handle/owner/generation is a pickup/drop handoff, not
+        // permission to write an old pointer or restore another player's item.
+        ReleaseCreatedStandardWeaponAttributes(AttributeBindingReleaseMode::AbandonInstalled, lease.item_view);
+        std::wstringstream stream;
+        stream << L"Abandoned stale holstered knife pre-arm lease before rebinding"
+            << L": old_xuid=" << lease.xuid
+            << L", old_entity=" << lease.world_entity_index
+            << L", new_xuid=" << player.xuid
+            << L", new_entity=" << world_entity_index
+            << L", owner_or_generation_changed=1.";
+        nskinzcs2::Logger::Info(stream.str());
+        lease = {};
+    }
+
+    int current_definition = 0;
+    std::string current_model_name;
+    if (!TryReadItemDefinitionIndex(item, offsets, current_definition) ||
+        current_definition != live_definition ||
+        FindKnifeModelAsset(current_definition) == nullptr ||
+        !TryReadEntityModelNameString(world, offsets, current_model_name))
+        return IndependentKnifePrearmResult::Failed;
+    const auto* current_model = FindKnifeModelAssetByPath(current_model_name);
+    if (current_model == nullptr) return IndependentKnifePrearmResult::Failed;
+    const int current_model_definition = current_model->definition;
+
+    const auto finish_request = BuildKnifeFinishRequest(profile);
+    const auto effective = BuildKnifeRuntimeWeaponProfile(
+        profile,
+        finish_request,
+        request.model_definition);
+    const auto signature = BuildKnifeProfileApplySignature(
+        request,
+        player.xuid,
+        request.model_definition,
+        0x50524541524D4B4Eull);
+    const int previous_lease_target = lease.active ? lease.target_definition : 0;
+
+    if (same_entity_lease && lease.target_definition != request.model_definition)
+    {
+        // A profile edit can arrive while the old target knife is active.  Its
+        // original snapshot remains the only trustworthy way back to the demo
+        // item, so retain it across the target-to-target transition.
+        if (current_definition != lease.source_definition &&
+            current_definition != lease.target_definition &&
+            current_definition != request.model_definition)
+            return IndependentKnifePrearmResult::Failed;
+        lease.target_definition = request.model_definition;
+        lease.appearance_signature = signature;
+    }
+
+    if (!lease.active)
+    {
+        WeaponAppearanceSnapshot snapshot;
+        if (!TryCaptureWeaponAppearanceSnapshot(
+                world, item, world, nullptr, nullptr, offsets, effective, snapshot))
+            return IndependentKnifePrearmResult::Failed;
+        lease.active = true;
+        lease.scene_epoch = g_hook_state.knife_model_scene_epoch.load();
+        lease.xuid = player.xuid;
+        lease.pawn_handle = player.pawn_handle;
+        lease.pawn_entity = player.pawn_entity;
+        lease.world_handle = world_identity.handle;
+        lease.world_creation_tick = world_identity.creation_tick;
+        lease.world_entity_index = world_entity_index;
+        lease.world_entity = world;
+        lease.item_view = item;
+        lease.source_definition = current_definition;
+        lease.target_definition = request.model_definition;
+        lease.source_model_definition = current_model_definition;
+        lease.appearance_signature = signature;
+        lease.snapshot = std::move(snapshot);
+    }
+
+
+    if (current_definition == request.model_definition &&
+        current_model_definition == request.model_definition &&
+        VerifyKnifeFinishRefreshAttributeValues(item, offsets, effective, nullptr))
+    {
+        // Steady holstered state is read-only. In particular, do not rescan
+        // HUD entities, revalidate PE windows, call SetModel, grow attributes
+        // or regenerate materials every 75 ms.
+        return IndependentKnifePrearmResult::Maintained;
+    }
+
+    // If demo replication rewrote the source definition while the knife was
+    // holstered, repair it in place.  A third definition indicates a competing
+    // writer or changed demo item; fail closed and let the next poll capture a
+    // fresh generation rather than coercing it.
+    if (current_definition != lease.source_definition &&
+        current_definition != lease.target_definition &&
+        current_definition != previous_lease_target)
+    {
+        ReleaseCreatedStandardWeaponAttributes(AttributeBindingReleaseMode::AbandonInstalled, lease.item_view);
+        lease = {};
+        return IndependentKnifePrearmResult::Failed;
+    }
+
+    const bool definition_already_target = current_definition == request.model_definition;
+    bool applied = definition_already_target ||
+        (offsets.item_view_definition_index != 0 &&
+         SafeWriteField(item, offsets.item_view_definition_index,
+             static_cast<std::uint16_t>(request.model_definition)));
+    applied = applied &&
+        SynchronizeIndependentKnifeFinishAttributes(world, item, offsets, effective) &&
+        ApplyProfileToEconItem(
+            world,
+            item,
+            offsets,
+            effective,
+            player.xuid,
+            request.model_definition,
+            false,
+            false,
+            true);
+
+    int verified_definition = 0;
+    applied = applied &&
+        TryReadItemDefinitionIndex(item, offsets, verified_definition) &&
+        verified_definition == request.model_definition &&
+        VerifyKnifeFinishRefreshAttributeValues(item, offsets, effective, nullptr);
+    const bool world_model_needs_change = current_model_definition != request.model_definition;
+    if (applied && world_model_needs_change)
+    {
+        // Set the ownership bit before the call: even an exception-safe wrapper
+        // can report failure after the engine already changed the model. The
+        // rollback path must therefore attempt the original model restore.
+        lease.target_world_model_written = true;
+    }
+    if (applied && world_model_needs_change)
+    {
+        applied = TrySetIndependentKnifePrearmWorldModel(
+            lease,
+            offsets,
+            current_model_definition,
+            request.model_definition,
+            request.model_definition,
+            entity_list,
+            &entities);
+    }
+    if (!applied)
+    {
+        RuntimeWeaponAppearanceBinding rollback {};
+        rollback.resolved.owner_xuid = lease.xuid;
+        rollback.resolved.carrier_entity_index = lease.world_entity_index;
+        rollback.resolved.render_entity_index = lease.world_entity_index;
+        rollback.resolved.valid = true;
+        rollback.carrier_entity = lease.world_entity;
+        rollback.carrier_item_view = lease.item_view;
+        rollback.render_entity = lease.world_entity;
+        RestoreWeaponAppearanceSnapshot(
+            rollback,
+            offsets,
+            lease.snapshot,
+            signature ^ 0x524F4C4C4241434Bull);
+        if (lease.target_world_model_written)
+            RestoreIndependentKnifePrearmWorldModel(lease, offsets);
+        ReleaseCreatedStandardWeaponAttributes(AttributeBindingReleaseMode::RestoreOriginal, lease.item_view);
+        lease = {};
+        return IndependentKnifePrearmResult::Failed;
+    }
+
+    std::wstringstream stream;
+    stream << L"Holstered knife pre-armed before native equip"
+        << L": xuid=" << player.xuid
+        << L", entity=" << world_entity_index
+        << L", source=" << lease.source_definition
+        << L", target=" << request.model_definition
+        << L", paint=" << effective.paint_kit
+        << L", vanilla=" << (effective.explicit_vanilla_finish ? 1 : 0)
+        << L", hud_definition_source=target_item_definition"
+        << L", world_model_prearmed=" << (lease.target_world_model_written ? 1 : 0)
+        << L", animation_writes=0, material_calls=0.";
+    LogProfileDiagnosticOnce(signature ^ (definition_already_target ? 0x4D41494E5441494Eull : 0x4150504C494544ull), stream.str());
+    return definition_already_target
+        ? IndependentKnifePrearmResult::Maintained
+        : IndependentKnifePrearmResult::Applied;
+}
+
+void RetireIndependentKnifePrearmIfUnwanted(
+    const nskinzcs2::model::ConfigDocument& config,
+    const ClientSchemaOffsets& offsets)
+{
+    const auto& lease = g_hook_state.independent_knife_prearm;
+    if (!lease.active) return;
+    const auto* profile = nskinzcs2::ConfigStore::FindMatchingKnifeProfile(config, lease.xuid);
+    const auto request = profile != nullptr
+        ? nskinzcs2::runtime::BuildKnifeAppearanceRequest(*profile)
+        : nskinzcs2::runtime::KnifeAppearanceRequest {};
+    if (request.mode == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish &&
+        request.model_definition == lease.target_definition)
+        return;
+    RestoreIndependentKnifePrearmState(
+        offsets,
+        AttributeBindingReleaseMode::RestoreOriginal,
+        L"knife profile disabled or target changed");
+}
+
+bool PrepareIndependentKnifeFinishAttributes(const nskinzcs2::runtime::KnifeNativeContext& context,
+    const nskinzcs2::model::CosmeticProfile& profile, const ClientSchemaOffsets& offsets)
+{
+    auto* world = reinterpret_cast<void*>(context.binding.world.address);
+    auto* item = ResolveWeaponItemView(world, offsets);
+    int definition = 0;
+    if (!item || !TryReadItemDefinitionIndex(item, offsets, definition) || definition != context.target_definition ||
+        !SynchronizeIndependentKnifeFinishAttributes(world, item, offsets, profile) ||
+        !ApplyProfileToEconItem(world, item, offsets, profile, context.binding.xuid, context.target_definition, false, false) ||
+        !VerifyStandardWeaponAttributes(item, offsets, BuildWeaponRefreshAttributesImpl(profile))) return false;
+    const auto cache_key = nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey(
+        profile, context.binding.xuid, context.target_definition);
+    // The model transaction already owns the TARGET item definition. Finish
+    // setup changes only paint attributes and the target material-cache key.
+    return offsets.item_view_item_id_low != 0 &&
+        SafeWriteField(item, offsets.item_view_item_id_low, cache_key) &&
+        TryReadItemDefinitionIndex(item, offsets, definition) && definition == context.target_definition;
+}
+
+bool ReadIndependentKnifeMaterialCounts(void* entity, const WeaponSkinRefreshBinding& binding,
+    int& primary, int& companion)
+{
+    return SafeReadField(entity, binding.original_offset, primary) &&
+        SafeReadField(entity, binding.original_companion_offset, companion) &&
+        primary >= 0 && primary <= 128 && companion >= 0 && companion <= 128;
+}
+
+enum class IndependentKnifeFinishResult { Pending, Applied, Failed };
+
+IndependentKnifeFinishResult RefreshIndependentKnifeFinish(const nskinzcs2::runtime::KnifeNativeContext& context,
+    const nskinzcs2::model::CosmeticProfile& profile, std::uint64_t signature, bool start, std::wstring& issue)
+{
+    using namespace nskinzcs2::runtime;
+    auto& session = GetIndependentKnifeSession();
+    const auto& offsets = g_hook_state.schema_offsets;
+    const auto fail = [&](const wchar_t* message) { issue = message; return IndependentKnifeFinishResult::Failed; };
+    if (!g_hook_state.demo_playing.load() || g_hook_state.pending_runtime_reset_after_seek.load() ||
+        GetCurrentThreadId() != g_hook_state.frame_stage_thread_id.load() ||
+        g_hook_state.last_frame_stage.load() != kCs2FrameRenderPass ||
+        !session.host.BindingAlive(context) || !session.host.WorldBindingAlive(context))
+        return fail(L"Target knife finish is outside its verified offline render-pass binding.");
+    KnifeNativePairAccess port(context, session.host);
+    KnifePairState before;
+    if (!VerifyKnifeFinishEvidence(context.client, context.client_size, session.host) ||
+        !port.Read(context.binding, before) || !before.attachments_valid || !before.secondary_matches_hud ||
+        before.world_definition != context.target_definition || before.hud_definition != context.target_definition ||
+        before.item_definition != context.target_definition)
+        return fail(L"Target knife pair/material ABI evidence is incomplete; no material call made.");
+    if (!g_hook_state.weapon_skin_refresh_ready.load())
+    {
+        WeaponSkinRefreshBinding resolved;
+        if (!TryResolveWeaponSkinRefreshBinding(GetModuleHandleW(L"client.dll"), offsets, resolved, issue))
+            return IndependentKnifeFinishResult::Failed;
+        g_hook_state.weapon_skin_refresh = resolved;
+        g_hook_state.weapon_skin_refresh_ready.store(true);
+    }
+    const auto& binding = g_hook_state.weapon_skin_refresh;
+    if (binding.offset_patched || binding.standard_material_owner_offset != 0x608 ||
+        binding.original_offset != 0xAA8 || binding.original_companion_offset != 0xAC0 ||
+        reinterpret_cast<std::uintptr_t>(binding.standard_clear_materials) != context.client + 0x1439FF0 ||
+        reinterpret_cast<std::uintptr_t>(binding.standard_generate_materials) != context.client + 0x7D97F0)
+        return fail(L"Native knife material clear/generate binding does not match the verified client.");
+    auto* world = reinterpret_cast<void*>(context.binding.world.address);
+    auto* hud = reinterpret_cast<void*>(context.binding.hud_weapon.address);
+    const std::array entities {world, hud};
+    std::array<int, 2> primary {}, companion {};
+    for (std::size_t i = 0; i < entities.size(); ++i)
+    {
+        std::uintptr_t table = 0, apply = 0, changed = 0;
+        if (!SafeReadField(entities[i], binding.standard_material_owner_offset, table) ||
+            table < context.client || table - context.client > context.client_size - 32 ||
+            !SafeReadValue(reinterpret_cast<void*>(table + 8), apply) || apply != context.client + kKnifeMaterialApplyRva ||
+            !SafeReadValue(reinterpret_cast<void*>(table + 24), changed) || changed != context.client + kKnifeMaterialChangedRva ||
+            !ReadIndependentKnifeMaterialCounts(entities[i], binding, primary[i], companion[i]))
+            return fail(L"World/HUD composite owners are not the verified native pair.");
+    }
+    const auto same_pair = [&]()
+    {
+        KnifePairState after;
+        return session.host.WorldBindingAlive(context) && port.Read(context.binding, after) && after == before;
+    };
+    if (start)
+    {
+        if (!PrepareIndependentKnifeFinishAttributes(context, profile, offsets))
+            return fail(L"Target knife paint/seed/wear attributes could not be initialized in place.");
+        // Clear each owner using the native reference-counted release/callback.
+        // This happens once per model/HUD/appearance key, never once per poll.
+        for (std::size_t i = 0; i < entities.size(); ++i)
+        {
+            if (!same_pair()) return fail(L"Knife identity changed before native material clear.");
+            if ((primary[i] || companion[i]) && !SafeInvokeVoidFunctionPointer(binding.standard_clear_materials,
+                    static_cast<std::uint8_t*>(entities[i]) + binding.standard_material_owner_offset, true))
+                return fail(L"Native knife material clear faulted; this finish attempt is latched.");
+            int p = -1, c = -1;
+            if (!ReadIndependentKnifeMaterialCounts(entities[i], binding, p, c) || p || c)
+                return fail(L"Knife material owner was not empty after native clear.");
+        }
+        PendingWeaponRefreshRequest material;
+        material.entity_index = HandleToEntityIndex(context.binding.world.handle);
+        material.econ_entity = world; material.item_view = ResolveWeaponItemView(world, offsets);
+        material.profile = profile; material.desired_signature = signature;
+        if (!same_pair() || !TryInvalidateWeaponVisualsData(material.entity_index, world, offsets, signature, context.binding.xuid))
+            return fail(L"Knife visual payload could not be invalidated without changing its model.");
+        if (profile.paint_kit == 0)
+        {
+            // There is no synthetic paint kit for vanilla. Release the old owned
+            // generator payload so the new model uses its own default materials.
+            if (!TryResetExplicitVanillaKnifeGeneratorPayload(material, offsets))
+                return fail(L"Target knife stock material payload reset was not verified.");
+            for (auto* entity : entities)
+            {
+                std::uint32_t previous = 0;
+                if (!TryResetEntityMaterialGroupToDefault(entity, offsets, previous))
+                    return fail(L"Target knife default material group could not be selected.");
+            }
+        }
+        else if (!SafeInvokeVoidFunctionPointer(binding.standard_generate_materials, world, false))
+            return fail(L"Target knife native generator faulted; automatic retry suspended.");
+        if (profile.paint_kit == 0)
+        {
+            if (!same_pair()) return fail(L"Model/arms/animation ownership changed during knife stock reset.");
+            for (auto* entity : entities)
+            {
+                int p = -1, c = -1;
+                if (!ReadIndependentKnifeMaterialCounts(entity, binding, p, c) || p || c)
+                    return fail(L"World/HUD stock material readback was not empty.");
+            }
+            issue.clear();
+            return IndependentKnifeFinishResult::Applied;
+        }
+    }
+
+    // Material generation is asynchronous. Zero primary materials here is a
+    // pending state, not a failure and not permission to regenerate.
+    int world_primary = 0, world_companion = 0, hud_primary = 0, hud_companion = 0;
+    if (!same_pair() || !ReadIndependentKnifeMaterialCounts(world, binding, world_primary, world_companion) ||
+        !ReadIndependentKnifeMaterialCounts(hud, binding, hud_primary, hud_companion))
+        return fail(L"Model/arms/animation ownership changed while waiting for knife materials.");
+    if (world_primary == 0)
+    {
+        issue = L"Target knife material generation is pending.";
+        return IndependentKnifeFinishResult::Pending;
+    }
+    if (hud_primary == 0)
+    {
+        // Same function used by native HUD construction (client+104F329).
+        // It acquires engine references and notifies the HUD owner.
+        if (!SafeInvokeVoidFunctionPointer(reinterpret_cast<void*>(context.client + kKnifeCopyMaterialsRva),
+                static_cast<std::uint8_t*>(world) + binding.standard_material_owner_offset,
+                static_cast<std::uint8_t*>(hud) + binding.standard_material_owner_offset, false))
+            return fail(L"Native world-to-HUD material transfer faulted; automatic retry suspended.");
+    }
+    if (!same_pair() || !ReadIndependentKnifeMaterialCounts(world, binding, world_primary, world_companion) ||
+        !ReadIndependentKnifeMaterialCounts(hud, binding, hud_primary, hud_companion) ||
+        world_primary == 0 || hud_primary == 0)
+        return fail(L"World/HUD material readback did not match the requested finish.");
+    issue.clear();
+    return IndependentKnifeFinishResult::Applied; // Native state only; visual acceptance still requires a demo.
+}
+
+void PollIndependentKnifeFinish(const nskinzcs2::model::KnifeProfile& profile,
+    const nskinzcs2::runtime::KnifeNativeContext& context)
+{
+    using namespace nskinzcs2::runtime;
+    auto& session = GetIndependentKnifeSession();
+    const auto appearance = BuildKnifeFinishRequest(profile);
+    const auto effective = BuildKnifeRuntimeWeaponProfile(profile, appearance, context.target_definition);
+    const auto signature = BuildKnifeProfileApplySignature(appearance, context.binding.xuid,
+        context.target_definition, 0x4B4E49464546494Eull);
+    const KnifeFinishKey key {context.binding, context.target_definition, session.lifecycle.Statistics().applied, signature};
+    const auto now = GetTickCount64();
+    const bool started = session.finish.Begin(true, key, now);
+    if (started || session.finish.Pending(key))
+    {
+        std::wstring issue;
+        auto result = RefreshIndependentKnifeFinish(context, effective, signature, started, issue);
+        if (result == IndependentKnifeFinishResult::Pending && session.finish.TimedOut(key, now, 3000))
+        { result = IndependentKnifeFinishResult::Failed; issue = L"Target knife material generation timed out after 3000 ms."; }
+        if (result == IndependentKnifeFinishResult::Applied) session.finish.Complete();
+        else if (result == IndependentKnifeFinishResult::Failed) session.finish.Fail();
+        // Log only state transitions. Pending polling stays silent and never
+        // calls the generator twice for the same model/HUD/appearance key.
+        if (started || result != IndependentKnifeFinishResult::Pending)
+        {
+            std::wstringstream log;
+            log << L"Independent knife target finish: xuid=" << context.binding.xuid << L", source=" << context.source_definition
+                << L", target=" << context.target_definition << L", paint=" << effective.paint_kit
+                << L", vanilla=" << effective.explicit_vanilla_finish << L", seed=" << effective.seed << L", wear=" << effective.wear
+                << L", hud_handle=" << context.binding.hud_weapon.handle << L", model_generation=" << key.model_generation
+                << L", finish_attempts=" << session.finish.Attempts() << L", state="
+                << (result == IndependentKnifeFinishResult::Applied ? L"applied" :
+                    result == IndependentKnifeFinishResult::Pending ? L"pending" : L"failed")
+                << L", model_writes=0, global_refresh=0, visual_result_not_verified=1";
+            if (!issue.empty()) log << L", issue=" << issue;
+            nskinzcs2::Logger::Info(log.str());
+        }
+    }
+    else if (session.finish.Applied(key) && session.host.BindingAlive(context) && session.host.WorldBindingAlive(context))
+    {
+        // Repair demo attribute replication at the 75 ms poll, not materials.
+        // Never regenerate, recollect or reload a model in steady state.
+        if (!PrepareIndependentKnifeFinishAttributes(context, effective, g_hook_state.schema_offsets))
+        {
+            session.finish.Fail();
+            nskinzcs2::Logger::Info(L"Independent knife finish attribute maintenance failed; material retry remains suspended.");
+        }
+    }
+}
+
+void OnIndependentKnifeNativeUpdate(const nskinzcs2::runtime::KnifeUpdateEvent& event) noexcept
+{
+    auto& session = GetIndependentKnifeSession();
+    LARGE_INTEGER started {}, finished {};
+    if (!session.clock_frequency.QuadPart) QueryPerformanceFrequency(&session.clock_frequency);
+    QueryPerformanceCounter(&started);
+    const auto before = session.lifecycle.Statistics();
+    session.host.Enter(event);
+    session.lifecycle.OnUpdate(event, GetTickCount64());
+    session.host.Leave();
+    QueryPerformanceCounter(&finished);
+    const auto ticks = static_cast<std::uint64_t>(std::max<LONGLONG>(0, finished.QuadPart - started.QuadPart));
+    ++session.callback_count; session.callback_ticks += ticks;
+    session.max_callback_ticks = std::max(session.max_callback_ticks, ticks);
+    const auto after = session.lifecycle.Statistics();
+    if (before.attempts == after.attempts && before.hud_handoffs == after.hud_handoffs && before.restored == after.restored &&
+        before.discarded == after.discarded && before.faults == after.faults)
+        session.max_steady_ticks = std::max(session.max_steady_ticks, ticks);
+}
+
+bool ReadIndependentKnifeNativePort(const nskinzcs2::runtime::KnifeModelBinding& binding,
+    int source_definition, int target_definition, void* entity_list, const std::vector<void*>& entities,
+    const ClientSchemaOffsets& offsets, bool& evidence, nskinzcs2::runtime::KnifePairState& state,
+    nskinzcs2::runtime::KnifeNativeContext& context)
+{
+    using namespace nskinzcs2::runtime;
+    evidence = false; state = {};
+    const auto client = GetModuleSpan(GetModuleHandleW(L"client.dll"));
+    const auto* source = FindKnifeModelAsset(source_definition);
+    const auto* target = FindKnifeModelAsset(target_definition);
+    if (!client || !source || !target || !binding.Valid()) return false;
+    context = {};
+    context.binding = binding; context.client = reinterpret_cast<std::uintptr_t>(client->base); context.client_size = client->size;
+    context.source_definition = source_definition; context.target_definition = target_definition;
+    context.symbols = {FindExistingKnifeGraphSymbol("weapon_type"), FindExistingKnifeGraphSymbol(source->animation_class.data()),
+        FindExistingKnifeGraphSymbol(target->animation_class.data())};
+    context.slot_symbol = FindExistingKnifeGraphSymbol("active_hud_model_weapon");
+    void* hud_body = nullptr;
+    if (!SafeReadField(reinterpret_cast<void*>(binding.hud_weapon.address), offsets.knife_body_component, hud_body) || !hud_body)
+        return false;
+    context.hud_body_controller = reinterpret_cast<std::uintptr_t>(hud_body) + offsets.knife_body_animation_controller;
+    const std::array addresses {binding.world.address, binding.hud_weapon.address, binding.arms.address};
+    const std::array fields {&context.resources.world, &context.resources.hud, &context.resources.arms};
+    for (std::size_t i = 0; i < addresses.size(); ++i)
+    {
+        std::uintptr_t model_state = 0;
+        if (!TryResolveEntityModelStateAddress(reinterpret_cast<void*>(addresses[i]), offsets, model_state)) return false;
+        *fields[i] = model_state + offsets.model_state_model_handle;
+        context.model_names[i] = model_state + offsets.model_state_model_name;
+    }
+    (void)entities;
+    auto& host = GetIndependentKnifeSession().host;
+    host.Refresh(entity_list, false); // Authorization is granted separately below.
+    KnifeNativePairAccess port(context, host);
+    evidence = port.EvidenceVerified();
+    return evidence && port.Read(binding, state);
+}
+
 void PollIndependentKnifeModel(
     const nskinzcs2::model::KnifeProfile* profile, const RuntimePlayerBinding* player,
-    const std::vector<void*>& entities, const bool offline_demo, const bool observer_verified,
+    void* entity_list, const std::vector<void*>& entities, const bool offline_demo, const bool observer_verified,
     const std::uint64_t now)
 {
     using namespace nskinzcs2::runtime;
     const auto request = profile != nullptr ? BuildKnifeModelRequest(*profile) : KnifeModelRequest {};
+    auto& session = GetIndependentKnifeSession();
+    session.lifecycle.Request(request);
+    if (!request.Enabled()) session.finish.Reset();
+    if (!request.Enabled() || !offline_demo || g_hook_state.pending_runtime_reset_after_seek.load())
+    { g_hook_state.knife_update_probe.Clear(); }
     if (request.Enabled() && now < g_hook_state.knife_model_next_probe_millis)
     {
-        UpdateKnifeRuntimeStatusText(L"Independent knife model / 独立刀模链",
-            KnifeModelPhaseText(g_hook_state.knife_model_last_probe_phase));
+        UpdateKnifeRuntimeStatusText(L"Independent knife model (experimental)",
+            std::wstring(KnifeModelPhaseText(session.lifecycle.Phase())) + L"; " +
+            KnifeGraphProbeStatusText(g_hook_state.knife_graph_last_probe_status));
         return;
     }
-    g_hook_state.knife_model_next_probe_millis = now + 250;
+    // Match the main runtime cadence. A 250 ms knife-only gate made short
+    // .drop/pick and deploy transitions miss the newly active world/HUD pair.
+    g_hook_state.knife_model_next_probe_millis = now + 75;
     KnifeModelObservation observation;
     observation.offline_demo = offline_demo;
     observation.seeking = g_hook_state.pending_runtime_reset_after_seek.load();
@@ -77902,42 +79482,58 @@ void PollIndependentKnifeModel(
     observation.binding.xuid = request.xuid;
     const auto& offsets = g_hook_state.schema_offsets;
     auto& binding = observation.binding;
+    KnifeGraphProbeResult graph_probe;
+    KnifeSecondarySkeleton secondary_skeleton;
+    bool secondary_verified = false;
+    bool native_binding_verified = false;
+    const bool layout_verified = request.Enabled() && offline_demo && VerifyKnifeGraphNativeLayout(offsets);
+    // Candidate discovery is read-only. The host proves pawn/controller SteamID
+    // and native world/HUD ownership; only the matching native callback commits.
     if (request.Enabled() && offline_demo && !observation.seeking && player != nullptr &&
-        player->xuid == request.xuid && observer_verified)
+        player->xuid == request.xuid)
     {
         void* services = nullptr;
         std::uint32_t active = kInvalidEntityHandle;
         // Re-read the real service: player.active_weapon_* may be the owned-knife
         // fallback used by cosmetics while a pistol is actually being held.
-        if (ReadKnifeModelEntityIdentity(player->pawn_entity, entities, offsets, binding.pawn) &&
+        if (ReadKnifeModelEntityIdentity(player->pawn_entity, entities, offsets, binding.pawn, entity_list) &&
             SafeReadField(player->pawn_entity, offsets.pawn_weapon_services, services) && services != nullptr &&
             SafeReadField(services, offsets.weapon_services_active_weapon, active))
         {
-            const auto index = HandleToEntityIndex(active);
-            void* world = index >= 0 && static_cast<std::size_t>(index) < entities.size()
-                ? entities[static_cast<std::size_t>(index)] : nullptr;
+            void* world = ResolveKnifeModelEntityHandle(entity_list, entities, active, offsets);
             std::uint32_t world_owner = kInvalidEntityHandle;
             observation.authoritative_active_knife =
-                ReadKnifeModelEntityIdentity(world, entities, offsets, binding.world) && binding.world.handle == active &&
+                ReadKnifeModelEntityIdentity(world, entities, offsets, binding.world, entity_list) && binding.world.handle == active &&
                 SafeReadField(world, offsets.base_owner_entity, world_owner) && world_owner == binding.pawn.handle &&
                 TryReadItemDefinitionIndex(ResolveWeaponItemView(world, offsets), offsets, observation.source_definition) &&
                 FindKnifeModelAsset(observation.source_definition) != nullptr;
+            // While this exact world transaction owns the target definition,
+            // keep the immutable source identity from the restore ledger. The
+            // live target value must not look like a brand-new native knife and
+            // retire the model transaction that wrote it.
+            if (observation.authoritative_active_knife)
+            {
+                if (const auto* active_context = session.lifecycle.Active(); active_context &&
+                    active_context->binding.scene_epoch == binding.scene_epoch &&
+                    active_context->binding.xuid == binding.xuid && active_context->binding.pawn == binding.pawn &&
+                    active_context->binding.world == binding.world &&
+                    observation.source_definition == active_context->target_definition)
+                    observation.source_definition = active_context->source_definition;
+            }
             std::uint32_t arms_handle = kInvalidEntityHandle;
             if (observation.authoritative_active_knife && offsets.pawn_hud_model_arms != 0 &&
                 SafeReadField(player->pawn_entity, offsets.pawn_hud_model_arms, arms_handle))
             {
-                const auto arms_index = HandleToEntityIndex(arms_handle);
-                void* arms = arms_index >= 0 && static_cast<std::size_t>(arms_index) < entities.size()
-                    ? entities[static_cast<std::size_t>(arms_index)] : nullptr;
+                void* arms = ResolveKnifeModelEntityHandle(entity_list, entities, arms_handle, offsets);
                 std::uint32_t arms_owner = kInvalidEntityHandle;
                 const bool arms_valid =
-                    ReadKnifeModelEntityIdentity(arms, entities, offsets, binding.arms) && binding.arms.handle == arms_handle &&
+                    ReadKnifeModelEntityIdentity(arms, entities, offsets, binding.arms, entity_list) && binding.arms.handle == arms_handle &&
                     DescribeObservedPawnClassName(arms) == L"C_CS2HudModelArms" &&
                     SafeReadField(arms, offsets.base_owner_entity, arms_owner) && arms_owner == binding.pawn.handle;
                 if (arms_valid)
                 {
                     void* hud = FindIndependentKnifeHudWeapon(arms, active, offsets);
-                    const bool hud_valid = ReadKnifeModelEntityIdentity(hud, entities, offsets, binding.hud_weapon);
+                    const bool hud_valid = ReadKnifeModelEntityIdentity(hud, entities, offsets, binding.hud_weapon, entity_list);
                     void* graph = nullptr;
                     void* body = nullptr;
                     void* body_scene = nullptr;
@@ -77953,12 +79549,13 @@ void PollIndependentKnifeModel(
                     {
                         // Controller is embedded in BodyComponent, not the entity.
                         auto* controller = static_cast<std::uint8_t*>(body) + offsets.knife_body_animation_controller;
-                        void* instance = nullptr;
+                        std::uintptr_t instance = 0;
                         binding.weapon_graph_controller = reinterpret_cast<std::uintptr_t>(graph);
                         binding.body_animation_controller = reinterpret_cast<std::uintptr_t>(controller);
-                        if (SafeReadField(controller, offsets.knife_graph_instance, instance) && instance != nullptr)
+                        NativeKnifeGraphReader reader;
+                        if (ReadKnifeBodyGraph(binding.body_animation_controller, layout_verified, reader, instance))
                         {
-                            binding.graph_instance = reinterpret_cast<std::uintptr_t>(instance);
+                            binding.graph_instance = instance;
                             observation.ownership_verified = hud_valid && binding.Valid();
                         }
                     }
@@ -77966,32 +79563,208 @@ void PollIndependentKnifeModel(
             }
         }
     }
-    // Static disassembly is not live validation of graph/resource lifetime.
-    observation.native_pair_adapter_verified = false;
-    observation.safe_point = false;
-    KnifeModelReadOnlyAdapter adapter;
-    const auto phase = g_hook_state.independent_knife_model.Tick(request, observation, adapter);
+    if (observation.ownership_verified)
+    {
+        KnifeGraphSymbols symbols;
+        if (layout_verified)
+        {
+            symbols.weapon_type_name = FindExistingKnifeGraphSymbol("weapon_type");
+            if (const auto* source = FindKnifeModelAsset(observation.source_definition))
+            { symbols.source_type = FindExistingKnifeGraphSymbol(source->animation_class.data()); }
+            if (const auto* target = FindKnifeModelAsset(request.definition))
+            { symbols.target_type = FindExistingKnifeGraphSymbol(target->animation_class.data()); }
+        }
+        NativeKnifeGraphReader reader;
+        graph_probe = ProbeKnifeWeaponType(binding, symbols, layout_verified, reader);
+        if (graph_probe.status == KnifeGraphProbeStatus::SourceTypeMismatch &&
+            (session.lifecycle.Owns(request, binding) || session.lifecycle.PreparingWorld(request, binding)))
+        {
+            // Only this committed/prepared world transaction may accept its target branch.
+            // A global "source OR any target" relaxation would mask drift.
+            symbols.source_type = symbols.target_type;
+            graph_probe = ProbeKnifeWeaponType(binding, symbols, layout_verified, reader);
+        }
+        if (graph_probe.SourceVerified())
+        {
+            void* hud_body = nullptr;
+            void* body_scene = nullptr;
+            void* hud_scene = nullptr;
+            const auto hud = reinterpret_cast<void*>(binding.hud_weapon.address);
+            if (SafeReadField(hud, offsets.knife_body_component, hud_body) && hud_body != nullptr &&
+                DescribeObservedPawnClassName(hud_body) == L"CBodyComponentBaseAnimGraph" &&
+                SafeReadField(hud_body, offsets.knife_body_scene_node, body_scene) && body_scene != nullptr &&
+                SafeReadField(hud, offsets.base_entity_game_scene_node, hud_scene) && body_scene == hud_scene)
+            {
+                const auto hud_controller = reinterpret_cast<std::uintptr_t>(hud_body) + offsets.knife_body_animation_controller;
+                secondary_verified = ProbeKnifeSecondarySkeleton(binding, hud_controller,
+                    FindExistingKnifeGraphSymbol("active_hud_model_weapon"), layout_verified, reader, secondary_skeleton);
+            }
+        }
+        native_binding_verified = graph_probe.SourceVerified() && secondary_verified;
+    }
+    KnifeResourcePair resource_pair;
+    int world_model_definition = 0, hud_model_definition = 0;
+    const bool resources_read = native_binding_verified && ReadIndependentKnifeResourcePair(
+        binding, entity_list, entities, offsets, resource_pair, world_model_definition, hud_model_definition);
+    const bool owned_target = session.lifecycle.Owns(request, binding) && world_model_definition == request.definition &&
+        hud_model_definition == request.definition;
+    const bool world_pending = session.lifecycle.PreparingWorld(request, binding) &&
+        world_model_definition == request.definition &&
+        (hud_model_definition == observation.source_definition || hud_model_definition == request.definition);
+    const bool resources_ready = resources_read && resource_pair.hud_skeleton_in_graph &&
+        ((resource_pair.blade_skeletons_match &&
+            ((world_model_definition == observation.source_definition && hud_model_definition == observation.source_definition) || owned_target)) ||
+            world_pending);
+    bool native_evidence = false;
+    KnifePairState native_state;
+    KnifeNativeContext native_context;
+    const bool native_read = resources_ready && ReadIndependentKnifeNativePort(binding, observation.source_definition,
+        request.definition, entity_list, entities, offsets, native_evidence, native_state, native_context);
+    observation.ownership_verified = native_read && native_state.attachments_valid;
+    if (native_read != g_hook_state.knife_native_last_read || native_evidence != g_hook_state.knife_native_last_evidence ||
+        binding != g_hook_state.knife_model_last_probe_binding)
+    {
+        std::wstringstream log;
+        log << L"Independent knife native port: read=" << native_read << L", call_evidence=" << native_evidence
+            << L", attachments=" << native_state.attachments_valid << L", skeletons=" << native_state.secondary_matches_hud
+            << L", source_model=" << native_state.world_definition << L", target_model=" << request.definition
+            << L", write_gate=native_callback_scope, legacy_observer_required=0"
+            << L", model_attempts=" << session.lifecycle.Statistics().attempts;
+        nskinzcs2::Logger::Info(log.str());
+        g_hook_state.knife_native_last_read = native_read;
+        g_hook_state.knife_native_last_evidence = native_evidence;
+    }
+    if (resources_ready != g_hook_state.knife_resource_last_ready ||
+        resource_pair != g_hook_state.knife_resource_last_pair || binding != g_hook_state.knife_model_last_probe_binding)
+    {
+        std::wstringstream log;
+        log << L"Independent knife resource pair: xuid=" << request.xuid
+            << L", read=" << resources_read << L", source_pair_ready=" << resources_ready
+            << L", world_model_definition=" << world_model_definition << L", hud_model_definition=" << hud_model_definition
+            << L", world_model=" << FormatPointer(reinterpret_cast<void*>(resource_pair.world_model))
+            << L", hud_model=" << FormatPointer(reinterpret_cast<void*>(resource_pair.hud_model))
+            << L", arms_model=" << FormatPointer(reinterpret_cast<void*>(resource_pair.arms_model))
+            << L", blade_skeletons_match=" << resource_pair.blade_skeletons_match
+            << L", hud_skeleton_in_graph=" << resource_pair.hud_skeleton_in_graph
+            << L", graph_skeleton_count=" << resource_pair.graph_count
+            << L", source_skeleton=" << FormatPointer(reinterpret_cast<void*>(resource_pair.hud_skeleton))
+            << L", owned_target=" << owned_target << L", world_pending=" << world_pending
+            << L", model_attempts=" << session.lifecycle.Statistics().attempts;
+        nskinzcs2::Logger::Info(log.str());
+        g_hook_state.knife_resource_last_ready = resources_ready;
+        g_hook_state.knife_resource_last_pair = resource_pair;
+    }
+    // No model writes occur in this poll. Persist only a candidate; the native
+    // callback revalidates ownership/serials/graph before opening its scoped lease.
+    const std::wstring_view command_line(GetCommandLineW());
+    bool insecure = false;
+    for (auto position = command_line.find(L"-insecure"); position != std::wstring_view::npos;
+        position = command_line.find(L"-insecure", position + 1))
+    {
+        const auto end = position + 9;
+        const auto separator = [](wchar_t c) { return c == L' ' || c == L'\t'; };
+        if ((position == 0 || separator(command_line[position - 1])) &&
+            (end == command_line.size() || separator(command_line[end]))) { insecure = true; break; }
+    }
+    const bool authorized = offline_demo && !observation.seeking && insecure && GetHlaeSource2Module() != nullptr &&
+        GetCurrentThreadId() == g_hook_state.frame_stage_thread_id.load();
+    session.host.Refresh(entity_list, authorized);
+    if (request.Enabled() && native_read && authorized)
+    {
+        const bool installed = g_hook_state.knife_update_probe.Install(GetModuleHandleW(L"client.dll"));
+        if (!g_hook_state.knife_update_install_logged)
+        {
+            g_hook_state.knife_update_install_logged = true;
+            nskinzcs2::Logger::Info(installed
+                ? L"Independent knife lifecycle hooks installed; two-stage world preparation/native HUD handoff requires matching native callbacks."
+                : L"Independent knife update timing probe rejected; native entry/call evidence or hook installation unavailable.");
+        }
+        if (installed)
+        {
+            g_hook_state.knife_update_probe.Listen(g_hook_state.frame_stage_thread_id.load(), OnIndependentKnifeNativeUpdate);
+            g_hook_state.knife_update_probe.Publish(g_hook_state.frame_stage_thread_id.load(),
+                binding.weapon_graph_controller, binding.world.address, binding.graph_instance, native_context.symbols.source_type);
+        }
+    }
+    else { g_hook_state.knife_update_probe.Clear(); }
+    session.lifecycle.Stage(request, authorized && native_read && g_hook_state.knife_update_probe.Installed() ? &native_context : nullptr, now);
+    const bool native_same_model = native_read && observation.source_definition == request.definition &&
+        !session.lifecycle.HasTransaction();
+    if (profile && ResolveKnifeSlotMode(*profile) == KnifeSlotMode::ModelAndFinish &&
+        authorized && native_read && native_state.attachments_valid && native_state.secondary_matches_hud &&
+        world_model_definition == request.definition && hud_model_definition == request.definition &&
+        (owned_target || native_same_model))
+        PollIndependentKnifeFinish(*profile, native_context);
+    const auto timing = g_hook_state.knife_update_probe.Snapshot();
+    if (timing != g_hook_state.knife_update_last_timing && now >= g_hook_state.knife_update_next_log_millis)
+    {
+        std::wstringstream log;
+        log << L"Independent knife update timing: matched=" << timing.matched
+            << L", call1=" << timing.call1 << L", call2=" << timing.call2
+            << L", game_thread=" << timing.same_thread << L", source_verified=" << timing.source_verified
+            << L", rejected=" << timing.rejected << L", boundaries=" << timing.boundaries
+            << L", nested_updates=" << timing.nested_updates;
+        nskinzcs2::Logger::Info(log.str());
+        g_hook_state.knife_update_last_timing = timing;
+        g_hook_state.knife_update_next_log_millis = now + 5000;
+    }
+    const auto phase = session.lifecycle.Phase();
+    const auto statistics = session.lifecycle.Statistics();
+    if (statistics != session.logged && now >= session.next_log)
+    {
+        std::wstringstream log;
+        log << L"Independent knife transaction: attempts=" << statistics.attempts << L", applied=" << statistics.applied
+            << L", world_prepared=" << statistics.world_prepared << L", hud_handoffs=" << statistics.hud_handoffs
+            << L", handoff_retries=" << statistics.handoff_retries
+            << L", restored=" << statistics.restored << L", discarded=" << statistics.discarded
+            << L", faults=" << statistics.faults << L", maintenance=" << statistics.maintenance
+            << L", phase=" << static_cast<int>(phase)
+            << L", callbacks=" << session.callback_count;
+        if (session.clock_frequency.QuadPart > 0 && session.callback_count)
+        {
+            const auto scale = 1000000.0 / static_cast<double>(session.clock_frequency.QuadPart);
+            log << L", callback_avg_us=" << scale * session.callback_ticks / session.callback_count
+                << L", callback_max_us=" << scale * session.max_callback_ticks
+                << L", steady_max_us=" << scale * session.max_steady_ticks;
+        }
+        nskinzcs2::Logger::Info(log.str());
+        session.logged = statistics; session.next_log = now + 5000;
+    }
     if (request != g_hook_state.knife_model_last_probe_request ||
-        binding != g_hook_state.knife_model_last_probe_binding || phase != g_hook_state.knife_model_last_probe_phase)
+        binding != g_hook_state.knife_model_last_probe_binding || phase != g_hook_state.knife_model_last_probe_phase ||
+        graph_probe.status != g_hook_state.knife_graph_last_probe_status ||
+        native_binding_verified != g_hook_state.knife_model_last_native_binding_verified ||
+        observer_verified != g_hook_state.knife_model_last_observer_verified)
     {
         std::wstringstream log;
         log << L"Independent knife model probe: xuid=" << request.xuid << L", target=" << request.definition
             << L", source=" << observation.source_definition << L", active=" << observation.authoritative_active_knife
+            << L", native_binding_verified=" << native_binding_verified << L", legacy_observer_verified=" << observer_verified
+            << L", player_present=" << (player != nullptr) << L", player_xuid=" << (player ? player->xuid : 0)
+            << L", pawn=" << FormatPointer(reinterpret_cast<void*>(binding.pawn.address))
             << L", owner_verified=" << observation.ownership_verified << L", world=" << FormatPointer(reinterpret_cast<void*>(binding.world.address))
             << L", hud=" << FormatPointer(reinterpret_cast<void*>(binding.hud_weapon.address))
             << L", arms=" << FormatPointer(reinterpret_cast<void*>(binding.arms.address))
             << L", graph_controller=" << FormatPointer(reinterpret_cast<void*>(binding.weapon_graph_controller))
             << L", body_controller=" << FormatPointer(reinterpret_cast<void*>(binding.body_animation_controller))
             << L", graph_instance=" << FormatPointer(reinterpret_cast<void*>(binding.graph_instance))
-            << L", model_writes=0, state=" << KnifeModelPhaseText(phase);
+            << L", graph_probe_status=" << static_cast<int>(graph_probe.status)
+            << L", secondary_verified=" << secondary_verified << L", secondary_slot=" << secondary_skeleton.index
+            << L", secondary_hud_handle=" << secondary_skeleton.hud_handle
+            << L", node_index=" << graph_probe.parameter.node_index << L", node_count=" << graph_probe.parameter.node_count
+            << L", model_attempts=" << statistics.attempts << L", state=" << static_cast<int>(phase);
         nskinzcs2::Logger::Info(log.str());
         g_hook_state.knife_model_last_probe_request = request;
         g_hook_state.knife_model_last_probe_binding = binding;
         g_hook_state.knife_model_last_probe_phase = phase;
+        g_hook_state.knife_graph_last_probe_status = graph_probe.status;
+        g_hook_state.knife_model_last_native_binding_verified = native_binding_verified;
+        g_hook_state.knife_model_last_observer_verified = observer_verified;
     }
     if (request.Enabled())
     {
-        UpdateKnifeRuntimeStatusText(L"Independent knife model / 独立刀模链", KnifeModelPhaseText(phase));
+        UpdateKnifeRuntimeStatusText(L"Independent knife model (experimental)",
+            std::wstring(KnifeModelPhaseText(phase)) + L" | " + KnifeGraphProbeStatusText(graph_probe.status));
     }
 }
 
@@ -78044,6 +79817,16 @@ void PollGameThreadStateModern()
     {
         config = g_hook_state.app_state->SnapshotConfig();
         config_revision = g_hook_state.app_state->ConfigRevision();
+    }
+
+    // A panel Update may take an early material-reset/paused path below. Keep
+    // model cancellation independent of that path; unrelated finish edits keep
+    // the same model request and do not force a model reload.
+    {
+        auto& knife = GetIndependentKnifeSession().lifecycle;
+        const auto xuid = knife.Active() ? knife.Active()->binding.xuid : g_hook_state.watched_xuid.load();
+        const auto* profile = nskinzcs2::ConfigStore::FindMatchingKnifeProfile(config, xuid);
+        knife.Request(profile ? nskinzcs2::runtime::BuildKnifeModelRequest(*profile) : nskinzcs2::runtime::KnifeModelRequest {});
     }
 
     int configured_enabled_profiles = 0;
@@ -78132,6 +79915,7 @@ void PollGameThreadStateModern()
         ClientSchemaOffsets offsets;
         if (TryResolveSchemaOffsets(GetModuleHandleW(L"schemasystem.dll"), g_hook_state.schema_system_interface, offsets))
         {
+            TryResolveEconItemAttributeNativeAppend(GetModuleHandleW(L"client.dll"), offsets);
             g_hook_state.schema_offsets = offsets;
             g_hook_state.schema_ready.store(true);
             if (!g_hook_state.schema_logged.exchange(true))
@@ -78159,6 +79943,9 @@ void PollGameThreadStateModern()
                     << L", econ_attribute_append_ready="
                     << (offsets.attribute_list_attributes_operation != nullptr &&
                         offsets.attribute_list_attributes_element_size == offsets.econ_item_attribute_size ? 1 : 0)
+                    << L", econ_attribute_native_append="
+                    << FormatPointer(reinterpret_cast<void*>(
+                           offsets.attribute_list_attributes_native_append))
                     << L", composite_materials_offset=0x" << std::hex << std::uppercase
                     << static_cast<std::uint64_t>(offsets.item_view_composite_materials)
                     << L", composite_materials_operation="
@@ -78203,7 +79990,8 @@ void PollGameThreadStateModern()
             {
                 nskinzcs2::Logger::Info(
                     L"Bound client entity system at " + FormatPointer(bindings.entity_list_storage) +
-                    L" with GetEntityFromIndex=" + FormatPointer(reinterpret_cast<void*>(bindings.get_entity_from_index)) + L".");
+                    L" with GetEntityFromIndex=" + FormatPointer(reinterpret_cast<void*>(bindings.get_entity_from_index)) +
+                    L", direct_chunk_layout=" + (bindings.direct_chunk_layout_verified ? L"verified." : L"fallback."));
             }
         }
         else if (issue.empty())
@@ -78449,8 +80237,10 @@ void PollGameThreadStateModern()
         }
     }
 
+    std::vector<void*> entity_cache;
     std::wstring ceiling_issue;
-    const auto highest_live_entity_index = ResolveDynamicEntityScanUpperBound(entity_list, ceiling_issue);
+    const auto highest_live_entity_index = ResolveDynamicEntityScanUpperBound(
+        entity_list, ceiling_issue, &entity_cache);
     if (highest_live_entity_index < 0)
     {
         trace.Step(L"Live entity ceiling scan failed.");
@@ -78467,7 +80257,6 @@ void PollGameThreadStateModern()
         trace.Step(stream.str());
     }
 
-    std::vector<void*> entity_cache(static_cast<std::size_t>(highest_live_entity_index + 1), nullptr);
     std::unordered_map<int, std::uint64_t> pawn_xuids;
     std::unordered_map<int, std::uint32_t> pawn_handles;
     std::unordered_map<int, int> pawn_controller_indices;
@@ -78501,20 +80290,7 @@ void PollGameThreadStateModern()
     std::unordered_set<std::uint64_t> glove_applied_xuids;
     UpdateKnifeRuntimeStatusText({}, {});
 
-    for (int entity_index = 0; entity_index <= highest_live_entity_index; ++entity_index)
-    {
-        void* entity = nullptr;
-        if (!TryGetEntityFromIndex(entity_list, entity_index, entity))
-        {
-            trace.Step(L"Entity cache population failed while calling GetEntityFromIndex.");
-            UpdateRuntimeText(std::move(level_name), L"GetEntityFromIndex raised an exception while scanning client entities.");
-            return;
-        }
-
-        entity_cache[static_cast<std::size_t>(entity_index)] = entity;
-    }
-
-    trace.Step(L"Entity cache population completed.");
+    trace.Step(L"Entity cache populated during the single-pass live-ceiling scan.");
 
     for (int entity_index = 0; entity_index <= highest_live_entity_index; ++entity_index)
     {
@@ -79141,6 +80917,11 @@ void PollGameThreadStateModern()
         ResetDemoKeychainControllerState(false);
     }
 
+    // A disabled/changed model request may have been deferred while its knife
+    // was active.  Retire the pre-arm snapshot as soon as the world carrier is
+    // holstered, before a new profile can arm the next native equip.
+    RetireIndependentKnifePrearmIfUnwanted(config, g_hook_state.schema_offsets);
+
     if (has_weapon_profile)
     {
         for (auto& [xuid, player_binding] : runtime_entities.players_by_xuid)
@@ -79232,6 +81013,34 @@ void PollGameThreadStateModern()
             if (knife_profile != nullptr)
             {
                 ++matched_profiles;
+
+                if (nskinzcs2::runtime::ResolveKnifeSlotMode(*knife_profile) == nskinzcs2::runtime::KnifeSlotMode::ModelAndFinish)
+                {
+                    // Pre-arm only a holstered authoritative world carrier.
+                    // The active source pair remains exclusively owned by the
+                    // native model transaction below.  With the target item
+                    // definition and finish attributes already present before
+                    // equip, Source 2 creates the first target deploy and HUD
+                    // slot natively instead of replacing them mid-animation.
+                    const auto prearm = TryPrearmHolsteredIndependentKnife(
+                        *knife_profile,
+                        player_binding,
+                        entity_list,
+                        entity_cache,
+                        entity_index,
+                        entity,
+                        weapon_item_view,
+                        current_definition_index,
+                        g_hook_state.schema_offsets);
+                    if (prearm == IndependentKnifePrearmResult::Applied ||
+                        prearm == IndependentKnifePrearmResult::Maintained)
+                    {
+                        weapon_binding.world_definition_index = knife_profile->model_definition;
+                        applied_weapon_entities.insert(entity_index);
+                        ++applied_weapons;
+                    }
+                    continue;
+                }
 
                 knife_request = nskinzcs2::runtime::BuildKnifeFinishRequest(*knife_profile);
                 if (knife_request.mode == nskinzcs2::runtime::KnifeSlotMode::FinishOnly)
@@ -80546,7 +82355,7 @@ void PollGameThreadStateModern()
         const bool observer_verified = observer_resolution.observer_in_eye_valid &&
             observer_resolution.target_xuid == watched_xuid && player != nullptr &&
             observer_resolution.target_pawn_entity == player->pawn_entity;
-        PollIndependentKnifeModel(profile, player, entity_cache, demo_playing, observer_verified, now);
+        PollIndependentKnifeModel(profile, player, entity_list, entity_cache, demo_playing, observer_verified, now);
     }
 
     if (has_glove_profile)
@@ -82979,6 +84788,144 @@ bool nskinzcs2::runtime::ProbeWeaponPaintCompatibilityForTests()
     return ValidateStandardWeaponPaintForApply(profile, 5030);
 }
 
+bool nskinzcs2::runtime::ProbeIndependentKnifeHudBindingForTests()
+{
+    struct RttiFixture
+    {
+        MsvcRttiCompleteObjectLocator locator;
+        struct { void* unused[2] {}; char name[96] {}; } type;
+        void* table[2] {};
+        void Initialize(const char* name)
+        {
+            const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+            locator.signature = 1;
+            locator.type_descriptor_rva = static_cast<std::int32_t>(reinterpret_cast<std::uintptr_t>(&type) - base);
+            strcpy_s(type.name, name);
+            table[0] = &locator;
+        }
+    };
+    static RttiFixture hud_type;
+    hud_type.Initialize(".?AVC_CS2HudModelWeapon@@");
+    using Object = std::array<std::uint8_t, 128>;
+    Object arms {}, hud {}, other_hud {}, root {}, scene {}, other_scene {};
+    Object arms_id {}, hud_id {};
+    ClientSchemaOffsets offsets {};
+    offsets.knife_entity_identity = 16;
+    offsets.knife_identity_name_index = 0x14;
+    offsets.knife_creation_tick = 64;
+    offsets.base_owner_entity = 32;
+    offsets.base_entity_game_scene_node = 56;
+    offsets.game_scene_node_child = 8;
+    offsets.game_scene_node_next_sibling = 16;
+    offsets.game_scene_node_owner = 24;
+    offsets.knife_scene_node_parent = 32;
+    constexpr std::uint32_t weapon = 0x10002, arms_handle = 0xE966429Au, hud_handle = 0xE966429Bu;
+    const auto identity = [&](Object& object, Object& id, const std::uint32_t handle)
+    {
+        SafeWriteField(object.data(), 16, id.data());
+        SafeWriteValue(id.data(), object.data());
+        SafeWriteField(id.data(), 0x10, handle);
+        SafeWriteField(object.data(), 64, -1); // Native client-only tick sentinel is valid when read.
+    };
+    identity(arms, arms_id, arms_handle);
+    identity(hud, hud_id, hud_handle);
+    SafeWriteField(arms.data(), 56, root.data());
+    SafeWriteField(root.data(), 8, scene.data());
+    SafeWriteField(scene.data(), 32, root.data());
+    SafeWriteField(other_scene.data(), 32, root.data());
+    SafeWriteValue(hud.data(), &hud_type.table[1]);
+    SafeWriteValue(other_hud.data(), &hud_type.table[1]);
+    SafeWriteField(hud.data(), 32, weapon);
+    SafeWriteField(other_hud.data(), 32, weapon);
+    SafeWriteField(hud.data(), 56, scene.data());
+    SafeWriteField(other_hud.data(), 56, other_scene.data());
+    SafeWriteField(scene.data(), 24, hud.data());
+    SafeWriteField(other_scene.data(), 24, other_hud.data());
+    std::vector<void*> cache(64, nullptr);
+    struct Lookup
+    {
+        void* arms;
+        void* hud;
+        void* hud_identity;
+        bool missing = false, reuse_during_read = false;
+        int calls = 0;
+    } lookup {arms.data(), hud.data(), hud_id.data()};
+    struct RestoreGetter
+    {
+        GetEntityFromIndexFn previous;
+        ~RestoreGetter() { g_hook_state.entity_system.get_entity_from_index = previous; }
+    } restore {g_hook_state.entity_system.get_entity_from_index};
+    g_hook_state.entity_system.get_entity_from_index = [](void* context, int index) -> void*
+    {
+        auto& data = *static_cast<Lookup*>(context);
+        ++data.calls;
+        if (data.missing) { return nullptr; }
+        if (index == 17050) { return data.arms; }
+        if (index == 17051)
+        {
+            if (data.reuse_during_read) { SafeWriteField(data.hud_identity, 0x10, std::uint32_t(0xE966C29Bu)); }
+            return data.hud;
+        }
+        return nullptr;
+    };
+    const auto find = [&]() { return FindIndependentKnifeHudWeapon(arms.data(), weapon, offsets); };
+    const auto bind = [&]()
+    {
+        KnifeModelEntityIdentity a, h;
+        return ResolveKnifeModelEntityHandle(&lookup, cache, arms_handle, offsets) == arms.data() &&
+            find() == hud.data() && ReadKnifeModelEntityIdentity(arms.data(), cache, offsets, a, &lookup) &&
+            ReadKnifeModelEntityIdentity(hud.data(), cache, offsets, h, &lookup) &&
+            a.handle == arms_handle && h.handle == hud_handle && a.creation_tick == -1 && h.creation_tick == -1;
+    };
+    const auto before_arms = arms, before_hud = hud, before_scene = scene;
+    if (!bind() || cache.size() != 64 || lookup.calls != 3 ||
+        arms != before_arms || hud != before_hud || scene != before_scene) { return false; }
+    lookup.missing = true;
+    if (bind()) { return false; }
+    lookup.missing = false;
+    if (ResolveKnifeModelEntityHandle(&lookup, cache, arms_handle + 0x8000u, offsets) != nullptr) { return false; }
+    lookup.reuse_during_read = true;
+    if (bind()) { return false; }
+    lookup.reuse_during_read = false;
+    SafeWriteField(hud_id.data(), 0x10, hud_handle);
+    SafeWriteField(hud.data(), 64, std::numeric_limits<int>::min());
+    if (bind()) { return false; }
+    SafeWriteField(hud.data(), 64, -1);
+    SafeWriteField(hud.data(), 32, weapon + 0x8000u);
+    if (find() != nullptr) { return false; }
+    SafeWriteField(hud.data(), 32, weapon);
+    SafeWriteField(scene.data(), 32, other_scene.data());
+    if (find() != nullptr) { return false; }
+    SafeWriteField(scene.data(), 32, root.data());
+    SafeWriteField(scene.data(), 16, other_scene.data());
+    if (find() != nullptr) { return false; } // Two matching HUD candidates are ambiguous.
+    SafeWriteField(other_hud.data(), 32, weapon + 1);
+    if (find() != hud.data()) { return false; } // Unrelated holstered HUD is ignored.
+    SafeWriteField(scene.data(), 16, static_cast<void*>(nullptr));
+    SafeWriteField(scene.data(), 8, root.data());
+    if (find() != nullptr) { return false; }
+    SafeWriteField(scene.data(), 8, static_cast<void*>(nullptr));
+    SafeWriteField(scene.data(), 16, scene.data());
+    if (find() != nullptr) { return false; }
+    SafeWriteField(scene.data(), 16, static_cast<void*>(nullptr));
+    SafeWriteField(hud.data(), 56, other_scene.data());
+    if (find() != nullptr) { return false; }
+    SafeWriteField(hud.data(), 56, scene.data());
+    SafeWriteField(scene.data(), 16, reinterpret_cast<void*>(1));
+    if (find() != nullptr) { return false; }
+    SafeWriteField(scene.data(), 16, static_cast<void*>(nullptr));
+    std::array<Object, 65> excessive {};
+    SafeWriteField(scene.data(), 16, excessive[0].data());
+    for (std::size_t i = 0; i < excessive.size(); ++i)
+    {
+        SafeWriteField(excessive[i].data(), 32, root.data());
+        if (i + 1 < excessive.size()) { SafeWriteField(excessive[i].data(), 16, excessive[i + 1].data()); }
+    }
+    if (find() != nullptr) { return false; } // A truncated walk cannot prove uniqueness.
+    SafeWriteField(scene.data(), 16, static_cast<void*>(nullptr));
+    return bind();
+}
+
 bool nskinzcs2::runtime::ProbeStandardWeaponHudDiscoveryForTests()
 {
     // Exercise the real bounded walker/RTTI/handle readers in this test process.
@@ -83416,6 +85363,7 @@ namespace
 {
 std::vector<RefreshEconItemAttribute> g_stock_probe_nodes;
 int g_stock_probe_appends = 0, g_stock_probe_erases = 0, g_stock_probe_mutations = 0;
+int g_stock_probe_native_appends = 0;
 int g_stock_probe_fail_mutation = -1, g_stock_probe_generates = 0, g_stock_probe_clears = 0;
 bool g_stock_probe_generate_material = true;
 std::uintptr_t __fastcall StockAttributeProbeOperation(std::uint32_t operation,
@@ -83447,6 +85395,21 @@ std::uintptr_t __fastcall StockAttributeProbeOperation(std::uint32_t operation,
     else return 0;
     vector = {g_stock_probe_nodes.size(), reinterpret_cast<std::uint8_t*>(g_stock_probe_nodes.data())};
     return 0;
+}
+std::int32_t __fastcall StockAttributeNativeAppend(void* vector_address, const void* source)
+{
+    if (vector_address == nullptr || source == nullptr) return -1;
+    RefreshEconItemAttribute node {};
+    std::memcpy(&node, source, sizeof(node));
+    node.vtable = 0x11223344;
+    node.owner = 0x55667788;
+    node.refundable_currency = 91;
+    const auto index = static_cast<std::int32_t>(g_stock_probe_nodes.size());
+    g_stock_probe_nodes.push_back(node);
+    *static_cast<NetworkVectorView*>(vector_address) = {
+        g_stock_probe_nodes.size(), reinterpret_cast<std::uint8_t*>(g_stock_probe_nodes.data())};
+    ++g_stock_probe_native_appends;
+    return index;
 }
 void __fastcall StockProbeClear(void* owner, bool clear)
 {
@@ -83520,6 +85483,7 @@ bool nskinzcs2::runtime::ProbeStandardWeaponStockFinishForTests()
         ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::AbandonInstalled);
         g_stock_probe_nodes.clear();
         g_stock_probe_appends = g_stock_probe_erases = g_stock_probe_mutations = 0;
+        g_stock_probe_native_appends = 0;
         g_stock_probe_generates = g_stock_probe_clears = 0;
         g_stock_probe_fail_mutation = -1;
         g_stock_probe_generate_material = true;
@@ -83595,6 +85559,66 @@ bool nskinzcs2::runtime::ProbeStandardWeaponStockFinishForTests()
     invalid_offsets.attribute_list_attributes_operation = nullptr;
     if (EnsureStandardWeaponFinishAttributes(entity.data(), item, invalid_offsets, boom) || g_stock_probe_appends) return false;
     if (!EnsureStandardWeaponFinishAttributes(entity.data(), item, invalid_offsets, {{6,0}}) || g_stock_probe_appends) return false;
+    if (!initialize()) return false;
+    auto native_offsets = offsets;
+    native_offsets.attribute_list_attributes_operation = nullptr;
+    native_offsets.attribute_list_attributes_element_size = 0;
+    native_offsets.attribute_list_attributes_native_append = StockAttributeNativeAppend;
+    std::size_t native_changed = 0;
+    if (!EnsureStandardWeaponFinishAttributes(entity.data(), item, native_offsets, boom) ||
+        !SynchronizeStandardWeaponAttributes(item, native_offsets, boom, native_changed) ||
+        !VerifyAttributeValues(item, native_offsets, boom) ||
+        g_stock_probe_native_appends != 3 || g_stock_probe_nodes.size() != 3) return false;
+    auto native_changed_values = boom;
+    native_changed_values[0].second = 819;
+    native_changed_values[1].second = 907;
+    if (!SynchronizeStandardWeaponAttributes(
+            item, native_offsets, native_changed_values, native_changed) ||
+        native_changed != 2 || !VerifyAttributeValues(item, native_offsets, native_changed_values)) return false;
+    UpdateCreatedStandardWeaponAttributeValues(item, native_changed_values);
+    ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::RestoreOriginal);
+    if (g_stock_probe_nodes.size() != 3 ||
+        std::any_of(g_stock_probe_nodes.begin(), g_stock_probe_nodes.end(), [](const auto& node)
+            { return node.definition_index != 0 || node.value != 0 || node.initial_value != 0; })) return false;
+    // Repeated Update must reuse the neutral engine-owned tail rather than
+    // append three more records on every editor publish.
+    native_changed = 0;
+    if (!EnsureStandardWeaponFinishAttributes(entity.data(), item, native_offsets, boom) ||
+        !SynchronizeStandardWeaponAttributes(item, native_offsets, boom, native_changed) ||
+        !VerifyAttributeValues(item, native_offsets, boom) ||
+        g_stock_probe_native_appends != 3 || g_stock_probe_nodes.size() != 3) return false;
+    UpdateCreatedStandardWeaponAttributeValues(item, boom);
+    ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::RestoreOriginal);
+    if (g_stock_probe_nodes.size() != 3 ||
+        std::any_of(g_stock_probe_nodes.begin(), g_stock_probe_nodes.end(), [](const auto& node)
+            { return node.definition_index != 0 || node.value != 0 || node.initial_value != 0; })) return false;
+    // Exercise the same independent knife synchronization used after model
+    // handoff, with empty CT/T source attributes and subsequent paint changes.
+    for (const auto source : std::array<std::uint16_t, 2> {42, 59})
+    {
+        if (!initialize()) return false;
+        SafeWriteField(item, 0x10, source);
+        model::CosmeticProfile knife;
+        knife.base_item = 42; knife.paint_kit = 568; knife.seed = 321; knife.wear = 0.17f;
+        if (!SynchronizeIndependentKnifeFinishAttributes(entity.data(), item, offsets, knife) ||
+            g_stock_probe_appends != 1 || g_stock_probe_nodes.size() != 3) return false;
+        for (int i = 0; i < 1000; ++i)
+            if (!SynchronizeIndependentKnifeFinishAttributes(entity.data(), item, offsets, knife)) return false;
+        if (g_stock_probe_appends != 1 || g_stock_probe_mutations != 3) return false;
+        knife.paint_kit = 569; knife.seed = 907; knife.wear = 0.03f;
+        if (!SynchronizeIndependentKnifeFinishAttributes(entity.data(), item, offsets, knife) || g_stock_probe_appends != 1) return false;
+        knife.paint_kit = 0; knife.explicit_vanilla_finish = true;
+        float paint = -1;
+        std::uint16_t after_source = 0;
+        if (!SynchronizeIndependentKnifeFinishAttributes(entity.data(), item, offsets, knife) ||
+            !TryReadAttributeValue(item, offsets, kAttributePaintKit, paint) || paint != 0 ||
+            !SafeReadField(item, 0x10, after_source) || after_source != source) return false;
+        ReleaseStandardWeaponAttributeWrites(AttributeBindingReleaseMode::RestoreOriginal);
+        if (!g_stock_probe_nodes.empty() || g_stock_probe_erases != 1) return false;
+        // Stock -> target stock creates no synthetic attribute or material.
+        if (!initialize() || !SynchronizeIndependentKnifeFinishAttributes(entity.data(), item, offsets, knife) ||
+            g_stock_probe_appends != 0) return false;
+    }
     return true;
 }
 
@@ -83608,9 +85632,19 @@ bool nskinzcs2::runtime::ProbeStandardWeaponMaterialCallsForTests(const std::fil
     offsets.attribute_container_item = 0x50;
     offsets.item_view_attribute_list = 0x208;
     offsets.attribute_list_attributes = 8;
+    offsets.attribute_list_attributes_schema_tail_span = 0x68;
+    offsets.econ_item_attribute_size = 0x48;
+    offsets.econ_item_attribute_definition_index = 0x30;
+    offsets.econ_item_attribute_value = 0x34;
+    offsets.econ_item_attribute_initial_value = 0x38;
     WeaponSkinRefreshBinding binding;
+    EntitySystemBindings entity_bindings;
     std::wstring issue;
-    const bool verified = TryResolveWeaponSkinRefreshBinding(module, offsets, binding, issue) &&
+    const bool verified = TryResolveEconItemAttributeNativeAppend(module, offsets) &&
+        offsets.attribute_list_attributes_native_append != nullptr &&
+        TryResolveEntitySystemBindings(module, entity_bindings) &&
+        entity_bindings.direct_chunk_layout_verified &&
+        TryResolveWeaponSkinRefreshBinding(module, offsets, binding, issue) &&
         binding.standard_clear_materials != nullptr && binding.standard_generate_materials != nullptr &&
         binding.standard_material_owner_offset == 0x608;
     FreeLibrary(module);

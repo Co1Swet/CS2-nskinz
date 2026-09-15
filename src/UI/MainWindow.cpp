@@ -1,5 +1,6 @@
 #include "UI/MainWindow.hpp"
 
+#include "Core/BuildConfig.hpp"
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
@@ -52,7 +53,7 @@ using nskinzcs2::model::kMinimumCosmeticWear;
 using nskinzcs2::ui::UiTextId;
 
 constexpr wchar_t kWindowClassName[] = L"nSkinzCS2.ToolWindow";
-constexpr wchar_t kWindowTitle[] = L"nSkinzCS2";
+constexpr const wchar_t* kWindowTitle = nskinzcs2::build::kDisplayName.data();
 // Local regression automation can request the same runtime rebuild as Update
 // without stealing foreground input from another full-screen application.
 // This does not mutate the staged editor document or change the public UI.

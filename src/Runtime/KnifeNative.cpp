@@ -8,11 +8,11 @@ namespace nskinzcs2::runtime
 {
 const std::array<KnifeResourceEvidenceWindow, 7>& KnifeNativeEvidenceWindows() noexcept
 {
-    // Exact installed 2000899 instruction windows, including the native model
+    // Exact installed 2000908 instruction windows, including the native model
     // notification and recollection's THREE-argument skeleton getter call.
     static constexpr std::uint8_t set_model[] {
         0x40,0x53,0x48,0x83,0xEC,0x20,0x48,0x8B,0xD9,0x4C,0x8B,0xC2,
-        0x48,0x8B,0x0D,0xDD,0xCC,0xA8,0x01,0x48,0x8D,0x54,0x24,0x40,
+        0x48,0x8B,0x0D,0xD5,0xE9,0xA8,0x01,0x48,0x8D,0x54,0x24,0x40,
         0x48,0x8B,0x01,0xFF,0x50,0x60,0x48,0x8B,0x54,0x24,0x40,
         0x48,0x8B,0xCB,0xE8,0x15,0,0,0,0x48,0x83,0xC4,0x20,0x5B,0xC3 };
     static constexpr std::uint8_t notification[] {
@@ -22,17 +22,17 @@ const std::array<KnifeResourceEvidenceWindow, 7>& KnifeNativeEvidenceWindows() n
         0x48,0x89,0x4C,0x24,0x08,0x55,0x53,0x48,0x8B,0xEC,0x48,0x83,0xEC,0x78,
         0x48,0x83,0xB9,0x50,0x04,0,0,0,0x48,0x8B,0xD9,0x0F,0x84,0xC6,0x02,0,0 };
     static constexpr std::uint8_t skeleton_call[] {
-        0x45,0x8B,0xC6,0x48,0x8D,0x55,0x20,0x49,0x8B,0xCC,0xE8,0xF1,0x17,0xD5,0 };
+        0x45,0x8B,0xC6,0x48,0x8D,0x55,0x20,0x49,0x8B,0xCC,0xE8,0x81,0x1B,0xD5,0 };
     static constexpr std::uint8_t graph_call[] {
-        0x48,0x8B,0x8B,0x50,0x04,0,0,0x48,0x8D,0x55,0xA8,0xE8,0x75,0xE5,0x95,0 };
+        0x48,0x8B,0x8B,0x50,0x04,0,0,0x48,0x8D,0x55,0xA8,0xE8,0x05,0xE9,0x95,0 };
     static constexpr std::uint8_t world_notify[] {
         0x40,0x53,0x48,0x83,0xEC,0x20,0x48,0x8B,0xD9,0xE8,0xF2,0x3A,0x13,0,
         0x8B,0x93,0x60,0x17,0,0 };
     static constexpr std::uint8_t remove_hud[] {0x48,0x83,0xC4,0x20,0x5B,0xE9,0x1F,0xBE,0x1E,0};
     static const std::array<KnifeResourceEvidenceWindow, 7> windows {{
-        {kKnifeSetModelRva, set_model}, {0x934E48, notification},
-        {kKnifeRecollectRva, recollect}, {0x9041E0, skeleton_call}, {0x90431B, graph_call},
-        {0x7F6A70, world_notify}, {0x7F6AD7, remove_hud} }};
+        {kKnifeSetModelRva, set_model}, {0x939AE8, notification},
+        {kKnifeRecollectRva, recollect}, {0x908E80, skeleton_call}, {0x908FBB, graph_call},
+        {0x7FB710, world_notify}, {0x7FB777, remove_hud} }};
     return windows;
 }
 
@@ -84,7 +84,7 @@ bool KnifeNativePairAccess::ContextValid() const noexcept
     const std::array fields {context_.resources.world, context_.resources.hud, context_.resources.arms};
     for (std::size_t i = 0; i < fields.size(); ++i)
     {
-        // Schema 2000899: hModel +0xA0, ModelName +0xA8. Host validates that
+        // Schema 2000905: hModel +0xA0, ModelName +0xA8. Host validates that
         // each captured field still belongs to its entity's current scene node.
         if (!fields[i] || fields[i] > std::numeric_limits<std::uintptr_t>::max() - 16 ||
             context_.model_names[i] != fields[i] + 8) return false;
@@ -229,7 +229,8 @@ std::uintptr_t KnifeNativePairAccess::ExistingAnimationType(const KnifeModelAsse
 {
     const auto* canonical = FindKnifeModelAsset(asset.definition);
     if (!canonical || asset.model != canonical->model || asset.skeleton != canonical->skeleton ||
-        asset.animation_class != canonical->animation_class) return 0;
+        asset.animation_class != canonical->animation_class ||
+        asset.graph_animation_class != canonical->graph_animation_class) return 0;
     if (asset.definition == context_.source_definition) return context_.symbols.source_type;
     if (asset.definition == context_.target_definition) return context_.symbols.target_type;
     return 0;
@@ -256,6 +257,49 @@ bool KnifeNativePairAccess::CompareItemDefinition(const KnifeModelBinding& bindi
         item_definition_touched_ = true;
     else if (desired == context_.source_definition)
         item_definition_touched_ = false;
+    return true;
+}
+
+bool KnifeNativePairAccess::AdoptPreparedWorld(const KnifeModelBinding& binding,
+    const KnifeModelAsset& source, const KnifeModelAsset& target,
+    const KnifePairState& current) noexcept
+{
+    const auto* canonical_source = FindKnifeModelAsset(source.definition);
+    const auto* canonical_target = FindKnifeModelAsset(target.definition);
+    KnifePairState confirmed;
+    if (!context_.world_prearmed || source.definition == target.definition ||
+        canonical_source == nullptr || canonical_target == nullptr ||
+        canonical_source->model != source.model || canonical_source->skeleton != source.skeleton ||
+        canonical_source->animation_class != source.animation_class ||
+        canonical_source->graph_animation_class != source.graph_animation_class ||
+        canonical_target->model != target.model || canonical_target->skeleton != target.skeleton ||
+        canonical_target->animation_class != target.animation_class ||
+        canonical_target->graph_animation_class != target.graph_animation_class ||
+        context_.source_definition != source.definition ||
+        context_.target_definition != target.definition ||
+        !SafePoint(binding) || !EvidenceVerified() || !Read(binding, confirmed) ||
+        confirmed != current || current.world_definition != target.definition ||
+        current.item_definition != target.definition ||
+        (current.hud_definition != source.definition && current.hud_definition != target.definition) ||
+        (current.animation_type != context_.symbols.source_type &&
+         current.animation_type != context_.symbols.target_type) ||
+        !current.world_model || !current.hud_model || !current.attachments_valid ||
+        !host_.WorldBindingAlive(context_) ||
+        host_.WorldOwnership(context_) != KnifeWorldOwnership::Owned)
+        return false;
+
+    // No native call occurs here. Transfer the already-written target world
+    // and item fields into this exact transaction's restore ledger. If the
+    // successor HUD was natively created as target, it belongs to the same
+    // ledger too; otherwise FinishHud will take ownership when it changes it.
+    touched_[0] = true;
+    owned_models_[0] = current.world_model;
+    item_definition_touched_ = true;
+    if (current.hud_definition == target.definition)
+    {
+        touched_[1] = true;
+        owned_models_[1] = current.hud_model;
+    }
     return true;
 }
 
@@ -315,7 +359,8 @@ bool KnifeNativePairAccess::CompareAnimationType(const KnifeModelBinding& bindin
 
 KnifeRetireResult KnifeNativePairAccess::RetireDetached() noexcept
 {
-    if (!touched_[0] && !touched_[1] && !item_definition_touched_ && !retire_failed_ && !retire_models_changed_)
+    if (!touched_[0] && !touched_[1] && !item_definition_touched_ &&
+        !retire_failed_ && !retire_models_changed_)
         return retire_discarded_ ? KnifeRetireResult::Discarded : KnifeRetireResult::Restored;
     const auto epoch = host_.SceneEpoch();
     if (!epoch) return KnifeRetireResult::Waiting;
@@ -328,6 +373,25 @@ KnifeRetireResult KnifeNativePairAccess::RetireDetached() noexcept
     if (retire_failed_) return KnifeRetireResult::Failed;
     if (!host_.AtRetirementPoint()) return KnifeRetireResult::Waiting;
     if (!EvidenceVerified()) { retire_failed_ = true; return KnifeRetireResult::Failed; }
+    if (item_definition_touched_ || touched_[0])
+    {
+        const auto ownership = host_.WorldOwnership(context_);
+        if (ownership == KnifeWorldOwnership::Unreadable)
+            return KnifeRetireResult::Waiting;
+        if (ownership == KnifeWorldOwnership::Transferred)
+        {
+            // The same world entity can survive .drop and immediately belong
+            // to another player. Its target definition/model are no longer
+            // ours to restore. Keep HUD cleanup independent, but permanently
+            // discard every write-capable world ledger entry.
+            item_definition_touched_ = false;
+            item_definition_retire_attempted_ = false;
+            touched_[0] = false;
+            owned_models_[0] = 0;
+            retire_attempted_[0] = false;
+            retire_discarded_ = true;
+        }
+    }
     if (item_definition_touched_)
     {
         const auto presence = host_.BladePresence(context_, KnifeBladeRole::World);
@@ -346,12 +410,23 @@ KnifeRetireResult KnifeNativePairAccess::RetireDetached() noexcept
                 retire_failed_ = true;
             else
             {
-                item_definition_retire_attempted_ = true;
-                if (!host_.CompareExchangeWorldItemDefinition(context_, context_.target_definition,
-                        context_.source_definition) ||
-                    !host_.ReadWorldItemDefinition(context_, definition) || definition != context_.source_definition)
-                    retire_failed_ = true;
-                else item_definition_touched_ = false;
+                const auto ownership = host_.WorldOwnership(context_);
+                if (ownership == KnifeWorldOwnership::Unreadable)
+                    return KnifeRetireResult::Waiting;
+                if (ownership == KnifeWorldOwnership::Transferred)
+                {
+                    item_definition_touched_ = false;
+                    retire_discarded_ = true;
+                }
+                else
+                {
+                    item_definition_retire_attempted_ = true;
+                    if (!host_.CompareExchangeWorldItemDefinition(context_, context_.target_definition,
+                            context_.source_definition) ||
+                        !host_.ReadWorldItemDefinition(context_, definition) || definition != context_.source_definition)
+                        retire_failed_ = true;
+                    else item_definition_touched_ = false;
+                }
             }
         }
     }
@@ -371,6 +446,19 @@ KnifeRetireResult KnifeNativePairAccess::RetireDetached() noexcept
         { touched_[i] = false; retire_discarded_ = true; continue; } // Respect a competing writer.
         if (!owned_models_[i] || retire_attempted_[i]) { retire_failed_ = true; continue; }
         if (!host_.AtRetirementPoint() || host_.SceneEpoch() != epoch) return KnifeRetireResult::Waiting;
+        if (i == 0)
+        {
+            const auto ownership = host_.WorldOwnership(context_);
+            if (ownership == KnifeWorldOwnership::Unreadable)
+                return KnifeRetireResult::Waiting;
+            if (ownership == KnifeWorldOwnership::Transferred)
+            {
+                touched_[i] = false;
+                owned_models_[i] = 0;
+                retire_discarded_ = true;
+                continue;
+            }
+        }
         if (host_.BladePresence(context_, role) != KnifeBladePresence::Live)
         { retire_failed_ = true; continue; }
         retire_attempted_[i] = true;

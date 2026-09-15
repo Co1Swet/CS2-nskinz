@@ -280,7 +280,9 @@ struct StandardWeaponAttributeProbeResult
     std::size_t changed_slots = 0;
 };
 bool ProbeStandardWeaponStockFinishForTests();
+bool ProbeGloveVisualRefreshEvidenceForTests(const std::filesystem::path& client_path = {});
 bool ProbeStandardWeaponMaterialCallsForTests(const std::filesystem::path& client_path);
+bool ProbeDirectEntityCacheScanForTests();
 StandardWeaponAttributeProbeResult ProbeStandardWeaponAttributeSynchronizationForTests(
     const std::vector<std::pair<std::uint16_t, float>>& static_attributes,
     const std::vector<std::pair<std::uint16_t, float>>& dynamic_attributes,

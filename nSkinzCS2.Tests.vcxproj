@@ -97,10 +97,12 @@
     <ClInclude Include="src\Cs2\Runtime.hpp" />
     <ClInclude Include="src\Core\Log.hpp" />
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
+    <ClInclude Include="src\Runtime\GloveVisualRefresh.hpp" />
     <ClInclude Include="src\Runtime\KnifeAnimation.hpp" />
     <ClInclude Include="src\Runtime\KnifeModel.hpp" />
     <ClInclude Include="src\Runtime\KnifeGraph.hpp" />
     <ClInclude Include="src\Runtime\KnifeResources.hpp" />
+    <ClInclude Include="src\Runtime\KnifeSerialization.hpp" />
     <ClInclude Include="src\Runtime\KnifeNative.hpp" />
     <ClInclude Include="src\Runtime\KnifeLifecycle.hpp" />
     <ClInclude Include="src\Runtime\KnifeFinish.hpp" />
@@ -121,10 +123,12 @@
     <ClCompile Include="src\Cs2\GlobalResourceSwapper.cpp" />
     <ClCompile Include="src\Cs2\Runtime.cpp" />
     <ClCompile Include="src\Runtime\GloveAppearance.cpp" />
+    <ClCompile Include="src\Runtime\GloveVisualRefresh.cpp" />
     <ClCompile Include="src\Runtime\KnifeAnimation.cpp" />
     <ClCompile Include="src\Runtime\KnifeModel.cpp" />
     <ClCompile Include="src\Runtime\KnifeGraph.cpp" />
     <ClCompile Include="src\Runtime\KnifeResources.cpp" />
+    <ClCompile Include="src\Runtime\KnifeSerialization.cpp" />
     <ClCompile Include="src\Runtime\KnifeNative.cpp" />
     <ClCompile Include="src\Runtime\KnifeLifecycle.cpp" />
     <ClCompile Include="src\Runtime\KnifePair.cpp" />

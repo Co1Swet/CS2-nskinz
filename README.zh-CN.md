@@ -19,15 +19,24 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz-v0.4.5-EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz-v0.4.5-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.4.5"><img src="https://img.shields.io/badge/版本说明-v0.4.5-8250df?style=for-the-badge" alt="版本说明"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.5.0-beta"><img src="https://img.shields.io/badge/测试版-v0.5.0%20Beta-8250df?style=for-the-badge" alt="v0.5.0 测试版说明"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/提交问题-f85149?style=for-the-badge" alt="提交问题"></a>
 </p>
 
 > **安全提示：** nSkinzCS2 只用于通过 HLAE、带 `-insecure` 启动的离线 Demo 回放。请勿加载到 VAC 保护服务器或任何联机服务器。超出此范围使用造成的账号风险由使用者自行承担。
 
-## v0.4.5 更新
+## v0.5.0 Beta 更新
+
+- 枪械皮肤继续沿用 v0.4.5 已验证的路径；不使用文件改写器，也不修改 `.dem`。
+- T/CT 默认手套先通过 CS2 原生路径构造涂装、种子和磨损属性，确认完整成功后才提交物品身份；任一步失败都会完整回滚，避免半初始化手套导致闪退。
+- 刀实体在 Demo 重载和代际变化时保留模型/动画监听器，并分离武器位置与 HUD 消费者，针对刀模落到手枪位置、手枪检视动作及原皮匕首动作残留进行修正。
+- 文件名、控制面板标题和启动日志均标记 `v0.5.0-beta`。兼容 CS2 Steam Build `25218825`、Client/Server `2000908`、Patch `1.41.8.1`、Source revision `10981323`；HLAE `2.191.1`。
+
+这是刀模、动作与默认手套的测试版。完整回归和隔离加载门禁已通过，但具体 Demo 的画面表现仍需测试者验收。详见[中英双语 v0.5.0 Beta 发布说明](docs/releases/v0.5.0-beta.md)。
+
+## v0.4.5 更新（历史稳定版）
 
 - 修复当前 CS2 中 Schema 能提供 72 字节属性布局、却没有向量修改回调时，原皮枪械无法创建涂装、种子和磨损节点的问题。新路径只在字节级验证通过后调用 CS2 自身的属性追加函数。
 - 删除朋友日志中出现的两次完整实体扫描；通过已验证的 CS2 分块布局直接按索引读取，并在探测实体上界时同步填充缓存。
@@ -84,7 +93,7 @@ nSkinzCS2 是一个 Windows x64 DLL，用于在观看 Counter-Strike 2 Demo 时�
 
 ## 功能矩阵
 
-| 模块 | v0.4.5 支持情况 | 说明 |
+| 模块 | v0.5.0 Beta 支持情况 | 说明 |
 | --- | --- | --- |
 | 枪械 | 按枪型筛选的涂装、种子、磨损、品质、名称标签和贴纸字段 | 包含原皮物品首次材质生成；运行时及导入配置同样校验兼容性，新旧网格跟随目标涂装元数据。 |
 | 刀 | 饰面、种子和磨损；实验性饰面＋模型替换 | 仅饰面隐藏模型选项；模型/切刀/检视替换已接入，但首次重建、拾取刀和 HUD 交接仍属实验功能。 |
@@ -95,35 +104,35 @@ nSkinzCS2 是一个 Windows x64 DLL，用于在观看 Counter-Strike 2 Demo 时�
 
 ## 快速开始
 
-v0.4.5 已内嵌预编译面板着色器并保留 `/MT`。除 Windows 10/11 x64、CS2 和 HLAE 外，不需要安装其它运行库。`LoadLibrary failed` 排查见[单 DLL 加载说明](docs/portable-loading.md)。
+v0.5.0 Beta 已内嵌预编译面板着色器并保留 `/MT`。除 Windows 10/11 x64、CS2 和 HLAE 外，不需要安装其它运行库。`LoadLibrary failed` 排查见[单 DLL 加载说明](docs/portable-loading.md)。
 
 1. 使用 HLAE、带 `-insecure` 启动 CS2，然后打开离线 Demo。
 2. 下载一个 Release DLL。发布版使用 MSVC 静态运行库（`/MT`），不需要另装 Visual C++ Redistributable、Python、SDK 或 Visual Studio。
 3. 在 HLAE 中加载 DLL：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.4.5-zh-CN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.5.0-beta-zh-CN.dll"
 ```
 
 英文版：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.4.5-EN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.5.0-beta-EN.dll"
 ```
 
-上述示例要求 DLL 位于 D 盘根目录，请改成实际完整路径。v0.4.5 文件名包含空格，必须使用一对英文半角双引号；不要叠加两对引号或使用中文弯引号。
+上述示例要求 DLL 位于 D 盘根目录，请改成实际完整路径。ZIP 内 DLL 文件名包含空格，加载时必须使用一对英文半角双引号；不要叠加两对引号或使用中文弯引号。
 
 按 `Insert` 显示面板，选择观战玩家 XUID 和外观配置，点击“更新”（`Update`）。请把 DLL 放在可写文件夹，独立面板与运行时需要在此生成和共享目录/配置文件。运行日志为 `nSkinzCS2.log`，面板日志为 `nSkinzCS2.ui.log`。
 
-升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 发布包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.4.5/Lyan_nskinz-v0.4.5-windows-x64.zip)含中英文 DLL 和加载说明。
+升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 测试包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-CS2-2000908-windows-x64.zip)含中英文 DLL、游戏版本与加载说明。
 
 ## 兼容基线
 
-`v0.4.5` 对应以下已检查基线。早期原皮 AWP → 嘣已由用户确认；本次朋友机器上的枪械/卡顿修正已通过离线回归与二进制证据验证，但尚未由该机器完成画面验收：
+`v0.5.0 Beta` 对应以下已检查基线。枪械沿用旧路径；刀模、动作和默认手套仍属于测试验收范围：
 
-- Steam app build ID `25000182`
-- CS2 ClientVersion `2000899`、Patch `1.41.7.8`、Source revision `10948930`（2026-08-28）
-- `client.dll` SHA-256：`B8E2C009763E8CEFB88D89A2BDCF452DB17501553D473DB6DA060DF8E6769EB4`
+- Steam app build ID `25218825`
+- CS2 Client/Server `2000908`、Patch `1.41.8.1`、Source revision `10981323`（2026-09-09 15:23:58）
+- `client.dll` SHA-256：`A0C195F0B6EC00915EF08C548200A010EBBE7982D3A4BC468CAD939B67C8C4E3`
 - HLAE `2.191.1`
 - `Source2Client002`、`ResourceSystem013`、`VFileSystem017`
 
@@ -141,7 +150,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 生成解决方案
 ```
 
-输出文件为 `build/Release/Lyan_nskinz v0.4.5 EN.dll`、`build/Release/Lyan_nskinz v0.4.5 zh-CN.dll` 和 `build/Release/nSkinzCS2.Tests.exe`。`run-build-and-tests.cmd` 会构建并运行原生回归测试，`run-tests.cmd` 只运行现有测试程序。
+输出文件为 `build/Release/Lyan_nskinz v0.5.0-beta EN.dll`、`build/Release/Lyan_nskinz v0.5.0-beta zh-CN.dll` 和 `build/Release/nSkinzCS2.Tests.exe`。`run-build-and-tests.cmd` 会构建并运行原生回归测试，`run-tests.cmd` 只运行现有测试程序。
 
 </details>
 
@@ -182,7 +191,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 **为什么刀上仍有旧材质？** 部分 Demo 物品带有编译后的第一人称材质，当前 v0.4.5 原皮路径无法保证全部清除，详见上面的已知限制。
 
-**应该下载哪个 DLL？** 单独下载时，英文界面使用 `Lyan_nskinz-v0.4.5-EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz-v0.4.5-zh-CN.dll`；双语 ZIP 内保留用户指定的带空格编译文件名。两者兼容同一套 CS2 基线。
+**应该下载哪个 DLL？** 单独下载时，英文界面使用 `Lyan_nskinz-v0.5.0-beta-EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz-v0.5.0-beta-zh-CN.dll`；双语 ZIP 内保留带空格编译文件名。两者兼容同一套 CS2 基线。
 
 **仓库能打开，但图片显示破图标怎么办？** 某些网络无法访问 GitHub 的 raw 图片域名。本 README 已使用 GitHub 推荐的相对图片路径；如果仍然加载失败，可临时用管理员身份打开记事本，编辑 `C:\Windows\System32\drivers\etc\hosts`，追加：
 

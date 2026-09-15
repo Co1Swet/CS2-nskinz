@@ -39,6 +39,11 @@ public:
     virtual std::uintptr_t ExistingAnimationType(const KnifeModelAsset&) noexcept = 0;
     virtual bool ReadItemDefinition(const KnifeModelBinding&, int&) noexcept = 0;
     virtual bool CompareItemDefinition(const KnifeModelBinding&, int expected, int desired) noexcept = 0;
+    // Adopt a target world definition/model written by the exact holstered
+    // pre-arm lease. This is ownership transfer only: it must perform no model,
+    // graph or cosmetic write and defaults closed for every other adapter.
+    virtual bool AdoptPreparedWorld(const KnifeModelBinding&, const KnifeModelAsset&,
+        const KnifeModelAsset&, const KnifePairState&) noexcept { return false; }
     virtual bool SetBladeModel(const KnifeModelBinding&, KnifeBladeRole, const KnifeModelAsset&) noexcept = 0;
     virtual bool Recollect(const KnifeModelBinding&) noexcept = 0;
     // Re-probe the ID node and compare expected before changing it. No stale
@@ -62,6 +67,11 @@ public:
     // CS2's world-model notification queues the old HUD for deletion. Production
     // must wait for its successor instead of committing that doomed entity.
     bool PrepareWorld(const KnifeModelBinding&, const KnifeModelAsset&) noexcept;
+    // Finish an exact pre-armed world on the first verified native update. The
+    // source asset remains the restore identity even though the live item/world
+    // already expose the target definition.
+    bool AdoptPrearmedWorld(const KnifeModelBinding&, const KnifeModelAsset& source,
+        const KnifeModelAsset& target) noexcept;
     bool CompletePreparedWorld(const KnifeModelBinding& replacement, const KnifeModelAsset&) noexcept;
     bool VerifyPair(const KnifeModelBinding&, const KnifeModelAsset&) noexcept override;
     bool Restore(const KnifeModelBinding&) noexcept override;

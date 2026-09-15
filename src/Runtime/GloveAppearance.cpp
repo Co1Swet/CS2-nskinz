@@ -24,13 +24,77 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     case GloveSlotMode::FinishOnly:
         return pawn_glove_available ? GloveCarrierKind::PawnEconGloves : GloveCarrierKind::None;
     case GloveSlotMode::ModelAndFinish:
-        return pawn_glove_available
-            ? GloveCarrierKind::PawnEconGloves
-            : (stable_wearable_available ? GloveCarrierKind::Wearable : GloveCarrierKind::None);
+        // Build 2000908's native visual updater reads pawn m_EconGloves at
+        // +0x1690 and materialises its own client-only output at +0x1518. It
+        // never reads m_hMyWearables. Prefer that single authoritative input
+        // even for an initially empty stock T/CT slot; retain a published
+        // wearable only as a compatibility fallback when the Pawn view is
+        // genuinely unavailable.
+        if (pawn_glove_available) return GloveCarrierKind::PawnEconGloves;
+        return stable_wearable_available ? GloveCarrierKind::Wearable : GloveCarrierKind::None;
     case GloveSlotMode::None:
     default:
         return GloveCarrierKind::None;
     }
+}
+
+bool CanUsePawnEconGlovesCarrier(
+    const GloveSlotMode mode,
+    const bool definition_readable,
+    const int current_definition_index,
+    const bool current_definition_is_glove,
+    const bool requested_definition_is_glove) noexcept
+{
+    if (!definition_readable)
+    {
+        return false;
+    }
+
+    if (mode == GloveSlotMode::FinishOnly)
+    {
+        return current_definition_index > 0 && current_definition_is_glove;
+    }
+
+    if (mode == GloveSlotMode::ModelAndFinish)
+    {
+        // The embedded view may be definition 0 for recorded stock hands.
+        // Only replace that empty value or an existing glove definition; a
+        // positive non-glove definition indicates the wrong schema object.
+        return requested_definition_is_glove &&
+            (current_definition_index == 0 || current_definition_is_glove);
+    }
+
+    return false;
+}
+
+std::uint64_t BuildGloveWearableCreationEpoch(
+    const std::uint64_t provider_generation,
+    const std::uint32_t pawn_handle,
+    const std::uintptr_t pawn_identity) noexcept
+{
+    // FNV-1a over fixed-width values is deterministic and cheap. The full
+    // Source 2 handle includes its serial, while the pointer disambiguates a
+    // rebuilt pawn even if an entity slot is reused unusually quickly.
+    std::uint64_t epoch = 1469598103934665603ull;
+    const auto mix = [&epoch](const std::uint64_t value)
+    {
+        epoch ^= value;
+        epoch *= 1099511628211ull;
+    };
+    mix(provider_generation);
+    mix(static_cast<std::uint64_t>(pawn_handle));
+    mix(static_cast<std::uint64_t>(pawn_identity));
+    return epoch;
+}
+
+std::uint64_t GloveWearableRetryDelayMillis(const std::uint32_t failure_count) noexcept
+{
+    if (failure_count == 0)
+    {
+        return 0;
+    }
+
+    return 125ull << std::min<std::uint32_t>(failure_count - 1u, 4u);
 }
 
 GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::GloveProfile& profile) noexcept
@@ -58,6 +122,18 @@ int ResolveDefaultGloveDefinitionForTeam(const int team_number) noexcept
     default:
         return 0;
     }
+}
+
+bool IsStockTeamGloveRestoreRequest(
+    const GloveAppearanceRequest& request,
+    const int team_number) noexcept
+{
+    const auto stock_definition = ResolveDefaultGloveDefinitionForTeam(team_number);
+    return request.mode == GloveSlotMode::ModelAndFinish &&
+        request.explicit_vanilla_finish &&
+        request.paint_kit == 0 &&
+        stock_definition != 0 &&
+        request.model_definition == stock_definition;
 }
 
 int SelectReusableWearableHandleSlot(
@@ -144,7 +220,8 @@ GloveCompatibilityResult EvaluateGloveCompatibility(const GloveCompatibilityInpu
         return {true, GloveCompatibilityReason::Compatible};
     }
 
-    if (inputs.carrier_kind == GloveCarrierKind::PawnEconGloves)
+    if (inputs.carrier_kind == GloveCarrierKind::PawnEconGloves ||
+        inputs.carrier_kind == GloveCarrierKind::PawnEconGlovesRenderFallback)
     {
         if (inputs.requested_model_definition == 0)
         {
@@ -258,6 +335,15 @@ GloveRenderVerificationResult EvaluateGloveRenderVerification(const GloveRenderV
             return {false, GloveRenderVerificationReason::ReapplyNotTriggered};
         }
 
+        if (inputs.mode == GloveSlotMode::ModelAndFinish && inputs.pawn_econ_gloves_reapply_path)
+        {
+            // The item-view readback and dirty flags prove that the request
+            // was accepted, not that CS2 rebuilt the visible glove family.
+            // Runtime polling must still match the native world output and
+            // the first-person HUD model before reporting visual success.
+            return {false, GloveRenderVerificationReason::NativeVisualRefreshPending};
+        }
+
         return {true, GloveRenderVerificationReason::Verified};
     }
 
@@ -313,6 +399,8 @@ const wchar_t* GloveRenderVerificationReasonText(const GloveRenderVerificationRe
         return L"glove carrier fields did not match the requested finish";
     case GloveRenderVerificationReason::ReapplyNotTriggered:
         return L"glove reapply was not triggered";
+    case GloveRenderVerificationReason::NativeVisualRefreshPending:
+        return L"native glove visual refresh pending";
     case GloveRenderVerificationReason::MissingLiveRenderState:
         return L"missing live glove render state";
     case GloveRenderVerificationReason::MissingHudRenderState:

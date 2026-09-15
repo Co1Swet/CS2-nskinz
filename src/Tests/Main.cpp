@@ -5,8 +5,10 @@
 #include "Cs2/Compatibility.hpp"
 #include "Cs2/Runtime.hpp"
 #include "Runtime/GloveAppearance.hpp"
+#include "Runtime/GloveVisualRefresh.hpp"
 #include "Runtime/KnifeAnimation.hpp"
 #include "Runtime/KnifeAppearance.hpp"
+#include "Runtime/KnifeUpdateProbe.hpp"
 #include "Runtime/WeaponAppearance.hpp"
 #include "Runtime/WeaponMaterialInit.hpp"
 
@@ -198,6 +200,12 @@ void TestCompatibilityManifest()
     Expect(
         has_required_signature("base_model_entity_set_model"),
         "the current client C_BaseModelEntity::SetModel wrapper must be required");
+    Expect(
+        has_required_signature("base_entity_subclass_changed"),
+        "the current C_BaseEntity::OnSubclassIDChanged callback must be required for knife VData identity");
+    Expect(
+        has_required_signature("utl_string_token_make_sret"),
+        "the hidden-result CUtlStringToken::Make ABI must be required for knife subclass tokens");
     const auto has_reference_model_provider_signature = std::any_of(
         kSignatureSpecs.begin(),
         kSignatureSpecs.end(),
@@ -3751,6 +3759,8 @@ void TestGloveAppearanceModule()
     using nskinzcs2::runtime::GloveProfileRequiresModelDefinition;
     using nskinzcs2::runtime::GloveRenderVerificationReason;
     using nskinzcs2::runtime::GloveSlotMode;
+    using nskinzcs2::runtime::GloveWearableRetryDelayMillis;
+    using nskinzcs2::runtime::IsStockTeamGloveRestoreRequest;
     using nskinzcs2::runtime::ResolveCanonicalGloveCarrierKind;
     using nskinzcs2::runtime::ResolveDefaultGloveDefinitionForTeam;
     using nskinzcs2::runtime::ResolveGloveSlotMode;
@@ -3765,6 +3775,29 @@ void TestGloveAppearanceModule()
     Expect(
         ResolveDefaultGloveDefinitionForTeam(0) == 0,
         "unknown teams must not guess a stock glove definition");
+
+    {
+        nskinzcs2::runtime::GloveAppearanceRequest request;
+        request.mode = GloveSlotMode::ModelAndFinish;
+        request.model_definition = 5028;
+        request.paint_kit = 0;
+        request.explicit_vanilla_finish = true;
+        Expect(
+            IsStockTeamGloveRestoreRequest(request, 2),
+            "a vanilla T request must use the Pawn-native stock glove path");
+        Expect(
+            !IsStockTeamGloveRestoreRequest(request, 3),
+            "a T stock definition must not be accepted for a CT Pawn");
+        request.paint_kit = 10006;
+        Expect(
+            !IsStockTeamGloveRestoreRequest(request, 2),
+            "a painted glove is not a stock restore even though both use the Pawn-native visual path");
+        request.paint_kit = 0;
+        request.explicit_vanilla_finish = false;
+        Expect(
+            !IsStockTeamGloveRestoreRequest(request, 2),
+            "an unselected finish must not be mistaken for an explicit stock restore");
+    }
 
     {
         nskinzcs2::model::GloveProfile profile;
@@ -3821,15 +3854,58 @@ void TestGloveAppearanceModule()
         "finish-only should always resolve to pawn_econ_gloves when available");
     Expect(
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, true) == GloveCarrierKind::PawnEconGloves,
-        "model-and-finish should prefer the current pawn econ-gloves carrier when available");
+        "model-and-finish should prefer the Pawn input consumed by the native visual updater");
     Expect(
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, false, true) ==
             GloveCarrierKind::PawnEconGloves,
-        "model-and-finish should use pawn econ-gloves without requiring a wearable entity");
+        "model-and-finish should not require a duplicate wearable when Pawn econ-gloves is available");
     Expect(
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, false) ==
             GloveCarrierKind::Wearable,
         "model-and-finish should retain the wearable compatibility fallback when pawn econ-gloves is unavailable");
+
+    using nskinzcs2::runtime::CanUsePawnEconGlovesCarrier;
+    Expect(
+        CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 0, false, true),
+        "an empty demo Pawn glove slot should accept a known glove definition for native materialisation");
+    Expect(
+        !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 0, false, false),
+        "an empty pawn econ-gloves slot must reject an unknown target definition");
+    Expect(
+        !CanUsePawnEconGlovesCarrier(GloveSlotMode::FinishOnly, true, 0, false, false),
+        "finish-only must not invent a glove model for an empty pawn econ-gloves slot");
+    Expect(
+        CanUsePawnEconGlovesCarrier(GloveSlotMode::FinishOnly, true, 5030, true, false),
+        "finish-only should keep using a known live pawn glove definition");
+    Expect(
+        CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 5030, true, true),
+        "model-and-finish should replace an existing Pawn glove definition through the native path");
+    Expect(
+        !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 7, false, true),
+        "model-and-finish must reject a positive non-glove embedded item definition");
+    Expect(
+        !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, false, 0, false, true),
+        "an unreadable pawn econ-gloves slot must fail closed");
+
+    using nskinzcs2::runtime::BuildGloveWearableCreationEpoch;
+    const auto creation_epoch = BuildGloveWearableCreationEpoch(7, 0x12348001u, 0x100000ull);
+    Expect(
+        creation_epoch == BuildGloveWearableCreationEpoch(7, 0x12348001u, 0x100000ull),
+        "the same provider and Pawn epoch should retain duplicate-creation protection");
+    Expect(
+        creation_epoch != BuildGloveWearableCreationEpoch(7, 0x12350001u, 0x100000ull) &&
+            creation_epoch != BuildGloveWearableCreationEpoch(7, 0x12348001u, 0x200000ull) &&
+            creation_epoch != BuildGloveWearableCreationEpoch(8, 0x12348001u, 0x100000ull),
+        "a rebuilt Pawn or provider must receive a fresh wearable creation epoch");
+    Expect(
+        GloveWearableRetryDelayMillis(0) == 0 &&
+            GloveWearableRetryDelayMillis(1) == 125 &&
+            GloveWearableRetryDelayMillis(2) == 250 &&
+            GloveWearableRetryDelayMillis(3) == 500 &&
+            GloveWearableRetryDelayMillis(4) == 1000 &&
+            GloveWearableRetryDelayMillis(5) == 2000 &&
+            GloveWearableRetryDelayMillis(100) == 2000,
+        "transient wearable creation retries must use a bounded exponential delay");
 
     {
         nskinzcs2::runtime::GloveCompatibilityInputs inputs;
@@ -4110,9 +4186,8 @@ void TestGloveAppearanceModule()
         inputs.target_model_known = true;
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
-            !compatibility.compatible &&
-                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
-            "pawn glove model replacement must require a stable wearable instead of accepting carrier-only readback");
+            compatibility.compatible,
+            "pawn glove model replacement should accept a known target for native output verification");
     }
 
     {
@@ -4128,9 +4203,8 @@ void TestGloveAppearanceModule()
         inputs.target_model_known = true;
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
-            !compatibility.compatible &&
-                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
-            "pawn glove model replacement must reject guarded first-person resource rebinds");
+            compatibility.compatible,
+            "pawn glove model replacement should not depend on a manual first-person resource rebind");
     }
 
     {
@@ -4155,9 +4229,8 @@ void TestGloveAppearanceModule()
         inputs.target_model_known = true;
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
-            !compatibility.compatible &&
-                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
-            "pawn glove render fallback should still require a live render binding before apply");
+            compatibility.compatible,
+            "pawn glove native rebuild should establish its render output after apply");
     }
 
     {
@@ -4173,9 +4246,8 @@ void TestGloveAppearanceModule()
         inputs.target_model_known = true;
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
-            !compatibility.compatible &&
-                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
-            "pawn glove model replacement must not destroy the live render object while waiting for a speculative rebuild");
+            compatibility.compatible,
+            "pawn glove native rebuild should accept a known target without a pre-existing render binding");
     }
 
     {
@@ -4192,8 +4264,8 @@ void TestGloveAppearanceModule()
         const auto compatibility = EvaluateGloveCompatibility(inputs);
         Expect(
             !compatibility.compatible &&
-                compatibility.reason == GloveCompatibilityReason::MissingCarrier,
-            "pawn glove render fallback must fail closed before any model mutation");
+                compatibility.reason == GloveCompatibilityReason::MissingModelIdentity,
+            "pawn glove render fallback must reject an unknown target model");
     }
 
     {
@@ -4215,8 +4287,9 @@ void TestGloveAppearanceModule()
         inputs.reapply_triggered = true;
         const auto verification = EvaluateGloveRenderVerification(inputs);
         Expect(
-            verification.verified,
-            "model-and-finish pawn econ-gloves should verify from definition/finish readback plus the native reapply trigger");
+            !verification.verified &&
+                verification.reason == GloveRenderVerificationReason::NativeVisualRefreshPending,
+            "model-and-finish pawn econ-gloves must wait for native world/HUD model readback");
     }
 
     {
@@ -4695,12 +4768,12 @@ void TestStandardWeaponStockInitialization()
         "stock AWP BOOM: engine-owned attributes, native initialization, restore, stale identity and retry bounds");
     constexpr std::array<std::uint8_t, 42> calls {
         0x83,0xBB,0xA8,0x0A,0,0,0,0x7F,9,0x83,0xBB,0xC0,0x0A,0,0,0,0x7E,0x18,
-        0x48,0x8D,0x8B,8,6,0,0,0xB2,1,0xE8,0xE0,0xAE,0xC3,0,0x33,0xD2,0x48,0x8B,0xCB,
+        0x48,0x8D,0x8B,8,6,0,0,0xB2,1,0xE8,0xF0,0xAE,0xC3,0,0x33,0xD2,0x48,0x8B,0xCB,
         0xE8,0xD6,0xA6,0xFD,0xFF
     };
     WeaponMaterialCalls decoded;
     Expect(DecodeWeaponMaterialCalls(calls, decoded), "native material loop call ABI must decode");
-    Expect(0x7FF0F0 + 32 + decoded.clear_relative == 0x1439FF0 &&
+    Expect(0x7FF0F0 + 32 + decoded.clear_relative == 0x143A000 &&
         0x7FF0F0 + 42 + decoded.generate_relative == 0x7D97F0, "rel32 targets must preserve their signed displacement");
     for (std::size_t i = 0; i < calls.size(); ++i)
     {
@@ -5057,6 +5130,72 @@ void TestM4A4ModernLegacyTransition()
     }
 }
 
+void TestGloveNativeVisualRefresh()
+{
+    using namespace nskinzcs2::runtime;
+    Expect(ProbeGloveVisualRefreshEvidenceForTests(), "glove visual updater entry/consumer/caller/HUD evidence rejects drift");
+    Expect(GloveVisualIdentityMatchesOutputHandle(0x15774231u, 0x15774231u),
+        "ordinary native glove output accepts an exact full handle");
+    Expect(!GloveVisualIdentityMatchesOutputHandle(0x15774231u, 0x1577FFFFu) &&
+        !GloveVisualIdentityMatchesOutputHandle(0x15774231u, 0x1578FFFFu) &&
+        !GloveVisualIdentityMatchesOutputHandle(0x15774231u, 0x15774232u) &&
+        !GloveVisualIdentityMatchesOutputHandle(0x1577FFFFu, 0x1577FFFFu) &&
+        !GloveVisualIdentityMatchesOutputHandle(0xFFFFFFFFu, 0xFFFFFFFFu),
+        "glove output rejects freed sentinels, another generation, another live slot and invalid handles");
+    GloveVisualRefreshKey key {1, 76561199840349579ull, 57, 0x123400, 0x83DD, 100};
+    GloveVisualRefreshLatch latch;
+    Expect(!latch.Begin({}, 1) && latch.Begin(key, 100), "invalid glove identity cannot dispatch; valid identity starts once");
+    for (int i = 0; i < 1000; ++i)
+        Expect(!latch.Begin(key, 101 + i), "repeated field repairs and Update never repeat the native glove rebuild");
+    Expect(!latch.TimedOut(99) && !latch.TimedOut(3100) && latch.TimedOut(3101), "glove pending timer is bounded without retrying native calls");
+    Expect(latch.Complete() && !latch.Complete() && !latch.Begin(key, 3200), "native output completion is a single transition");
+    for (int field = 0; field < 6; ++field)
+    {
+        auto changed = key;
+        switch (field)
+        {
+        case 0: ++changed.scene; break;
+        case 1: ++changed.xuid; break;
+        case 2: ++changed.signature; break;
+        case 3: ++changed.pawn; break;
+        case 4: ++changed.handle; break;
+        case 5: ++changed.creation_tick; break;
+        }
+        Expect(latch.Begin(changed, 4000 + field) && !latch.Completed(), "new request/owner/entity generation gets its own glove rebuild");
+        latch.Fail();
+        Expect(latch.Failed() && !latch.Begin(changed, 5000 + field), "native fault does not cause an automatic rebuild loop");
+    }
+    if (const auto* client = _wgetenv(L"NSKINZCS2_KNIFE_CLIENT_DLL"))
+        Expect(ProbeGloveVisualRefreshEvidenceForTests(client), "installed game matches native glove visual ABI; no game process loaded");
+}
+
+void TestKnifeUpdateListenerFiltering()
+{
+    using namespace nskinzcs2::runtime;
+    constexpr std::uintptr_t controller = 0x1000, world = 0x2000, arms = 0x3000;
+    Expect(ShouldDispatchKnifeWeaponListener(controller, world, world, controller, world),
+        "the exact active knife controller/world pair is dispatched");
+    Expect(!ShouldDispatchKnifeWeaponListener(controller, world, world, controller + 1, world),
+        "an active knife never accepts another controller through its world-only fallback");
+    Expect(!ShouldDispatchKnifeWeaponListener(controller, world, world, controller, world + 1),
+        "an unrelated world weapon is excluded from the active knife lifecycle");
+    Expect(ShouldDispatchKnifeWeaponListener(0, 0, world, controller + 1, world),
+        "holstered pre-arm dispatches only its leased world independent of controller");
+    Expect(!ShouldDispatchKnifeWeaponListener(0, 0, world, controller, world + 1) &&
+        !ShouldDispatchKnifeWeaponListener(0, 0, 0, controller, world),
+        "unpublished and unrelated native updates stay on the low-cost trampoline");
+    Expect(ShouldDispatchKnifeArmsListener(arms, arms) &&
+        !ShouldDispatchKnifeArmsListener(arms, arms + 1) &&
+        !ShouldDispatchKnifeArmsListener(0, arms),
+        "before/after arms lifecycle events require the exact active arms object");
+}
+
+void TestDirectEntityCacheScan()
+{
+    Expect(nskinzcs2::runtime::ProbeDirectEntityCacheScanForTests(),
+        "verified chunk scanning preserves native handle checks without per-slot protected calls");
+}
+
 int RunAllTests()
 {
     try
@@ -5088,6 +5227,9 @@ int RunAllTests()
         RunNamedTest("TestIndependentKnifeModel", RunKnifeModelTests);
         RunNamedTest("TestKnifeGraphParameter", RunKnifeGraphTests);
         RunNamedTest("TestKnifePairTransaction", RunKnifePairTests);
+        RunNamedTest("TestKnifeUpdateListenerFiltering", TestKnifeUpdateListenerFiltering);
+        RunNamedTest("TestDirectEntityCacheScan", TestDirectEntityCacheScan);
+        RunNamedTest("TestGloveNativeVisualRefresh", TestGloveNativeVisualRefresh);
         if (g_knife_model_only)
         {
             return EXIT_SUCCESS;

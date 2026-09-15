@@ -520,7 +520,10 @@ DWORD BootstrapThreadImpl(void* instance)
     g_config_path = g_base_directory / L"nSkinzCS2.json";
 
     nskinzcs2::Logger::Initialize(g_base_directory.wstring());
-    nskinzcs2::Logger::Info(L"nSkinzCS2 bootstrap starting (CrashGuard-SafeStart-v2).");
+    std::wstringstream version_stream;
+    version_stream << L"nSkinzCS2 v" << nskinzcs2::build::kVersionWide
+                   << L" bootstrap starting (CrashGuard-SafeStart-v2).";
+    nskinzcs2::Logger::Info(version_stream.str());
     nskinzcs2::Logger::Info(L"Bootstrap note: UI creation is deferred until Insert, and runtime hook attach is deferred until Update.");
     for (const auto& line : nskinzcs2::compatibility::BuildRuntimeCompatibilityDiagnostics())
     {

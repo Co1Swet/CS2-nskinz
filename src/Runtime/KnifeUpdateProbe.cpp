@@ -26,12 +26,31 @@ bool MatchesKnifeUpdateCallEvidence(std::span<const std::uint8_t> entry,
     constexpr std::array<std::uint8_t, 19> e {
         0x40,0x55,0x53,0x56,0x57,0x41,0x57,0x48,0x8D,0x6C,0x24,0xC9,0x48,0x81,0xEC,0xA0,0,0,0 };
     constexpr std::array<std::uint8_t, 11> c1 {
-        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0x77,0x6F,0x89,0xFF };
+        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0xE7,0x6B,0x89,0xFF };
     constexpr std::array<std::uint8_t, 11> c2 {
-        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0x53,0x6F,0x89,0xFF };
-    constexpr std::array<std::uint8_t, 5> eval {0xE8,0xCC,0xC8,0x32,0xFF};
+        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0xC3,0x6B,0x89,0xFF };
+    constexpr std::array<std::uint8_t, 5> eval {0xE8,0x5C,0x7B,0x32,0xFF};
     return std::ranges::equal(entry, e) && std::ranges::equal(call1, c1) &&
         std::ranges::equal(call2, c2) && std::ranges::equal(evaluation, eval);
+}
+
+bool ShouldDispatchKnifeWeaponListener(const std::uintptr_t expected_controller,
+    const std::uintptr_t expected_world, const std::uintptr_t listener_world,
+    const std::uintptr_t actual_controller, const std::uintptr_t actual_world) noexcept
+{
+    if (!actual_controller || !actual_world) return false;
+    // A published active binding is stronger than the pre-arm world filter:
+    // never accept a different controller merely because it shares a world.
+    if (expected_controller || expected_world)
+        return expected_controller && expected_world &&
+            actual_controller == expected_controller && actual_world == expected_world;
+    return listener_world && actual_world == listener_world;
+}
+
+bool ShouldDispatchKnifeArmsListener(const std::uintptr_t listener_arms,
+    const std::uintptr_t actual_arms) noexcept
+{
+    return listener_arms && actual_arms && listener_arms == actual_arms;
 }
 
 namespace
@@ -121,10 +140,18 @@ void KnifeUpdateProbe::Publish(DWORD game_thread, std::uintptr_t controller, std
     generation_.fetch_add(1, std::memory_order_release);
 }
 
-void KnifeUpdateProbe::Clear() noexcept { Publish(0, 0, 0, 0, 0); }
-
-void KnifeUpdateProbe::Listen(DWORD game_thread, Listener listener) noexcept
+void KnifeUpdateProbe::Clear() noexcept
 {
+    Publish(0, 0, 0, 0, 0);
+    listener_arms_filter_.store(0, std::memory_order_release);
+    listener_world_filter_.store(0, std::memory_order_release);
+}
+
+void KnifeUpdateProbe::Listen(const DWORD game_thread, Listener listener,
+    const std::uintptr_t arms_filter, const std::uintptr_t world_filter) noexcept
+{
+    listener_arms_filter_.store(arms_filter, std::memory_order_release);
+    listener_world_filter_.store(world_filter, std::memory_order_release);
     listener_thread_.store(game_thread, std::memory_order_release);
     listener_.store(listener, std::memory_order_release);
 }
@@ -147,11 +174,31 @@ void __fastcall KnifeUpdateProbe::Hook(void* controller, void* world)
     auto* self = owner_.load(std::memory_order_acquire);
     // Owner/original are published before MH_EnableHook and never cleared.
     const auto original = self->original_.load(std::memory_order_acquire);
-    original(controller, world);
-    self->Sample(controller, world, caller);
     const auto listener = self->listener_.load(std::memory_order_acquire);
-    if (self->Installed() && boundary_arms_ && listener && self->listener_thread_.load() == GetCurrentThreadId() &&
-        (caller == self->client_ + kKnifeNativeUpdateCall1Rva + 11 || caller == self->client_ + kKnifeNativeUpdateCall2Rva + 11))
+    const auto expected_controller = self->controller_.load(std::memory_order_acquire);
+    const auto expected_world = self->world_.load(std::memory_order_acquire);
+    const auto listener_world = self->listener_world_filter_.load(std::memory_order_acquire);
+    const bool dispatch = self->Installed() && boundary_arms_ && listener &&
+        self->listener_thread_.load() == GetCurrentThreadId() &&
+        (caller == self->client_ + kKnifeNativeUpdateCall1Rva + 11 ||
+         caller == self->client_ + kKnifeNativeUpdateCall2Rva + 11) &&
+        ShouldDispatchKnifeWeaponListener(expected_controller, expected_world, listener_world,
+            reinterpret_cast<std::uintptr_t>(controller), reinterpret_cast<std::uintptr_t>(world));
+    // The pre-armed world definition/model is already the target before this
+    // native update starts. Give the scoped listener one verified boundary to
+    // pair the cached HUD skeleton and weapon_type before Source 2 selects the
+    // first deploy sequence. The post event remains the readback/maintenance
+    // boundary and preserves the old fallback when pre-validation is not ready.
+    if (dispatch)
+    {
+        ++self->nested_updates_;
+        listener({KnifeUpdatePhase::BeforeWeapon, boundary_arms_,
+            reinterpret_cast<std::uintptr_t>(controller), reinterpret_cast<std::uintptr_t>(world)});
+    }
+    original(controller, world);
+    if (self->controller_.load(std::memory_order_relaxed))
+        self->Sample(controller, world, caller);
+    if (dispatch && self->Installed())
     {
         ++self->nested_updates_;
         listener({KnifeUpdatePhase::AfterWeapon, boundary_arms_, reinterpret_cast<std::uintptr_t>(controller),
@@ -166,13 +213,29 @@ void __fastcall KnifeUpdateProbe::ArmsHook(void* arms, bool force)
     const auto original = self->arms_original_.load(std::memory_order_acquire);
     const auto listener = self->listener_.load(std::memory_order_acquire);
     const auto previous = boundary_arms_;
+    const auto active_controller = self->controller_.load(std::memory_order_acquire);
+    const auto active_world = self->world_.load(std::memory_order_acquire);
+    const auto listener_world = self->listener_world_filter_.load(std::memory_order_acquire);
+    const bool has_listener_target =
+        (active_controller && active_world) || listener_world;
     const bool scoped = boundary_depth_ == 0 && self->Installed() && listener && arms &&
+        has_listener_target &&
         self->listener_thread_.load() == GetCurrentThreadId() && caller == self->client_ + kKnifeArmsUpdateCallRva + 5;
+    const auto listener_arms = self->listener_arms_filter_.load(std::memory_order_acquire);
+    // A holstered pre-arm lease does not know the future arms identity yet.
+    // Let the outer BeforeArms boundary reach the listener when an exact world
+    // lease exists; the callback must still prove Pawn, active handle, arms,
+    // HUD child and graph before it can authorize a write. Published active
+    // bindings continue to require their exact arms filter.
+    const bool dispatch_arms = scoped &&
+        (ShouldDispatchKnifeArmsListener(listener_arms, reinterpret_cast<std::uintptr_t>(arms)) ||
+         (!listener_arms && listener_world));
     boundary_arms_ = scoped ? reinterpret_cast<std::uintptr_t>(arms) : 0;
     ++boundary_depth_;
-    if (scoped) { ++self->boundaries_; listener({KnifeUpdatePhase::BeforeArms, boundary_arms_}); }
+    if (scoped) ++self->boundaries_;
+    if (dispatch_arms) listener({KnifeUpdatePhase::BeforeArms, boundary_arms_});
     original(arms, force);
-    if (scoped && self->Installed()) listener({KnifeUpdatePhase::AfterArms, boundary_arms_});
+    if (dispatch_arms && self->Installed()) listener({KnifeUpdatePhase::AfterArms, boundary_arms_});
     boundary_arms_ = previous;
     --boundary_depth_;
 }

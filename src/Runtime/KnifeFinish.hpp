@@ -56,19 +56,19 @@ private:
     std::uint64_t attempts_ = 0;
 };
 
-inline constexpr std::uintptr_t kKnifeCopyMaterialsRva = 0x143A130;
-inline constexpr std::uintptr_t kKnifeMaterialApplyRva = 0x92BB60;
-inline constexpr std::uintptr_t kKnifeMaterialChangedRva = 0x925960;
+inline constexpr std::uintptr_t kKnifeCopyMaterialsRva = 0x143F160;
+inline constexpr std::uintptr_t kKnifeMaterialApplyRva = 0x930800;
+inline constexpr std::uintptr_t kKnifeMaterialChangedRva = 0x92A600;
 
 inline const std::array<KnifeResourceEvidenceWindow, 5>& KnifeFinishEvidenceWindows() noexcept
 {
-    // CS2 2000899. The generator's owner virtual reads the CURRENT model,
+    // CS2 2000908. The generator's owner virtual reads the CURRENT model,
     // not the source item's definition. Native HUD construction then copies
-    // the world's reference-counted materials with 143A130(owner, hud, false).
+    // the world's reference-counted materials with 143F160(owner, hud, false).
     static constexpr std::uint8_t apply[] {
         0x48,0x89,0x5C,0x24,0x18,0x56,0x48,0x83,0xEC,0x20,0x48,0x83,0x3A,0,
         0x48,0x8B,0xDA,0x48,0x8B,0xF1,0x75,0x17,0x48,0x81,0xC1,0xF8,0xF9,0xFF,0xFF,
-        0x48,0x8D,0x54,0x24,0x30,0xE8,0x79,0x13,0x8F,0xFF,0x4C,0x8B,0,0x4C,0x89,3 };
+        0x48,0x8D,0x54,0x24,0x30,0xE8,0x99,0xC9,0x8E,0xFF,0x4C,0x8B,0,0x4C,0x89,3 };
     static constexpr std::uint8_t current_model[] {0x48,0x8B,0x80,0xE0,1,0,0};
     static constexpr std::uint8_t generate_owner[] {
         0x48,0x8D,0xB3,8,6,0,0,0x48,0x8D,0x93,0x48,0x18,0,0,0x48,0x8B,0xCE,
@@ -82,8 +82,8 @@ inline const std::array<KnifeResourceEvidenceWindow, 5>& KnifeFinishEvidenceWind
         0x48,0x8D,0x96,8,6,0,0,0x49,0x8D,0x8F,8,6,0,0,0x48,0x0F,0x44,0xD0,
         0x45,0x33,0xC0,0xE8,2,0xAE,0x3E,0 };
     static const std::array<KnifeResourceEvidenceWindow, 5> windows {{
-        {kKnifeMaterialApplyRva, apply}, {0x21CF53, current_model}, {0x7D9EA1, generate_owner},
-        {kKnifeCopyMaterialsRva, copy}, {0x104F314, hud_copy} }};
+        {kKnifeMaterialApplyRva, apply}, {0x21D213, current_model}, {0x7DEB41, generate_owner},
+        {kKnifeCopyMaterialsRva, copy}, {0x1054344, hud_copy} }};
     return windows;
 }
 

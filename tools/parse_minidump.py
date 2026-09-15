@@ -28,6 +28,8 @@ class Module:
     base: int
     size: int
     name: str
+    path: str = ""
+    timestamp: int = 0
 
     def contains(self, address: int) -> bool:
         return self.base <= address < self.base + self.size
@@ -65,6 +67,9 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("dump", type=Path)
     parser.add_argument("--stack-bytes", type=lambda value: int(value, 0), default=0x800)
+    parser.add_argument("--inspect", action="append", default=[],
+                        help="Read a captured address or register, optionally +offset (never live memory)")
+    parser.add_argument("--unwind", action="store_true", help="Unwind with timestamp-matched local x64 PE images")
     args = parser.parse_args()
 
     data = args.dump.read_bytes()
@@ -88,7 +93,7 @@ def main() -> int:
             base = u64(data, entry)
             size = u32(data, entry + 8)
             name = read_minidump_string(data, u32(data, entry + 20))
-            modules.append(Module(base, size, Path(name).name))
+            modules.append(Module(base, size, Path(name).name, name, u32(data, entry + 16)))
         modules.sort(key=lambda item: item.base)
 
     memory = DumpMemory(data)
@@ -161,6 +166,33 @@ def main() -> int:
     for row_start in range(0, len(register_offsets), 4):
         names = list(register_offsets)[row_start : row_start + 4]
         print("  " + "  ".join(f"{name}=0x{registers[name]:016X}" for name in names))
+
+    def inspect(address: int, depth: int = 0) -> None:
+        raw = next((memory.read(address, size) for size in (128, 64, 32, 16, 8)
+                    if memory.read(address, size) is not None), None)
+        indent = "  " * depth
+        print(f"{indent}memory {describe(address)}: {raw.hex() if raw else '<not captured>'}")
+        if raw is None:
+            return
+        print(f"{indent}ascii: {''.join(chr(b) if 32 <= b < 127 else '.' for b in raw)}")
+        if depth >= 2:
+            return
+        for offset in range(0, min(len(raw), 32), 8):
+            pointer = u64(raw, offset)
+            print(f"{indent}+0x{offset:X} -> {describe(pointer)}")
+            if memory.read(pointer, 8) is not None and pointer != address:
+                inspect(pointer, depth + 1)
+
+    for expression in args.inspect:
+        parts = expression.split("+", 1)
+        address = registers[parts[0]] if parts[0] in registers else int(parts[0], 0)
+        if len(parts) > 1:
+            address += int(parts[1], 0)
+        inspect(address)
+
+    if args.unwind:
+        from minidump_unwind import unwind
+        unwind(memory, modules, registers)
 
     stack = memory.read(rsp, args.stack_bytes)
     if stack is None:

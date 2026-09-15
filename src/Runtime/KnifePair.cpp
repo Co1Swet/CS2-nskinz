@@ -80,7 +80,8 @@ bool KnifePairAdapter::PrepareWorld(const KnifeModelBinding& binding, const Knif
     // Accept the canonical asset table, not a caller-supplied arbitrary path.
     target_ = FindKnifeModelAsset(asset.definition);
     if (!target_ || target_->model != asset.model || target_->skeleton != asset.skeleton ||
-        target_->animation_class != asset.animation_class) { target_ = nullptr; return false; }
+        target_->animation_class != asset.animation_class ||
+        target_->graph_animation_class != asset.graph_animation_class) { target_ = nullptr; return false; }
     attempted_ = true;
     target_symbol_ = access_.ExistingAnimationType(*target_);
     KnifePairState current;
@@ -98,10 +99,63 @@ bool KnifePairAdapter::PrepareWorld(const KnifeModelBinding& binding, const Knif
     return true;
 }
 
+bool KnifePairAdapter::AdoptPrearmedWorld(const KnifeModelBinding& binding,
+    const KnifeModelAsset& source, const KnifeModelAsset& target) noexcept
+{
+    if (captured_ || !BindingAlive(binding) || !access_.SafePoint(binding)) return false;
+    const auto* canonical_source = FindKnifeModelAsset(source.definition);
+    target_ = FindKnifeModelAsset(target.definition);
+    if (canonical_source == nullptr || target_ == nullptr || source.definition == target.definition ||
+        canonical_source->model != source.model || canonical_source->skeleton != source.skeleton ||
+        canonical_source->animation_class != source.animation_class ||
+        canonical_source->graph_animation_class != source.graph_animation_class ||
+        target_->model != target.model || target_->skeleton != target.skeleton ||
+        target_->animation_class != target.animation_class ||
+        target_->graph_animation_class != target.graph_animation_class)
+    { target_ = nullptr; return false; }
+
+    const auto source_symbol = access_.ExistingAnimationType(*canonical_source);
+    target_symbol_ = access_.ExistingAnimationType(*target_);
+    KnifePairState current, confirmed;
+    if (!source_symbol || !target_symbol_ || !access_.Read(binding, current) ||
+        !access_.Read(binding, confirmed) || current != confirmed ||
+        current.world_definition != target_->definition ||
+        current.item_definition != target_->definition ||
+        (current.hud_definition != canonical_source->definition &&
+         current.hud_definition != target_->definition) ||
+        (current.animation_type != source_symbol && current.animation_type != target_symbol_) ||
+        (current.hud_definition == target_->definition && !current.secondary_matches_hud) ||
+        !current.attachments_valid)
+    { target_ = nullptr; target_symbol_ = 0; return false; }
+
+    // Keep a logical source restore point. Model resources are borrowed live
+    // identities; restoration resolves the canonical source path instead of
+    // replaying these target pointers.
+    binding_ = binding;
+    original_ = current;
+    original_.world_definition = canonical_source->definition;
+    original_.hud_definition = canonical_source->definition;
+    original_.item_definition = canonical_source->definition;
+    original_.animation_type = source_symbol;
+    original_.secondary_matches_hud = true;
+    captured_ = attempted_ = world_prepared_ = true;
+    applied_ = maintenance_faulted_ = false;
+
+    if (!access_.AdoptPreparedWorld(binding_, *canonical_source, *target_, current))
+    {
+        Abandon();
+        return false;
+    }
+    // From this point a failure must retain captured_ so the lifecycle invokes
+    // the native retirement ledger; never silently abandon adopted writes.
+    return FinishHud();
+}
+
 bool KnifePairAdapter::CompletePreparedWorld(const KnifeModelBinding& replacement, const KnifeModelAsset& asset) noexcept
 {
     if (!captured_ || !world_prepared_ || applied_ || !target_ || asset.definition != target_->definition ||
         asset.model != target_->model || asset.skeleton != target_->skeleton || asset.animation_class != target_->animation_class ||
+        asset.graph_animation_class != target_->graph_animation_class ||
         !replacement.Valid() || replacement.scene_epoch != binding_.scene_epoch || replacement.xuid != binding_.xuid ||
         replacement.pawn != binding_.pawn || replacement.world != binding_.world || replacement.arms != binding_.arms ||
         replacement.weapon_graph_controller != binding_.weapon_graph_controller ||
@@ -124,8 +178,17 @@ bool KnifePairAdapter::FinishHud() noexcept
     if (!ReadOwned(current) ||
         current.world_definition != target_->definition ||
         current.hud_definition != target_->definition) { return false; }
-    if (!CanMutate() || !access_.Recollect(binding_) || !ReadOwned(current) ||
-        !current.secondary_matches_hud || !current.attachments_valid) { return false; }
+    // A pre-armed target definition commonly makes Source 2 construct the
+    // target HUD and its matching secondary skeleton natively. Recollecting an
+    // already-correct graph is redundant and can invalidate the live M9 HUD
+    // while its outer arms update is still returning. Recollect only after an
+    // actual HUD model change (or other proven skeleton mismatch).
+    if (!current.secondary_matches_hud)
+    {
+        if (!CanMutate() || !access_.Recollect(binding_) || !ReadOwned(current) ||
+            !current.secondary_matches_hud) return false;
+    }
+    if (!current.attachments_valid) return false;
     if (!CanMutate() || !access_.CompareAnimationType(binding_, current.animation_type, target_symbol_) ||
         !ReadOwned(current) || !PairReady(current, target_->definition, target_symbol_)) { return false; }
     committed_ = current;

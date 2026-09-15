@@ -5,9 +5,9 @@
 
 namespace nskinzcs2::runtime
 {
-inline constexpr std::uintptr_t kKnifeSetModelRva = 0x934CA0;
-inline constexpr std::uintptr_t kKnifeRecollectRva = 0x9040C0;
-inline constexpr std::uintptr_t kKnifeWorldModelNotifyRva = 0x7F6A70;
+inline constexpr std::uintptr_t kKnifeSetModelRva = 0x939940;
+inline constexpr std::uintptr_t kKnifeRecollectRva = 0x908D60;
+inline constexpr std::uintptr_t kKnifeWorldModelNotifyRva = 0x7FB710;
 const std::array<KnifeResourceEvidenceWindow, 7>& KnifeNativeEvidenceWindows() noexcept;
 bool VerifyKnifeNativeEvidence(std::uintptr_t client, std::size_t size, KnifeGraphReader&) noexcept;
 
@@ -20,11 +20,23 @@ struct KnifeNativeContext
     std::uintptr_t hud_body_controller = 0, slot_symbol = 0;
     KnifeGraphSymbols symbols;
     int source_definition = 0, target_definition = 0;
+    // The holstered pre-arm path already changed the exact owned world item
+    // definition/model to target before native equip. The active lifecycle
+    // must adopt that write and switch the HUD skeleton + weapon_type; treating
+    // the live target definition as a native no-op leaves source animations on
+    // target geometry.
+    bool world_prearmed = false;
     std::uintptr_t client = 0;
     std::size_t client_size = 0;
 };
 
 enum class KnifeBladePresence { Live, Gone, Replaced, Unreadable };
+// A live entity is not necessarily still owned by the watched player. A
+// dropped/picked knife can retain the same address, handle and creation tick
+// while its owner changes. Retirement must discard the old ledger in that
+// case instead of restoring the previous player's definition/model into the
+// new owner's weapon.
+enum class KnifeWorldOwnership { Owned, Transferred, Unreadable };
 enum class KnifeRetireResult { Restored, Discarded, Waiting, Failed };
 enum class KnifeRetirementGraph { Absent, Live, Unreadable };
 
@@ -47,6 +59,10 @@ public:
     virtual bool AtRetirementPoint() noexcept { return false; }
     virtual KnifeBladePresence BladePresence(const KnifeNativeContext&, KnifeBladeRole) noexcept
     { return KnifeBladePresence::Unreadable; }
+    // Unlike WorldBindingAlive, this deliberately does not require the knife
+    // to be active. It proves the same pawn still owns a holstered world knife.
+    virtual KnifeWorldOwnership WorldOwnership(const KnifeNativeContext&) noexcept
+    { return KnifeWorldOwnership::Unreadable; }
     virtual KnifeRetirementGraph RetirementGraph(const KnifeNativeContext&, KnifeModelBinding&) noexcept
     { return KnifeRetirementGraph::Unreadable; }
     virtual bool ReadWorldItemDefinition(const KnifeNativeContext&, int&) noexcept { return false; }
@@ -73,6 +89,8 @@ public:
     std::uintptr_t ExistingAnimationType(const KnifeModelAsset&) noexcept override;
     bool ReadItemDefinition(const KnifeModelBinding&, int&) noexcept override;
     bool CompareItemDefinition(const KnifeModelBinding&, int expected, int desired) noexcept override;
+    bool AdoptPreparedWorld(const KnifeModelBinding&, const KnifeModelAsset& source,
+        const KnifeModelAsset& target, const KnifePairState& current) noexcept override;
     bool SetBladeModel(const KnifeModelBinding&, KnifeBladeRole, const KnifeModelAsset&) noexcept override;
     bool Recollect(const KnifeModelBinding&) noexcept override;
     bool CompareAnimationType(const KnifeModelBinding&, std::uintptr_t expected, std::uintptr_t desired) noexcept override;

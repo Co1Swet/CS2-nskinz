@@ -1,5 +1,18 @@
 # Changelog / 更新记录
 
+## v0.5.0-beta — 2026-09-15
+
+- Preserved the proven firearm skin path while integrating the current experimental knife-model/animation lifecycle and default-team glove transaction paths for HLAE demo-time updates.
+- 保留已验证的枪械换肤路径，同时把当前刀模/动画生命周期与默认阵营手套事务路径整理为 HLAE Demo 播放期间更新的测试版。
+- Hardened default T/CT glove mutation: engine-owned paint/seed/wear attributes are constructed before committing the item-view identity, and every partial failure restores the complete original state.
+- 加固 T/CT 默认手套写入：先通过引擎构造涂装/种子/磨损属性，再提交物品视图身份；任一中途失败都会完整回滚，避免半初始化对象引发闪退。
+- Preserved knife listeners across lifecycle adoption and separated weapon/HUD consumers to reduce pistol-slot placement and stale original-dagger animation reuse during demo reloads.
+- 在刀实体生命周期接管时保留监听器，并分离武器与 HUD 消费者，针对重载 Demo 后刀模落入手枪位置及复用原皮匕首动作的问题进行修正。
+- Marked this build as `v0.5.0-beta` in its filenames, panel title and startup log. Verified baseline: CS2 Steam Build 25218825 / ClientVersion 2000908 / Patch 1.41.8.1 / Source revision 10981323; HLAE 2.191.1.
+- DLL 文件名、面板标题和启动日志均标记为 `v0.5.0-beta`。已验证基线：CS2 Steam Build 25218825 / ClientVersion 2000908 / Patch 1.41.8.1 / Source revision 10981323；HLAE 2.191.1。
+
+This is a beta build: automated regression and isolated loading are release gates, while rendered glove/knife acceptance remains an explicit user-test boundary. See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.0-beta.md).
+
 ## v0.4.5 — 2026-09-02
 
 - Fixed stock-firearm updates on clients where paint/seed/wear attributes do not yet exist by using the byte-verified native attribute-vector append path.

@@ -75,7 +75,7 @@ bool MatchesKnifeBodyGraphLayoutEvidence(const std::span<const std::uint8_t> con
         0x48,0x89,0x9B,0x48,0x04,0,0,0x48,0x89,0xAB,0x50,0x04,0,0 };
     // Native controller getter, then graph at +450 used by the AG2 update path.
     constexpr std::array<std::uint8_t, kKnifeBodyGraphUseSize> expected_use {
-        0xE8,0x23,0x53,0x59,0,0x48,0x8B,0x98,0x50,0x04,0,0,0x48,0x85,0xDB };
+        0xE8,0x03,0x9D,0x59,0,0x48,0x8B,0x98,0x50,0x04,0,0,0x48,0x85,0xDB };
     return std::ranges::equal(construction, expected_construction) && std::ranges::equal(use, expected_use);
 }
 
@@ -130,7 +130,8 @@ KnifeGraphProbeResult ProbeKnifeWeaponType(const KnifeModelBinding& binding,
     const KnifeGraphSymbols& symbols, const bool native_layout_verified, KnifeGraphReader& reader) noexcept
 {
     using Status = KnifeGraphProbeStatus;
-    const auto fail = [](Status status) { return KnifeGraphProbeResult {status, {}}; };
+    const auto fail = [](Status status, const std::uintptr_t observed = 0)
+    { return KnifeGraphProbeResult {status, {}, observed}; };
     if (!native_layout_verified) { return fail(Status::LayoutUnverified); }
     if (!binding.Valid()) { return fail(Status::BindingInvalid); }
     if (symbols.weapon_type_name == 0 || symbols.source_type == 0) { return fail(Status::SymbolsMissing); }
@@ -168,11 +169,11 @@ KnifeGraphProbeResult ProbeKnifeWeaponType(const KnifeModelBinding& binding,
     };
     KnifeGraphParameter first, second;
     const auto status = sample(first);
-    if (status != Status::Ready) { return fail(status); }
+    if (status != Status::Ready) { return fail(status, first.value); }
     // Never retain a cached node address across graph rebuilds. This catches
     // observable drift during a probe; it does not create a thread-safe write point.
-    if (sample(second) != Status::Ready || first != second) { return fail(Status::ChangedDuringRead); }
-    return {symbols.target_type != 0 ? Status::Ready : Status::SourceVerifiedTargetMissing, first};
+    if (sample(second) != Status::Ready || first != second) { return fail(Status::ChangedDuringRead, second.value); }
+    return {symbols.target_type != 0 ? Status::Ready : Status::SourceVerifiedTargetMissing, first, first.value};
 }
 
 const wchar_t* KnifeGraphProbeStatusText(const KnifeGraphProbeStatus status) noexcept

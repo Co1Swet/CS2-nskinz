@@ -63,14 +63,14 @@
   <PropertyGroup>
     <IntDir>$(ProjectDir)build\$(Configuration)\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\$(Configuration)\</OutDir>
-    <TargetName>Lyan_nskinz v0.4.5 EN</TargetName>
+    <TargetName>Lyan_nskinz v0.5.0-beta EN</TargetName>
     <VCToolsVersion>14.44.35207</VCToolsVersion>
     <IncludePath>$(ProjectDir)src;$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;$(ProjectDir)third_party\json;$(ProjectDir)third_party\MinHook\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseZhCn|x64'">
     <IntDir>$(ProjectDir)build\ReleaseZhCn\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\Release\</OutDir>
-    <TargetName>Lyan_nskinz v0.4.5 zh-CN</TargetName>
+    <TargetName>Lyan_nskinz v0.5.0-beta zh-CN</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -148,10 +148,12 @@
     <ClInclude Include="src\Cs2\GlobalResourceSwapper.hpp" />
     <ClInclude Include="src\Cs2\Runtime.hpp" />
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
+    <ClInclude Include="src\Runtime\GloveVisualRefresh.hpp" />
     <ClInclude Include="src\Runtime\KnifeAnimation.hpp" />
     <ClInclude Include="src\Runtime\KnifeModel.hpp" />
     <ClInclude Include="src\Runtime\KnifeGraph.hpp" />
     <ClInclude Include="src\Runtime\KnifeResources.hpp" />
+    <ClInclude Include="src\Runtime\KnifeSerialization.hpp" />
     <ClInclude Include="src\Runtime\KnifeNative.hpp" />
     <ClInclude Include="src\Runtime\KnifeLifecycle.hpp" />
     <ClInclude Include="src\Runtime\KnifeFinish.hpp" />
@@ -184,10 +186,12 @@
     <ClCompile Include="src\Cs2\Runtime.cpp" />
     <ClCompile Include="src\dllmain.cpp" />
     <ClCompile Include="src\Runtime\GloveAppearance.cpp" />
+    <ClCompile Include="src\Runtime\GloveVisualRefresh.cpp" />
     <ClCompile Include="src\Runtime\KnifeAnimation.cpp" />
     <ClCompile Include="src\Runtime\KnifeModel.cpp" />
     <ClCompile Include="src\Runtime\KnifeGraph.cpp" />
     <ClCompile Include="src\Runtime\KnifeResources.cpp" />
+    <ClCompile Include="src\Runtime\KnifeSerialization.cpp" />
     <ClCompile Include="src\Runtime\KnifeNative.cpp" />
     <ClCompile Include="src\Runtime\KnifeLifecycle.cpp" />
     <ClCompile Include="src\Runtime\KnifePair.cpp" />

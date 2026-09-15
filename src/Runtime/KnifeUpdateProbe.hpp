@@ -9,16 +9,21 @@
 
 namespace nskinzcs2::runtime
 {
-inline constexpr std::uintptr_t kKnifeNativeUpdateRva = 0x8E5390;
-inline constexpr std::uintptr_t kKnifeNativeUpdateCall1Rva = 0x104E40E;
-inline constexpr std::uintptr_t kKnifeNativeUpdateCall2Rva = 0x104E432;
-inline constexpr std::uintptr_t kKnifeNativeGraphEvaluationCallRva = 0x104E4CF;
-inline constexpr std::uintptr_t kKnifeArmsUpdateRva = 0x104E310;
-inline constexpr std::uintptr_t kKnifeArmsUpdateCallRva = 0x104E282;
+inline constexpr std::uintptr_t kKnifeNativeUpdateRva = 0x8EA030;
+inline constexpr std::uintptr_t kKnifeNativeUpdateCall1Rva = 0x105343E;
+inline constexpr std::uintptr_t kKnifeNativeUpdateCall2Rva = 0x1053462;
+inline constexpr std::uintptr_t kKnifeNativeGraphEvaluationCallRva = 0x10534FF;
+inline constexpr std::uintptr_t kKnifeArmsUpdateRva = 0x1053340;
+inline constexpr std::uintptr_t kKnifeArmsUpdateCallRva = 0x10532B2;
 bool MatchesKnifeArmsUpdateEvidence(std::span<const std::uint8_t> entry, std::span<const std::uint8_t> call) noexcept;
 bool MatchesKnifeUpdateCallEvidence(std::span<const std::uint8_t> entry,
     std::span<const std::uint8_t> call1, std::span<const std::uint8_t> call2,
     std::span<const std::uint8_t> evaluation) noexcept;
+bool ShouldDispatchKnifeWeaponListener(std::uintptr_t expected_controller,
+    std::uintptr_t expected_world, std::uintptr_t listener_world,
+    std::uintptr_t actual_controller, std::uintptr_t actual_world) noexcept;
+bool ShouldDispatchKnifeArmsListener(std::uintptr_t listener_arms,
+    std::uintptr_t actual_arms) noexcept;
 
 struct KnifeUpdateTiming
 {
@@ -28,7 +33,7 @@ struct KnifeUpdateTiming
     bool operator==(const KnifeUpdateTiming&) const = default;
 };
 
-enum class KnifeUpdatePhase { BeforeArms, AfterWeapon, AfterArms };
+enum class KnifeUpdatePhase { BeforeArms, BeforeWeapon, AfterWeapon, AfterArms };
 struct KnifeUpdateEvent
 {
     KnifeUpdatePhase phase;
@@ -42,7 +47,8 @@ class KnifeUpdateProbe
 public:
     bool Install(HMODULE client) noexcept;
     using Listener = void(*)(const KnifeUpdateEvent&) noexcept;
-    void Listen(DWORD game_thread, Listener listener) noexcept;
+    void Listen(DWORD game_thread, Listener listener,
+        std::uintptr_t arms_filter, std::uintptr_t world_filter) noexcept;
     void Publish(DWORD game_thread, std::uintptr_t controller, std::uintptr_t world,
         std::uintptr_t graph, std::uintptr_t source_symbol) noexcept;
     void Clear() noexcept;
@@ -62,6 +68,8 @@ private:
     std::atomic<ArmsUpdate> arms_original_ {nullptr};
     std::atomic<Listener> listener_ {nullptr};
     std::atomic<DWORD> listener_thread_ {0};
+    std::atomic<std::uintptr_t> listener_arms_filter_ {0};
+    std::atomic<std::uintptr_t> listener_world_filter_ {0};
     static thread_local std::uintptr_t boundary_arms_;
     static thread_local unsigned boundary_depth_;
     std::uintptr_t client_ = 0;

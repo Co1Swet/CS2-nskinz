@@ -21,9 +21,13 @@ struct KnifeModelRequest
 struct KnifeModelAsset
 {
     int definition;
+    // m_szName / m_nSubclassID identity used to select the weapon VData.
     std::string_view animation_class;
     std::string_view model;
     std::string_view skeleton;
+    // m_szAnimClass identity consumed by the HUD weapon_type graph. Current
+    // clients can publish this shorter value after a subclass/VData rebuild.
+    std::string_view graph_animation_class;
 };
 
 // Data baseline: CS2 2000899 / 1.41.7.8, scripts/weapons.vdata_c.
@@ -31,6 +35,7 @@ struct KnifeModelAsset
 const std::array<KnifeModelAsset, 22>& KnifeModelAssets() noexcept;
 const KnifeModelAsset* FindKnifeModelAsset(int definition) noexcept;
 const KnifeModelAsset* FindKnifeModelAssetByPath(std::string_view path) noexcept;
+const KnifeModelAsset* FindKnifeModelAssetByAnimationClass(std::string_view animation_class) noexcept;
 KnifeModelRequest BuildKnifeModelRequest(const model::KnifeProfile& profile) noexcept;
 
 struct KnifeModelEntityIdentity

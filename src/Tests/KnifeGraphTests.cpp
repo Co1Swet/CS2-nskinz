@@ -1,5 +1,6 @@
 #include "Runtime/KnifeGraph.hpp"
 #include "Runtime/KnifeResources.hpp"
+#include "Runtime/KnifeSerialization.hpp"
 #include "Runtime/KnifeNative.hpp"
 #include "Runtime/KnifeLifecycle.hpp"
 #include "Runtime/KnifeFinish.hpp"
@@ -373,10 +374,17 @@ void ResourcePairOwnership()
         Check(FindKnifeModelAssetByPath(asset.model) == &asset &&
             FindKnifeModelAssetByPath(std::string(asset.model) + "_c") == &asset,
             "source definition is derived from canonical model path, not Econ identity");
+        Check(FindKnifeModelAssetByAnimationClass(asset.animation_class) == &asset &&
+            FindKnifeModelAssetByAnimationClass(asset.graph_animation_class) == &asset,
+            "source definition is recoverable from either native knife animation class");
     }
     Check(!FindKnifeModelAssetByPath("weapons/models/rifles/ak47/weapon_ak47.vmdl") &&
         !FindKnifeModelAssetByPath("../knife_m9.vmdl") && !FindKnifeModelAssetByPath("weapon_knife_m9_bayonet"),
         "animation class and arbitrary model strings are not model path evidence");
+    Check(FindKnifeModelAssetByAnimationClass("weapon_knife_t")->definition == 59 &&
+        !FindKnifeModelAssetByAnimationClass("weapon_deagle") &&
+        !FindKnifeModelAssetByAnimationClass(""),
+        "mixed target geometry can recover the recorded T knife animation without accepting gun classes");
 }
 
 struct NativeFixture final : KnifeNativeHost
@@ -385,6 +393,7 @@ struct NativeFixture final : KnifeNativeHost
     KnifeNativeContext context;
     bool alive = true, safe = true, attached = true, fail_after_change = false;
     bool world_alive = true;
+    KnifeWorldOwnership world_ownership = KnifeWorldOwnership::Owned;
     int item_definition = 0;
     KnifeBladePresence old_hud_presence = KnifeBladePresence::Gone;
     bool retirement_safe = true;
@@ -437,6 +446,8 @@ struct NativeFixture final : KnifeNativeHost
     bool BindingAlive(const KnifeNativeContext& c) noexcept override { return alive && c.binding == f.binding; }
     bool WorldBindingAlive(const KnifeNativeContext& c) noexcept override
     { return world_alive && epoch == c.binding.scene_epoch && c.binding.world == f.binding.world && c.binding.pawn == f.binding.pawn; }
+    KnifeWorldOwnership WorldOwnership(const KnifeNativeContext& c) noexcept override
+    { return epoch == c.binding.scene_epoch ? world_ownership : KnifeWorldOwnership::Unreadable; }
     bool ReadWorldItemDefinition(const KnifeNativeContext& c, int& out) noexcept override
     {
         if (epoch != c.binding.scene_epoch || presence[0] != KnifeBladePresence::Live) return false;
@@ -445,7 +456,7 @@ struct NativeFixture final : KnifeNativeHost
     }
     bool CompareExchangeWorldItemDefinition(const KnifeNativeContext& c, int expected, int desired) noexcept override
     {
-        if ((!safe && !retirement_safe) || epoch != c.binding.scene_epoch ||
+        if ((!safe && !retirement_safe) || epoch != c.binding.scene_epoch || world_ownership != KnifeWorldOwnership::Owned ||
             presence[0] != KnifeBladePresence::Live || item_definition != expected ||
             (desired != c.source_definition && desired != c.target_definition)) return false;
         const bool ok = Begin(4);
@@ -503,6 +514,7 @@ struct NativeFixture final : KnifeNativeHost
         const auto* asset = FindKnifeModelAssetByPath(path);
         const auto role = entity == f.binding.world.address ? 0 : 1;
         if (entry != context.client + kKnifeSetModelRva || !asset || (!safe && !retirement_safe) ||
+            (role == 0 && world_ownership != KnifeWorldOwnership::Owned) ||
             (entity != f.binding.world.address && entity != f.binding.hud_weapon.address)) return false;
         const bool ok = Begin(role);
         if (ok || fail_after_change)
@@ -562,6 +574,124 @@ void StockKnifeModelHandoff()
                 Check(port.Read(f.context.binding, restored) && restored.world_definition == source && restored.hud_definition == source,
                     "disable restores the correct CT/T source model, not the other team's knife");
             }
+}
+
+void NativePrearmedHandoff()
+{
+    Check(ShouldWaitForHolsteredKnifePrearm(true, false, false, 525, 508),
+        "an unprepared active source knife waits for holstered pre-arm");
+    Check(!ShouldWaitForHolsteredKnifePrearm(true, true, false, 525, 508) &&
+        !ShouldWaitForHolsteredKnifePrearm(true, false, true, 525, 508) &&
+        !ShouldWaitForHolsteredKnifePrearm(true, false, false, 508, 508),
+        "prearmed, already-owned and native-target pairs do not enter the active rebuild wait");
+    Check(!ShouldWaitForHolsteredKnifePrearm(true, false, false, 59, 507, true),
+        "a fully verified active knife is no longer stranded once its native animation cache bridge is armed");
+    for (int source : {42, 59, 507, 508, 515, 525})
+        for (int target : {42, 59, 507, 508, 515, 525})
+            for (bool bridge : {false, true})
+                Check(ShouldWaitForHolsteredKnifePrearm(true, false, false, source, target, bridge) ==
+                    (source != target && !bridge), "active-source gate requires verified bridge for every knife pair");
+    const KnifeModelRequest leased {76561199840349579ull, 507};
+    Check(ShouldPreserveKnifePrearmOnRefresh(true, true, leased, leased),
+        "repeated Update and unrelated finish changes keep an owned same-model prearm");
+    Check(!ShouldPreserveKnifePrearmOnRefresh(false, true, leased, leased) &&
+        !ShouldPreserveKnifePrearmOnRefresh(true, false, leased, leased) &&
+        !ShouldPreserveKnifePrearmOnRefresh(true, true, leased, {}) &&
+        !ShouldPreserveKnifePrearmOnRefresh(true, true, leased, {leased.xuid, 508}) &&
+        !ShouldPreserveKnifePrearmOnRefresh(true, true, leased, {leased.xuid + 1, 507}) &&
+        !ShouldPreserveKnifePrearmOnRefresh(true, true, {}, {}),
+        "seek, ownership transfer, disable and changed model/player never inherit a prearm lease");
+    Check(ShouldKeepKnifeUpdateListener(true, true, false, true, false, true, false) &&
+        ShouldKeepKnifeUpdateListener(true, true, false, true, false, false, true) &&
+        ShouldKeepKnifeUpdateListener(true, true, false, true, true, false, false),
+        "owned, prearmed and freshly read knife bindings retain the exact native callback listener");
+    Check(!ShouldKeepKnifeUpdateListener(false, true, false, true, true, true, true) &&
+        !ShouldKeepKnifeUpdateListener(true, false, false, true, true, true, true) &&
+        !ShouldKeepKnifeUpdateListener(true, true, true, true, true, true, true) &&
+        !ShouldKeepKnifeUpdateListener(true, true, false, false, true, true, true) &&
+        !ShouldKeepKnifeUpdateListener(true, true, false, true, false, false, false),
+        "disabled, online, seeking, unauthorized and unowned gaps clear the knife callback listener");
+    NativeFixture f(42, 515);
+    f.context.world_prearmed = true;
+    f.item_definition = f.context.target_definition;
+    f.Name(0, FindKnifeModelAsset(f.context.target_definition)->model);
+    f.Set<std::uintptr_t>(0xE0000, 0xF1000);
+
+    KnifeLifecycle lifecycle(f);
+    const KnifeModelRequest request {f.context.binding.xuid, f.context.target_definition};
+    const auto event = [&](const KnifeUpdatePhase phase)
+    {
+        const auto& b = f.f.binding;
+        return KnifeUpdateEvent {phase, b.arms.address, b.weapon_graph_controller, b.world.address};
+    };
+    lifecycle.Stage(request, &f.context, 100);
+    lifecycle.OnUpdate(event(KnifeUpdatePhase::BeforeArms), 100);
+    Check(lifecycle.Phase() == KnifeModelPhase::WaitingBinding &&
+        !lifecycle.Owns(request, f.context.binding) && f.events.empty(),
+        "prearmed world never adopts against the outgoing pistol graph at BeforeArms");
+    lifecycle.OnUpdate(event(KnifeUpdatePhase::BeforeWeapon), 100);
+    lifecycle.OnUpdate(event(KnifeUpdatePhase::AfterWeapon), 100);
+    Check(lifecycle.Phase() == KnifeModelPhase::Applied && lifecycle.Owns(request, f.context.binding),
+        "prearmed world becomes an owned target pair at the exact knife weapon callback");
+    Check(lifecycle.Statistics().attempts == 1 && lifecycle.Statistics().prearmed_adoptions == 1 &&
+        lifecycle.Statistics().applied == 1 && f.events == std::vector<int>{1,2,3},
+        "prearmed handoff synchronizes HUD identity/model/recollection/weapon_type before arms update and never rebuilds the world again");
+
+    NativeFixture after_arms(42, 515);
+    after_arms.context.world_prearmed = true;
+    after_arms.item_definition = after_arms.context.target_definition;
+    after_arms.Name(0, FindKnifeModelAsset(after_arms.context.target_definition)->model);
+    after_arms.Set<std::uintptr_t>(0xE0000, 0xF1000);
+    KnifeLifecycle after_arms_lifecycle(after_arms);
+    const KnifeModelRequest after_arms_request {
+        after_arms.context.binding.xuid, after_arms.context.target_definition};
+    after_arms_lifecycle.Stage(after_arms_request, &after_arms.context, 100);
+    const auto& after_arms_binding = after_arms.context.binding;
+    after_arms_lifecycle.OnUpdate({KnifeUpdatePhase::AfterArms,
+        after_arms_binding.arms.address, 0, 0}, 100);
+    Check(after_arms_lifecycle.Owns(after_arms_request, after_arms.context.binding) &&
+        after_arms_lifecycle.Statistics().prearmed_adoptions == 1,
+        "prearmed target graph can be adopted immediately after the native arms updater rebuilt it");
+
+    KnifeNativePairAccess reader(f.context, f);
+    KnifePairState target;
+    Check(reader.Read(f.context.binding, target) &&
+        target.world_definition == f.context.target_definition &&
+        target.hud_definition == f.context.target_definition &&
+        target.animation_type == f.context.symbols.target_type && target.secondary_matches_hud,
+        "prearmed handoff removes the source HUD skeleton and source animation branch");
+
+    lifecycle.Request({});
+    lifecycle.OnUpdate(event(KnifeUpdatePhase::BeforeArms), 101);
+    KnifePairState restored;
+    Check(reader.Read(f.context.binding, restored) &&
+        restored.world_definition == f.context.source_definition &&
+        restored.hud_definition == f.context.source_definition &&
+        restored.item_definition == f.context.source_definition &&
+        restored.animation_type == f.context.symbols.source_type,
+        "prearmed adoption keeps the original CT/T knife as a complete restore identity");
+
+    NativeFixture inherited(525, 508);
+    inherited.context.world_prearmed = true;
+    inherited.item_definition = inherited.context.target_definition;
+    inherited.Name(0, FindKnifeModelAsset(inherited.context.target_definition)->model);
+    inherited.Name(1, FindKnifeModelAsset(inherited.context.target_definition)->model);
+    inherited.Set<std::uintptr_t>(0xE0000, 0xF1000);
+    inherited.Set<std::uintptr_t>(0xE1000, 0xF1000);
+    inherited.Set<std::uintptr_t>(0xF6000, 0xFA000);
+    KnifeLifecycle inherited_lifecycle(inherited);
+    const KnifeModelRequest inherited_request {
+        inherited.context.binding.xuid, inherited.context.target_definition};
+    inherited_lifecycle.Stage(inherited_request, &inherited.context, 200);
+    const auto& inherited_binding = inherited.context.binding;
+    inherited_lifecycle.OnUpdate({KnifeUpdatePhase::BeforeWeapon,
+        inherited_binding.arms.address, inherited_binding.weapon_graph_controller,
+        inherited_binding.world.address}, 200);
+    Check(inherited_lifecycle.Owns(inherited_request, inherited.context.binding) &&
+        inherited.calls[0] == 0 && inherited.calls[1] == 0 && inherited.calls[2] == 0 &&
+        inherited.events == std::vector<int>{3},
+        "native target M9 HUD/skeleton skips SetModel and recollection, changing only weapon_type");
+    std::cout << "knife_prearmed_atomic_handoff=PASS; native_game_calls=0\n";
 }
 
 void NativeHudHandoff()
@@ -626,7 +756,8 @@ void NativePairedPort()
     f.safe = true;
     Check(pair.Capture(binding) && pair.ApplyPair(binding, *FindKnifeModelAsset(508), binding) &&
         pair.VerifyPair(binding, *FindKnifeModelAsset(508)), "real paired port commits fixture models, skeleton and ID node");
-    Check(f.events == std::vector<int>{4,0,1,2,3}, "native port invokes exact item/world/HUD/recollect/ID order");
+    Check(f.events == std::vector<int>{4,0,1,2,3},
+        "native port invokes exact world-item/world/HUD/recollect/ID order");
     const auto name_reads_before = f.model_name_reads;
     for (int i = 0; i < 128; ++i)
     {
@@ -722,7 +853,8 @@ void NativeRetirement()
         if (scenario == 2) f.fail_event = 0;
         if (scenario == 3) f.fail_event = 2;
         if (scenario == 4) f.fail_event = 3;
-        Check(access.RetireDetached() == KnifeRetireResult::Failed, "unreadable/failing retirement is not reported as gone or restored");
+        Check(access.RetireDetached() == KnifeRetireResult::Failed,
+            "unreadable/failing retirement is not reported as gone or restored");
         Check(f.calls[0] == 2, "HUD failure does not prevent world restoration attempt");
         const auto calls = f.calls;
         for (int i = 0; i < 128; ++i) Check(access.RetireDetached() == KnifeRetireResult::Failed, "failed cleanup latched");
@@ -743,6 +875,35 @@ void NativeRetirement()
     f.after_set = {}; f.retirement_safe = true;
     Check(access.RetireDetached() == KnifeRetireResult::Restored && f.calls[0] == 2 && f.calls[1] == 2 && f.calls[2] == 2,
         "resuming retirement retains graph-dirty state without repeating restored model");
+
+    NativeFixture transferred;
+    KnifeNativePairAccess transferred_access(transferred.context, transferred);
+    KnifePairAdapter transferred_pair(transferred_access);
+    apply(transferred, transferred_pair);
+    transferred.world_ownership = KnifeWorldOwnership::Transferred;
+    Check(transferred_access.RetireDetached() == KnifeRetireResult::Discarded,
+        "dropped world knife discards the old player's definition/model restore ledger");
+    Check(transferred.item_definition == transferred.context.target_definition &&
+        transferred.calls[0] == 1 && transferred.calls[4] == 1 &&
+        transferred.calls[1] == 2 && transferred.calls[2] == 2 && transferred.calls[3] == 2,
+        "drop retirement never writes world definition/model into the new owner but still cleans the old HUD graph");
+    const auto transferred_calls = transferred.calls;
+    Check(transferred_access.RetireDetached() == KnifeRetireResult::Discarded &&
+        transferred.calls == transferred_calls,
+        "transferred-world discard is idempotent");
+
+    NativeFixture unreadable_owner;
+    KnifeNativePairAccess unreadable_access(unreadable_owner.context, unreadable_owner);
+    KnifePairAdapter unreadable_pair(unreadable_access);
+    apply(unreadable_owner, unreadable_pair);
+    const auto before_unreadable = unreadable_owner.calls;
+    unreadable_owner.world_ownership = KnifeWorldOwnership::Unreadable;
+    Check(unreadable_access.RetireDetached() == KnifeRetireResult::Waiting &&
+        unreadable_owner.calls == before_unreadable,
+        "temporarily unreadable ownership waits without any model/definition write");
+    unreadable_owner.world_ownership = KnifeWorldOwnership::Owned;
+    Check(unreadable_access.RetireDetached() == KnifeRetireResult::Restored,
+        "ownership proof can recover and finish retirement on a later boundary");
     std::cout << "knife_retirement_fixture=PASS; native_game_calls=0\n";
 }
 
@@ -776,7 +937,8 @@ void NativeLifecycle()
     session.OnUpdate(event(f, KnifeUpdatePhase::BeforeArms), 109);
     session.OnUpdate(event(f, KnifeUpdatePhase::AfterWeapon), 109);
     Check(session.Phase() == KnifeModelPhase::Applied && session.Owns(request, f.context.binding), "fresh matching native callback commits paired model");
-    Check(session.Statistics().hud_handoffs == 1 && f.events == std::vector<int>{4,0,1,2,3}, "handoff never repeats world SetModel");
+    Check(session.Statistics().hud_handoffs == 1 && f.events == std::vector<int>{4,0,1,2,3},
+        "handoff synchronizes the HUD model and never repeats world SetModel");
     for (int i = 0; i < 128; ++i)
     {
         session.Stage(request, &f.context, 110 + i);
@@ -786,6 +948,25 @@ void NativeLifecycle()
     }
     Check(session.Statistics().attempts == 1 && session.Statistics().maintenance == 128 && f.calls[0] == 1 && f.calls[2] == 1,
         "same model request, including unrelated finish edits, does not reload model");
+
+    {
+        NativeFixture rebuilt_generation;
+        KnifeLifecycle rebuilt_session(rebuilt_generation);
+        rebuilt_session.Stage(request, &rebuilt_generation.context, 200);
+        rebuilt_session.OnUpdate(event(rebuilt_generation, KnifeUpdatePhase::BeforeArms), 200);
+        rebuilt_session.OnUpdate(event(rebuilt_generation, KnifeUpdatePhase::AfterWeapon), 200);
+        Check(rebuilt_session.HasTransaction() &&
+            rebuilt_session.Phase() == KnifeModelPhase::WaitingHudRebuild,
+            "entity-rebuild fixture owns a pointer-bearing pending transaction before reset");
+        const auto calls_before_rebuild = rebuilt_generation.calls;
+        rebuilt_session.ResetForEntityRebuild();
+        Check(!rebuilt_session.HasTransaction() &&
+            rebuilt_session.Active() == nullptr &&
+            rebuilt_session.Phase() == KnifeModelPhase::WaitingBinding &&
+            rebuilt_generation.calls == calls_before_rebuild,
+            "entity rebuild abandons stale knife pointers without writing to retiring entities");
+    }
+
     session.Request({});
     session.OnUpdate(event(f, KnifeUpdatePhase::BeforeArms), 250);
     Check(!session.HasTransaction() && session.Phase() == KnifeModelPhase::Disabled && session.Statistics().restored == 1,
@@ -939,6 +1120,81 @@ std::vector<std::uint8_t> ReadPeRva(const wchar_t* path, std::uintptr_t rva, std
     throw std::runtime_error("evidence RVA not in PE section");
 }
 
+std::array<const void*, 6> serialization_arguments {};
+int serialization_cached_calls = 0, serialization_local_calls = 0;
+void* __fastcall CachedSerializationFixture(void* manager, void* output, const void* graph,
+    const void* children, const void* sets, const void* skeletons)
+{
+    ++serialization_cached_calls;
+    serialization_arguments = {manager, output, graph, children, sets, skeletons};
+    return output;
+}
+void* __fastcall LocalSerializationFixture(void* output, const void* graph,
+    const void* children, const void* sets, const void* skeletons)
+{
+    ++serialization_local_calls;
+    serialization_arguments = {nullptr, output, graph, children, sets, skeletons};
+    return output;
+}
+
+void KnifeSerializationRouting()
+{
+    std::uint32_t all = 0;
+    for (const auto& changed : KnifeModelAssets())
+    {
+        const auto bit = KnifeSerializationModelBit(changed.definition);
+        Check(bit && !(all & bit), "each knife needs a unique serialization scope");
+        all |= bit;
+        for (const auto& queried : KnifeModelAssets())
+        {
+            Check(NeedsLocalKnifeSerialization(true, bit, queried.skeleton, false) ==
+                (queried.definition == changed.definition), "only modified skeleton with absent demo row uses local context");
+            Check(!NeedsLocalKnifeSerialization(true, bit, queried.skeleton, true), "recorded skeleton remains native cached");
+            Check(!NeedsLocalKnifeSerialization(false, bit, queried.skeleton, false), "no online serialization routing");
+        }
+    }
+    Check(!KnifeSerializationModelBit(524) && !KnifeSerializationModelBit(0), "unsupported models cannot arm bridge");
+    Check(!NeedsLocalKnifeSerialization(true, 0, KnifeModelAssets()[0].skeleton, false), "unmodified state unchanged");
+    for (const auto* path : {"", "animation/skeletons/weapons/weapon_ak47.vnmskel",
+             "animation/skeletons/arms.vnmskel", "../knife_karambit.vnmskel",
+             "animation/skeletons/weapons/knife_karambit.vnmskel.extra"})
+        Check(!NeedsLocalKnifeSerialization(true, all, path, false), "unknown/arms/gun paths outside knife bridge");
+    int storage[6] {};
+    auto* output = &storage[1];
+    Check(DispatchKnifeSerialization(false, CachedSerializationFixture, LocalSerializationFixture,
+        &storage[0], output, &storage[2], &storage[3], &storage[4], &storage[5]) == output &&
+        serialization_arguments == std::array<const void*, 6>{&storage[0], output, &storage[2], &storage[3], &storage[4], &storage[5]} &&
+        serialization_cached_calls == 1 && serialization_local_calls == 0, "recorded ABI forwards all six original arguments");
+    Check(DispatchKnifeSerialization(true, CachedSerializationFixture, LocalSerializationFixture,
+        &storage[0], output, &storage[2], &storage[3], &storage[4], &storage[5]) == output &&
+        serialization_arguments == std::array<const void*, 6>{nullptr, output, &storage[2], &storage[3], &storage[4], &storage[5]} &&
+        serialization_cached_calls == 1 && serialization_local_calls == 1, "local ABI shifts arguments without changing output/graph/skeletons");
+    Memory memory;
+    constexpr std::uintptr_t base = 0x10000000, size = 0x3000000;
+    for (const auto& window : KnifeSerializationEvidenceWindows())
+        for (std::size_t i = 0; i < window.bytes.size(); ++i) memory.Set(base + window.rva + i, window.bytes[i]);
+    Check(VerifyKnifeSerializationEvidence(base, size, memory), "serialization evidence accepts exact fixtures");
+    for (const auto& window : KnifeSerializationEvidenceWindows())
+    {
+        for (std::size_t i = 0; i < window.bytes.size(); ++i)
+        {
+            auto& byte = memory.bytes.at(base + window.rva + i);
+            byte ^= 1;
+            Check(!VerifyKnifeSerializationEvidence(base, size, memory), "all changed cache/local/table ABI bytes rejected");
+            byte ^= 1;
+        }
+        const auto address = base + window.rva + window.bytes.size() - 1;
+        const auto saved = memory.bytes.at(address);
+        memory.bytes.erase(address);
+        Check(!VerifyKnifeSerializationEvidence(base, size, memory), "truncated serialization ABI rejected");
+        memory.Set(address, saved);
+    }
+    Check(!VerifyKnifeSerializationEvidence(base, 0x2239700, memory) &&
+        !VerifyKnifeSerializationEvidence(std::numeric_limits<std::uintptr_t>::max()-4, size, memory),
+        "serialization global pointer and image bounds checked");
+    std::cout << "knife_serialization_routing=PASS; 484 scoped pairs; offline_only=1; native_arguments_preserved=1\n";
+}
+
 void InstalledBinaryEvidence()
 {
     const auto* client = _wgetenv(L"NSKINZCS2_KNIFE_CLIENT_DLL");
@@ -948,6 +1204,12 @@ void InstalledBinaryEvidence()
     Check(client != nullptr && animation != nullptr, "both binary paths required");
     Memory resources;
     constexpr std::uintptr_t image_base = 0x10000000, image_size = 0x3000000;
+    for (const auto& window : KnifeSerializationEvidenceWindows())
+    {
+        const auto bytes = ReadPeRva(client, window.rva, window.bytes.size());
+        for (std::size_t i = 0; i < bytes.size(); ++i) resources.Set(image_base + window.rva + i, bytes[i]);
+    }
+    Check(VerifyKnifeSerializationEvidence(image_base, image_size, resources), "installed recorded/local animation serialization ABI");
     for (const auto& window : KnifeFinishEvidenceWindows())
     {
         const auto bytes = ReadPeRva(client, window.rva, window.bytes.size());
@@ -1104,9 +1366,11 @@ void RunKnifeGraphTests()
     NativePairedPort();
     NativeHudHandoff();
     StockKnifeModelHandoff();
+    NativePrearmedHandoff();
     NativeRetirement();
     NativeLifecycle();
+    KnifeSerializationRouting();
     Check(nskinzcs2::runtime::ProbeIndependentKnifeHudBindingForTests(), "independent knife native HUD binding regression");
     InstalledBinaryEvidence();
-    std::cout << "independent knife graph: 15 test groups passed\n";
+    std::cout << "independent knife graph: 17 test groups passed\n";
 }

@@ -11,6 +11,8 @@ build/
 Debug/
 Release/
 x64/
+__pycache__/
+*.pyc
 
 # Native binaries and debug artifacts
 *.obj
@@ -30,6 +32,10 @@ x64/
 *.stderr.log
 *.stdout.log
 *.tmp
+imgui.ini
+
+# Local runtime/reference installations
+hlae_2_191_1/
 
 # Reverse-engineering scratch artifacts
 *.dmp

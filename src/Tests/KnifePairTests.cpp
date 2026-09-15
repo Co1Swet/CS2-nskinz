@@ -26,6 +26,7 @@ struct Port final : KnifePairAccess
     KnifeModelBinding binding = Binding();
     KnifePairState state {525, 525, 1525, 2525, 9999, 3525, true, true, 525};
     bool alive = true, safe = true, readable = true, symbols = true;
+    bool allow_prearmed_adoption = true;
     bool invalidate = false, fail_after_change = false;
     int fail_event = -1, fail_count = 0, mutations = 0;
     std::array<int, 5> counts {};
@@ -46,6 +47,14 @@ struct Port final : KnifePairAccess
         const bool ok = Begin(Definition);
         if (ok || fail_after_change) state.item_definition = desired;
         return ok;
+    }
+    bool AdoptPreparedWorld(const KnifeModelBinding& b, const KnifeModelAsset& source,
+        const KnifeModelAsset& target, const KnifePairState& current) noexcept override
+    {
+        return allow_prearmed_adoption && SafePoint(b) && current == state &&
+            source.definition != target.definition && state.world_definition == target.definition &&
+            state.item_definition == target.definition &&
+            (state.hud_definition == source.definition || state.hud_definition == target.definition);
     }
     bool Begin(Event event)
     {
@@ -100,8 +109,9 @@ void EveryDirectedPair()
             Check(a.ApplyPair(p.binding, target, after) && a.VerifyPair(after, target), "all canonical directed pairs can commit");
             if (source.definition != target.definition)
             {
-                Check(p.events == std::vector<Port::Event>{Port::Definition, Port::World, Port::Hud, Port::Collect, Port::Animation},
-                    "item/VData + world + HUD + explicit recollect BEFORE animation");
+                Check(p.events == std::vector<Port::Event>{Port::Definition, Port::World,
+                    Port::Hud, Port::Collect, Port::Animation},
+                    "world item definition + paired models + explicit recollect BEFORE animation");
             }
             else { Check(p.mutations == 0, "same type is a no-op"); }
             Check(a.Restore(after) && !a.Captured() && p.state == before, "restore source pair");
@@ -253,11 +263,59 @@ void MaintenanceGates()
         Check(!a.AfterNativeUpdate(request, after) && count == p.mutations, "unsafe or foreign callback performs no writes");
     }
 }
+
+void PrearmedWorldAdoption()
+{
+    Port p;
+    const auto* source = FindKnifeModelAsset(525);
+    const auto* target = FindKnifeModelAsset(508);
+    p.state = {target->definition, source->definition,
+        static_cast<std::uintptr_t>(1000 + target->definition),
+        static_cast<std::uintptr_t>(2000 + source->definition),
+        9999, p.ExistingAnimationType(*source), false, true, target->definition};
+    KnifePairAdapter pair(p);
+    Check(pair.AdoptPrearmedWorld(p.binding, *source, *target) && pair.VerifyPair(p.binding, *target),
+        "prearmed target world adopts source HUD/animation in one native safe callback");
+    Check(p.events == std::vector<Port::Event>{Port::Hud, Port::Collect, Port::Animation} &&
+        p.counts[Port::World] == 0 && p.counts[Port::Definition] == 0,
+        "prearmed adoption does not rebuild world or rewrite its target definition");
+    Check(pair.Restore(p.binding) && p.state.world_definition == source->definition &&
+        p.state.hud_definition == source->definition && p.state.item_definition == source->definition &&
+        p.state.animation_type == p.ExistingAnimationType(*source),
+        "prearmed adoption retains a complete logical source restore point");
+
+    Port native_hud;
+    native_hud.state = {target->definition, target->definition,
+        static_cast<std::uintptr_t>(1000 + target->definition),
+        static_cast<std::uintptr_t>(2000 + target->definition),
+        9999, native_hud.ExistingAnimationType(*source), true, true,
+        target->definition};
+    KnifePairAdapter native_hud_pair(native_hud);
+    Check(native_hud_pair.AdoptPrearmedWorld(native_hud.binding, *source, *target) &&
+        native_hud_pair.VerifyPair(native_hud.binding, *target),
+        "natively inherited target HUD/skeleton remains a valid prearmed handoff");
+    Check(native_hud.counts[Port::Hud] == 0 && native_hud.counts[Port::Collect] == 0 &&
+        native_hud.events == std::vector<Port::Event>{Port::Animation},
+        "already-matching target skeleton skips redundant native recollection");
+
+    Port rejected;
+    rejected.state = {target->definition, source->definition,
+        static_cast<std::uintptr_t>(1000 + target->definition),
+        static_cast<std::uintptr_t>(2000 + source->definition),
+        9999, rejected.ExistingAnimationType(*source), false, true,
+        target->definition};
+    rejected.allow_prearmed_adoption = false;
+    KnifePairAdapter rejected_pair(rejected);
+    Check(!rejected_pair.AdoptPrearmedWorld(rejected.binding, *source, *target) &&
+        !rejected_pair.Captured() && rejected.events.empty(),
+        "unproven prearmed ownership fails closed without a model or animation write");
+}
 }
 
 void RunKnifePairTests()
 {
     EveryDirectedPair(); PartialFailures(); GatesAndCanonicalAssets();
     LifecycleAndCompetingWrites(); SteadyAnimationBudgetAndDrift(); MaintenanceGates();
-    std::cout << "independent knife pair: 6 test groups passed\n";
+    PrearmedWorldAdoption();
+    std::cout << "independent knife pair: 7 test groups passed\n";
 }

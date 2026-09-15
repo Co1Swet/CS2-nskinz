@@ -6,9 +6,9 @@
 
 namespace nskinzcs2::runtime
 {
-// Evidence for the installed 2000899 binary, not callable function addresses.
+// Evidence for the installed 2000908 binary, not callable function addresses.
 // Production must match these instruction windows AND the named Schema fields.
-inline constexpr std::uintptr_t kKnifeWeaponTypeUpdateRva = 0x8E54AA;
+inline constexpr std::uintptr_t kKnifeWeaponTypeUpdateRva = 0x8EA14A;
 inline constexpr std::uintptr_t kKnifeGraphNodeDestructionRva = 0x3ADC57;
 inline constexpr std::uintptr_t kKnifeIdNodeConstructionRva = 0x475120;
 inline constexpr std::uintptr_t kKnifeIdNodeVtableRva = 0x699238;
@@ -21,15 +21,15 @@ bool MatchesKnifeGraphLayoutEvidence(std::span<const std::uint8_t> weapon_update
 // Its +0 owner is the body controller; +8 is the actual graph instance.
 inline constexpr std::size_t kKnifeBodyGraphOwnerOffset = 0x448;
 inline constexpr std::size_t kKnifeBodyGraphPointerOffset = 0x450;
-inline constexpr std::uintptr_t kKnifeBodyGraphConstructionRva = 0x8F8CF0;
+inline constexpr std::uintptr_t kKnifeBodyGraphConstructionRva = 0x8FD990;
 inline constexpr std::size_t kKnifeBodyGraphConstructionSize = 14;
-inline constexpr std::uintptr_t kKnifeBodyGraphUseRva = 0x37ADC8;
+inline constexpr std::uintptr_t kKnifeBodyGraphUseRva = 0x37B088;
 inline constexpr std::size_t kKnifeBodyGraphUseSize = 15;
 bool MatchesKnifeBodyGraphLayoutEvidence(std::span<const std::uint8_t> construction,
     std::span<const std::uint8_t> use) noexcept;
-inline constexpr std::uintptr_t kKnifeSecondaryHandleAppendRva = 0x935F2C;
+inline constexpr std::uintptr_t kKnifeSecondaryHandleAppendRva = 0x93ABCC;
 inline constexpr std::size_t kKnifeSecondaryHandleAppendSize = 19;
-inline constexpr std::uintptr_t kKnifeSecondarySlotAppendRva = 0x935FEA;
+inline constexpr std::uintptr_t kKnifeSecondarySlotAppendRva = 0x93AC8A;
 inline constexpr std::size_t kKnifeSecondarySlotAppendSize = 16;
 bool MatchesKnifeSecondaryLayoutEvidence(std::span<const std::uint8_t> handle_append,
     std::span<const std::uint8_t> slot_append) noexcept;
@@ -67,6 +67,9 @@ struct KnifeGraphProbeResult
 {
     KnifeGraphProbeStatus status = KnifeGraphProbeStatus::BindingInvalid;
     KnifeGraphParameter parameter;
+    // Diagnostic-only scalar retained on a type mismatch. The writable node
+    // and all other pointer-bearing fields remain cleared on rejected probes.
+    std::uintptr_t observed_value = 0;
     bool SourceVerified() const noexcept
     {
         return status == KnifeGraphProbeStatus::Ready ||

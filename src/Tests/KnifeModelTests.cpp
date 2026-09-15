@@ -66,13 +66,16 @@ void AssetsAndRequestIsolation()
     Check(assets.size() == 22, "22 released knife types");
     for (std::size_t i = 0; i < assets.size(); ++i)
     {
-        Check(!assets[i].animation_class.empty() && !assets[i].model.empty() && !assets[i].skeleton.empty(), "complete asset mapping");
+        Check(!assets[i].animation_class.empty() && !assets[i].model.empty() && !assets[i].skeleton.empty() &&
+            !assets[i].graph_animation_class.empty(), "complete asset mapping");
         for (std::size_t j = i + 1; j < assets.size(); ++j)
         {
             Check(assets[i].definition != assets[j].definition, "unique knife definitions");
         }
     }
     Check(FindKnifeModelAsset(508)->animation_class == "weapon_knife_m9_bayonet", "M9 animation name is not asset stem");
+    Check(FindKnifeModelAsset(507)->graph_animation_class == "knife_karambit",
+        "Karambit HUD graph animation class is distinct from its subclass name");
     Check(FindKnifeModelAsset(520)->skeleton.ends_with("knife_navaja.vnmskel"), "Navaja skeleton mapping");
     Check(FindKnifeModelAsset(526) != nullptr && FindKnifeModelAsset(524) == nullptr, "Kukri supported, unreleased alias rejected");
     Check(FindKnifeModelAsset(7) == nullptr, "gun is never a knife target");

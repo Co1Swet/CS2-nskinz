@@ -9,8 +9,12 @@
 #include "Runtime/KnifeAnimation.hpp"
 #include "Runtime/KnifeAppearance.hpp"
 #include "Runtime/KnifeUpdateProbe.hpp"
+#include "Runtime/MapRemap.hpp"
+#include "Runtime/RadarAlphaFix.hpp"
+#include "Runtime/RadarNativeCompiler.hpp"
 #include "Runtime/WeaponAppearance.hpp"
 #include "Runtime/WeaponMaterialInit.hpp"
+#include "Runtime/WorkshopMaps.hpp"
 
 #include <algorithm>
 #include <array>
@@ -140,20 +144,20 @@ void TestCatalogStoreRoundTrip()
 void TestCompatibilityManifest()
 {
     using namespace nskinzcs2::compatibility;
-    Expect(kFrameStageNotifyVtableIndex == 36, "HLAE 2.191.1 FrameStageNotify slot should remain explicit");
-    Expect(kFrameStartStage == 0, "HLAE 2.191.1 FRAME_START value should remain explicit");
-    Expect(kFrameRenderPassStage == 12, "HLAE 2.191.1 FRAME_RENDER_PASS value should remain explicit");
-    Expect(kEngineIsPlayingDemoVtableIndex == 42, "HLAE 2.191.1 IsPlayingDemo slot should remain explicit");
-    Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.191.1 GetDemoFilePath slot should remain explicit");
-    Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.191.1 GetLevelNameShort slot should remain explicit");
-    Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.191.1 GetDemoFile slot should remain explicit");
-    Expect(kEngineExecuteClientCmdVtableIndex == 51, "HLAE 2.191.1 ExecuteClientCmd slot should remain explicit");
-    Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.191.1 demo tick slot should remain explicit");
-    Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.191.1 IDemoFile IsPlayingDemo slot should remain explicit");
-    Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.191.1 IDemoFile IsDemoPaused slot should remain explicit");
+    Expect(kFrameStageNotifyVtableIndex == 36, "HLAE 2.192.2 FrameStageNotify slot should remain explicit");
+    Expect(kFrameStartStage == 0, "HLAE 2.192.2 FRAME_START value should remain explicit");
+    Expect(kFrameRenderPassStage == 12, "HLAE 2.192.2 FRAME_RENDER_PASS value should remain explicit");
+    Expect(kEngineIsPlayingDemoVtableIndex == 42, "HLAE 2.192.2 IsPlayingDemo slot should remain explicit");
+    Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.192.2 GetDemoFilePath slot should remain explicit");
+    Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.192.2 GetLevelNameShort slot should remain explicit");
+    Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.192.2 GetDemoFile slot should remain explicit");
+    Expect(kEngineExecuteClientCmdVtableIndex == 51, "HLAE 2.192.2 ExecuteClientCmd slot should remain explicit");
+    Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.192.2 demo tick slot should remain explicit");
+    Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.192.2 IDemoFile IsPlayingDemo slot should remain explicit");
+    Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.192.2 IDemoFile IsDemoPaused slot should remain explicit");
     Expect(
         IsHlae21911InterfaceCombination("Source2Client002", "ResourceSystem013", "VFileSystem017"),
-        "verified HLAE 2.191.1 interfaces should be accepted");
+        "verified HLAE 2.192.2 interfaces should be accepted");
     Expect(
         !IsHlae21911InterfaceCombination("Source2Client001", "ResourceSystem013", "VFileSystem017"),
         "an unverified Source2Client interface should be rejected");
@@ -860,12 +864,26 @@ void TestConfigRoundTrip()
     nskinzcs2::model::KeychainProfile keychain_profile;
     keychain_profile.explicit_clear = true;
     document.keychain_profiles.push_back(keychain_profile);
+    document.map_remap.enabled = true;
+    document.map_remap.use_source_radar = false;
+    document.map_remap.source_map_name = "de_mirage";
+    document.map_remap.workshop_id = "3415616810";
+    document.map_remap.workshop_title = "Rainy Mirage";
+    document.map_remap.addon_name = "mirage_rain";
+    document.map_remap.target_map_name = "de_mirage_rain";
+    document.map_remap.target_skybox_resource_prefix =
+        "maps/prefabs/de_mirage/de_mirage_rain_skybox";
+    document.map_remap.radar_overlay_virtual_path =
+        "panorama/images/overheadmaps/de_mirage_rain_radar_tga.vtex_c";
+    document.map_remap.radar_overlay_root_path = "C:/Temp/nSkinzCS2/radar";
+    document.map_remap.radar_overlay_file_path =
+        "C:/Temp/nSkinzCS2/radar/panorama/images/overheadmaps/de_mirage_rain_radar_tga.vtex_c";
     document.experimental_allow_hud_alias_synthetic_proxy_model_write = true;
 
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 5, "config should round-trip version 5");
+    Expect(loaded.version == 6, "config should round-trip version 6");
     Expect(loaded.profiles.size() == 1, "config should contain one profile");
     Expect(loaded.profiles[0].name == "AK test", "profile name should round-trip");
     Expect(loaded.profiles[0].stickers[0].kit_id == 3, "sticker should round-trip");
@@ -873,12 +891,324 @@ void TestConfigRoundTrip()
     Expect(loaded.knife_profiles[0].explicit_vanilla_finish, "knife vanilla intent should round-trip");
     Expect(loaded.glove_profiles[0].explicit_vanilla_finish, "glove vanilla intent should round-trip");
     Expect(loaded.keychain_profiles[0].explicit_clear, "keychain clear intent should round-trip");
+    Expect(loaded.map_remap.enabled, "map remap enable intent should round-trip");
+    Expect(!loaded.map_remap.use_source_radar, "map remap radar source intent should round-trip");
+    Expect(loaded.map_remap.source_map_name == "de_mirage", "map remap source should round-trip");
+    Expect(loaded.map_remap.workshop_id == "3415616810", "map remap workshop id should round-trip");
+    Expect(loaded.map_remap.addon_name == "mirage_rain", "map remap addon name should round-trip");
+    Expect(loaded.map_remap.target_map_name == "de_mirage_rain", "map remap target should round-trip");
+    Expect(
+        loaded.map_remap.target_skybox_resource_prefix ==
+            document.map_remap.target_skybox_resource_prefix,
+        "map remap target skybox resource prefix should round-trip");
+    Expect(
+        loaded.map_remap.radar_overlay_virtual_path == document.map_remap.radar_overlay_virtual_path,
+        "map remap external radar virtual path should round-trip");
+    Expect(
+        loaded.map_remap.radar_overlay_root_path == document.map_remap.radar_overlay_root_path,
+        "map remap external radar root should round-trip");
+    Expect(
+        loaded.map_remap.radar_overlay_file_path == document.map_remap.radar_overlay_file_path,
+        "map remap external radar file should round-trip");
     Expect(!loaded.keychain_profiles.empty(), "config load should repair missing keychain profiles");
     Expect(
         loaded.experimental_allow_hud_alias_synthetic_proxy_model_write,
         "experimental HUD proxy write toggle should round-trip");
 
     fs::remove(temp_path);
+}
+
+void TestWorkshopMapDiscovery()
+{
+    Expect(
+        nskinzcs2::model::MapRemapProfile {}.use_source_radar,
+        "map remap should default to the original demo radar");
+    using nskinzcs2::runtime::IsLikelyAuxiliaryWorkshopMap;
+    using nskinzcs2::runtime::IsWorkshopVpkIndexFile;
+    Expect(IsWorkshopVpkIndexFile(L"3114174859.vpk"), "self-contained workshop VPK should be scanned");
+    Expect(IsWorkshopVpkIndexFile(L"addon_dir.vpk"), "split VPK directory index should be scanned");
+    Expect(!IsWorkshopVpkIndexFile(L"addon_000.vpk"), "split VPK data archive should not be scanned as an index");
+    Expect(!IsWorkshopVpkIndexFile(L"publish_data.txt"), "non-VPK files should not be scanned as indexes");
+    Expect(IsLikelyAuxiliaryWorkshopMap("de_cache_sky_d"), "separate skybox package should be auxiliary");
+    Expect(IsLikelyAuxiliaryWorkshopMap("maps/de_cache_3dsky.vpk"), "3D skybox package should be auxiliary");
+    Expect(IsLikelyAuxiliaryWorkshopMap("de_map_background"), "background package should be auxiliary");
+    Expect(!IsLikelyAuxiliaryWorkshopMap("de_cache_d"), "playable cache package should remain selectable");
+    Expect(!IsLikelyAuxiliaryWorkshopMap("de_skyline"), "ordinary map names containing sky should remain selectable");
+
+    using nskinzcs2::runtime::ShouldSuppressSourceMapModelPath;
+    using nskinzcs2::runtime::BuildSourceSkyboxResourceRedirect;
+    constexpr std::string_view nuke_skybox =
+        "maps/prefabs/de_nuke/de_nuke_skybox02_d";
+    std::array<char, 512> skybox_redirect {};
+    Expect(
+        BuildSourceSkyboxResourceRedirect(
+            "maps/prefabs/de_mirage/3dskybox_mirage_legacy.vmap",
+            "de_mirage",
+            "nirage",
+            nuke_skybox,
+            skybox_redirect.data(),
+            skybox_redirect.size()) &&
+            std::string_view(skybox_redirect.data()) ==
+                "maps/prefabs/de_nuke/de_nuke_skybox02_d.vmap",
+        "source skybox entity references must redirect to the target skybox vmap");
+    Expect(
+        !BuildSourceSkyboxResourceRedirect(
+            "E:\\SteamLibrary\\game\\csgo\\maps\\prefabs\\de_mirage\\3dskybox_mirage_legacy.vpk",
+            "maps/de_mirage.vmap",
+            "nirage",
+            nuke_skybox,
+            skybox_redirect.data(),
+            skybox_redirect.size()),
+        "source skybox VPK packages must retain their archive identity");
+    Expect(
+        !BuildSourceSkyboxResourceRedirect(
+            "E:\\SteamLibrary\\game\\csgo\\maps\\prefabs\\de_mirage\\3dskybox_mirage_legacy_dir.vpk",
+            "de_mirage",
+            "nirage",
+            nuke_skybox,
+            skybox_redirect.data(),
+            skybox_redirect.size()),
+        "source VPK directory-index requests must never be redirected");
+    Expect(
+        !BuildSourceSkyboxResourceRedirect(
+            "E:\\SteamLibrary\\game\\csgo\\maps\\prefabs\\de_mirage\\3dskybox_mirage_legacy_flt.vpk",
+            "de_mirage",
+            "nirage",
+            nuke_skybox,
+            skybox_redirect.data(),
+            skybox_redirect.size()),
+        "source VPK filter-stage requests must never be redirected");
+    Expect(
+        !BuildSourceSkyboxResourceRedirect(
+            "maps/prefabs/de_mirage/not_a_skybox.vmdl_c",
+            "de_mirage",
+            "nirage",
+            nuke_skybox,
+            skybox_redirect.data(),
+            skybox_redirect.size()),
+        "ordinary prefab resources must not be redirected as skybox roots");
+    Expect(
+        !BuildSourceSkyboxResourceRedirect(
+            "maps/prefabs/de_mirage/3dskybox_mirage_legacy.vpk",
+            "de_mirage",
+            "nirage",
+            {},
+            skybox_redirect.data(),
+            skybox_redirect.size()),
+        "skybox redirection must stay disabled without a proven target package");
+    Expect(
+        ShouldSuppressSourceMapModelPath(
+            "maps/de_mirage/entities/unnamed_2_60417_63.vmdl",
+            "de_mirage",
+            "nirage",
+            nuke_skybox),
+        "source map-generated entity models must be suppressed during remap");
+    Expect(
+        ShouldSuppressSourceMapModelPath(
+            "MAPS\\DE_MIRAGE\\WORLDNODES\\n0_lr0_agg.vmdl_c",
+            "maps/de_mirage.vmap",
+            "nirage",
+            nuke_skybox),
+        "source world-node models must be suppressed case-insensitively");
+    Expect(
+        ShouldSuppressSourceMapModelPath(
+            "maps/prefabs/de_mirage/3dskybox_mirage_legacy/worldnodes/node000_world_lr0_agg6_3_towertop_d.vmdl_c",
+            "de_mirage",
+            "nirage",
+            nuke_skybox),
+        "a proven-different target skybox must suppress the demo map tower model");
+    Expect(
+        !ShouldSuppressSourceMapModelPath(
+            "maps/prefabs/de_mirage/3dskybox_mirage_legacy/worldnodes/node000_world.vmdl_c",
+            "de_mirage",
+            "de_mirage_water",
+            "maps/prefabs/de_mirage/3dskybox_mirage_legacy"),
+        "a target that intentionally shares the source skybox must keep it");
+    Expect(
+        !ShouldSuppressSourceMapModelPath(
+            "models/props/de_mirage/shutter_window_l_breakable.vmdl",
+            "de_mirage",
+            "nirage",
+            nuke_skybox),
+        "ordinary prop models must never be blanket-filtered");
+    Expect(
+        !ShouldSuppressSourceMapModelPath(
+            "maps/nirage/worldnodes/n0_lr0_agg.vmdl_c",
+            "de_mirage",
+            "nirage",
+            nuke_skybox),
+        "target map world-node models must remain untouched");
+    Expect(
+        !ShouldSuppressSourceMapModelPath(
+            "maps/prefabs/de_mirage/3dskybox_mirage_legacy.vpk",
+            "de_mirage",
+            "nirage",
+            nuke_skybox),
+        "source skybox packages must remain loadable because Source 2 treats them as required resources");
+
+    const auto result = nskinzcs2::runtime::DiscoverSubscribedWorkshopMaps();
+    if (result.entries.empty())
+    {
+        std::cout << "workshop_map_discovery=SKIPPED (no installed CS2 workshop maps found)\n";
+        return;
+    }
+
+    for (const auto& entry : result.entries)
+    {
+        Expect(!entry.workshop_id.empty(), "workshop entry should contain an item id");
+        Expect(
+            std::all_of(entry.workshop_id.begin(), entry.workshop_id.end(), [](const unsigned char character)
+            {
+                return std::isdigit(character) != 0;
+            }),
+            "workshop item id should be numeric");
+        Expect(!entry.title.empty(), "workshop entry should contain a title");
+        Expect(!entry.addon_name.empty(), "workshop entry should contain an addon folder");
+        Expect(!entry.map_name.empty(), "workshop entry should contain a VPK map name");
+        Expect(!IsLikelyAuxiliaryWorkshopMap(entry.map_name), "auxiliary workshop maps should be filtered");
+        Expect(std::filesystem::is_directory(entry.item_directory), "workshop item directory should exist");
+        if (entry.workshop_id == "3573314592" && entry.map_name == "nirage")
+        {
+            Expect(
+                entry.skybox_resource_prefix == "maps/prefabs/de_nuke/de_nuke_skybox02_d",
+                "nirage must expose its Nuke 3D skybox package to the remap runtime");
+        }
+    }
+    std::cout << "workshop_map_entries=" << result.entries.size() << '\n';
+
+    const auto nirage = nskinzcs2::runtime::ReadWorkshopRadarTexture("3573314592", "nirage");
+    if (nirage.has_value())
+    {
+        nskinzcs2::runtime::RadarAlphaOverlay overlay;
+        std::wstring diagnostic;
+        const auto outcome = nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+            nirage->virtual_path,
+            nirage->bytes,
+            overlay,
+            diagnostic);
+        if (outcome != nskinzcs2::runtime::RadarAlphaFixOutcome::Generated)
+        {
+            std::wcout << L"generic_radar_overlay_diagnostic=" << diagnostic << L'\n';
+        }
+        Expect(
+            outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+            "opaque nirage Workshop radar should produce a generic transparent overlay");
+        Expect(overlay.width == 664 && overlay.height == 664, "nirage overlay should retain its source dimensions");
+        Expect(!overlay.png_bytes.empty(), "generic radar overlay should contain the masked PNG source");
+        Expect(overlay.vtex_bytes.empty(), "an uncompiled in-memory VTEX must never be exposed to CS2");
+        Expect(
+            overlay.transparent_pixels > overlay.visible_pixels,
+            "nirage overlay should make the opaque background transparent");
+        Expect(
+            overlay.visible_pixels >= 97600,
+            "nirage overlay should retain coloured interior details and the complete dark connecting road");
+        Expect(
+            overlay.softened_edge_pixels >= 50,
+            "nirage overlay should recover the near-black boundary as translucent coloured pixels instead of deleting it");
+
+        const auto nirage_entry = std::find_if(result.entries.begin(), result.entries.end(), [](const auto& entry)
+        {
+            return entry.workshop_id == "3573314592" && entry.map_name == "nirage";
+        });
+        Expect(
+            nirage_entry != result.entries.end(),
+            "the installed nirage radar audit should have a discoverable Workshop entry");
+        auto steamapps = nirage_entry->item_directory;
+        for (int level = 0; level < 4; ++level)
+        {
+            steamapps = steamapps.parent_path();
+        }
+        const auto cs2_install_root = steamapps / L"common/Counter-Strike Global Offensive";
+        Expect(
+            nskinzcs2::runtime::CompileRadarOverlayWithCs2(cs2_install_root, overlay, diagnostic),
+            "the masked radar PNG should compile through CS2's native resourcecompiler");
+        Expect(overlay.vtex_bytes.size() >= 64, "the native compiled radar VTEX should not be empty");
+        std::uint32_t compiled_block_count = 0;
+        std::uint32_t first_block = 0;
+        std::memcpy(&compiled_block_count, overlay.vtex_bytes.data() + 12, sizeof(compiled_block_count));
+        std::memcpy(&first_block, overlay.vtex_bytes.data() + 16, sizeof(first_block));
+        Expect(compiled_block_count >= 2, "native radar VTEX should contain full Source 2 resource blocks");
+        Expect(first_block == 0x32444552u, "native radar VTEX should start with the RED2 metadata block");
+        std::filesystem::path materialized_root;
+        std::filesystem::path materialized_file;
+        Expect(
+            nskinzcs2::runtime::MaterializeCompiledRadarOverlay(
+                overlay,
+                materialized_root,
+                materialized_file,
+                diagnostic),
+            "the native radar VTEX should materialize into an overlay-only cache");
+        Expect(
+            materialized_file == materialized_root / std::filesystem::path(overlay.virtual_path),
+            "materialized radar file should match its virtual path under the overlay root");
+        Expect(
+            nskinzcs2::runtime::ValidateNativeRadarVtexFile(materialized_file, diagnostic),
+            "the injected-runtime validation should accept the materialized native radar VTEX");
+        auto failed_native_compile = overlay;
+        failed_native_compile.vtex_bytes.assign(64, 0xCC);
+        Expect(
+            !nskinzcs2::runtime::CompileRadarOverlayWithCs2(
+                cs2_install_root / L"missing-install-root",
+                failed_native_compile,
+                diagnostic),
+            "a missing CS2 native compiler must fail closed");
+        Expect(
+            failed_native_compile.vtex_bytes.empty(),
+            "native compiler failure must clear all candidate VTEX bytes before map loading");
+        std::cout << "generic_radar_overlay=" << overlay.width << 'x' << overlay.height
+                  << " visible=" << overlay.visible_pixels
+                  << " transparent=" << overlay.transparent_pixels
+                  << " soft_edge=" << overlay.softened_edge_pixels
+                  << " native_vtex=" << overlay.vtex_bytes.size() << '\n';
+    }
+    else
+    {
+        std::cout << "generic_radar_overlay=SKIPPED (nirage Workshop item not installed)\n";
+    }
+
+    constexpr std::array<std::string_view, 4> additional_radar_maps {
+        "de_all_in_one",
+        "de_mirage_water",
+        "de_dust2_water",
+        "de_inferno_water",
+    };
+    for (const auto map_name : additional_radar_maps)
+    {
+        const auto entry = std::find_if(result.entries.begin(), result.entries.end(), [&](const auto& candidate)
+        {
+            return candidate.map_name == map_name;
+        });
+        if (entry == result.entries.end())
+        {
+            continue;
+        }
+        std::wstring radar_diagnostic;
+        const auto radar = nskinzcs2::runtime::ReadWorkshopRadarTexture(
+            entry->workshop_id,
+            entry->map_name,
+            0,
+            &radar_diagnostic);
+        if (!radar.has_value())
+        {
+            std::wcout << L"generic_radar_map=" << std::wstring(map_name.begin(), map_name.end())
+                       << L" source=missing diagnostic=" << radar_diagnostic << L'\n';
+        }
+        Expect(radar.has_value(), "an installed audited workshop map should expose its own radar texture");
+        nskinzcs2::runtime::RadarAlphaOverlay map_overlay;
+        const auto map_outcome = nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+            radar->virtual_path,
+            radar->bytes,
+            map_overlay,
+            radar_diagnostic);
+        Expect(
+            map_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated ||
+                map_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::NotNeeded,
+            "each installed audited workshop map radar should be generated or already transparent");
+        std::wcout << L"generic_radar_map=" << std::wstring(map_name.begin(), map_name.end())
+                   << L" source=" << std::wstring(radar->virtual_path.begin(), radar->virtual_path.end())
+                   << L" outcome=" << static_cast<int>(map_outcome)
+                   << L" diagnostic=" << radar_diagnostic << L'\n';
+    }
 }
 
 void TestCosmeticWearPolicy()
@@ -1027,7 +1357,7 @@ void TestKeychainConfigAndMatching()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "keychain config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 5, "keychain config should round-trip version 5");
+    Expect(loaded.version == 6, "keychain config should round-trip version 6");
     const auto* ak_match = nskinzcs2::ConfigStore::FindMatchingKeychainProfile(loaded, 10, 7);
     Expect(ak_match != nullptr, "keychain profile lookup should find the configured weapon binding");
     Expect(ak_match->name == "AK Charm New", "duplicate keychain bindings should keep the last entry");
@@ -1091,7 +1421,7 @@ void TestGloveConfigAndMatching()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "glove config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 5, "glove config should round-trip version 5");
+    Expect(loaded.version == 6, "glove config should round-trip version 6");
     Expect(!loaded.glove_profiles.empty(), "glove config should contain glove profiles");
     Expect(loaded.glove_profiles[0].mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish, "glove mode should round-trip");
     Expect(loaded.glove_profiles[0].model_definition == 5030, "glove model should round-trip");
@@ -1127,7 +1457,7 @@ void TestKnifeProfileConfigMigration()
     }
 
     auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(loaded.version == 5, "legacy knife config should migrate to version 5");
+    Expect(loaded.version == 6, "legacy knife config should migrate to version 6");
     Expect(loaded.profiles.size() == 1, "legacy knife entries should be removed from weapon profiles");
     Expect(loaded.profiles[0].base_item == 7, "non-knife weapon entries should remain after migration");
     Expect(
@@ -1159,7 +1489,7 @@ void TestKnifeProfileConfigMigration()
     }
 
     loaded = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(loaded.version == 5, "explicit knife config should normalize to version 5");
+    Expect(loaded.version == 6, "explicit knife config should normalize to version 6");
     const auto* explicit_knife = nskinzcs2::ConfigStore::FindMatchingKnifeProfile(loaded, 20);
     Expect(explicit_knife != nullptr, "explicit knife profile should remain available");
     Expect(explicit_knife->name == "Explicit Knife", "explicit knife_profiles entry should beat legacy knife profiles");
@@ -5238,6 +5568,7 @@ int RunAllTests()
         RunNamedTest("TestCatalogStoreRoundTrip", TestCatalogStoreRoundTrip);
         RunNamedTest("TestInstalledCompatibilityIfRequested", TestInstalledCompatibilityIfRequested);
         RunNamedTest("TestConfigRoundTrip", TestConfigRoundTrip);
+        RunNamedTest("TestWorkshopMapDiscovery", TestWorkshopMapDiscovery);
         RunNamedTest("TestCosmeticWearPolicy", TestCosmeticWearPolicy);
         RunNamedTest("TestProfileMatching", TestProfileMatching);
         RunNamedTest("TestKeychainConfigAndMatching", TestKeychainConfigAndMatching);

@@ -25,7 +25,7 @@ body:
     id: compatibility
     attributes:
       label: CS2/HLAE baseline / CS2/HLAE 基线
-      placeholder: "CS2 build 25000182, HLAE 2.191.1"
+      placeholder: "CS2 build 25218825, HLAE 2.192.2"
   - type: checkboxes
     id: scope
     attributes:

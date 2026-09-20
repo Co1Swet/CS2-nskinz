@@ -17,6 +17,7 @@
 #include "Runtime/KnifeFinish.hpp"
 #include "Runtime/KnifeUpdateProbe.hpp"
 #include "Runtime/KnifeAppearance.hpp"
+#include "Runtime/MapRemap.hpp"
 #include "Runtime/WeaponAppearance.hpp"
 #include "Runtime/WeaponMaterialInit.hpp"
 #include "MinHook.h"
@@ -89526,6 +89527,8 @@ void nskinzcs2::RuntimeController::Stop()
     }
     Logger::Info(L"Runtime stop: worker joined.");
 
+    nskinzcs2::runtime::ShutdownMapRemap();
+
     RunRuntimeCleanupSequence(L"Runtime stop cleanup", false, false);
     global_swapper_early_attempted_.store(false);
     global_swapper_early_reason_.clear();
@@ -90157,7 +90160,7 @@ bool nskinzcs2::RuntimeController::TryInstallRuntimeHook(runtime::Status& status
     if (!hook_attempted_.exchange(true))
     {
         Logger::Info(
-            L"Installing Source2Client002 FrameStageNotify hook for HLAE 2.191.1 using validated vtable index " +
+            L"Installing Source2Client002 FrameStageNotify hook for HLAE 2.192.2 using validated vtable index " +
             std::to_wstring(nskinzcs2::compatibility::kFrameStageNotifyVtableIndex) + L".");
     }
 
@@ -90870,6 +90873,17 @@ void nskinzcs2::RuntimeController::ConsumeManualRefresh(runtime::Status& status)
         return;
     }
 
+    const auto map_config = state_.SnapshotConfig().map_remap;
+    nskinzcs2::runtime::ConfigureMapRemap(map_config, SnapshotLevelName());
+    const auto map_status = nskinzcs2::runtime::SnapshotMapRemapStatus();
+    if (map_config.enabled && !map_status.hooks_installed)
+    {
+        status.diagnostics.push_back(
+            map_status.issue.empty()
+                ? L"Map remap was requested, but the verified parse hooks are unavailable."
+                : map_status.issue);
+    }
+
     if (!hook_installed_.load())
     {
         hook_activation_requested_.store(true);
@@ -90954,6 +90968,17 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     status.skipped_knife_override_count = g_hook_state.skipped_knife_override_count.load();
     status.knife_runtime_path = SnapshotKnifeRuntimePathText();
     status.knife_runtime_reason = SnapshotKnifeRuntimeReasonText();
+    const auto map_status = nskinzcs2::runtime::SnapshotMapRemapStatus();
+    status.map_remap_enabled = map_status.enabled;
+    status.map_remap_hooks_installed = map_status.hooks_installed;
+    status.map_remap_source_captured = map_status.source_captured;
+    status.map_remap_use_source_radar = map_status.use_source_radar;
+    status.map_remap_replacement_count = map_status.replacement_count;
+    status.map_remap_suppressed_source_geometry_count =
+        map_status.suppressed_source_geometry_count;
+    status.map_remap_source = NarrowToWide(map_status.source_map_name);
+    status.map_remap_target = NarrowToWide(map_status.target_map_name);
+    status.map_remap_issue = map_status.issue;
     status.weapon_skin_refresh_state = g_hook_state.weapon_skin_refresh_state.load();
     status.level_name = SnapshotLevelName();
     status.rebuild_reason = g_hook_state.last_rebuild_reason;
@@ -90977,6 +91002,24 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     if (!status.level_name.empty())
     {
         status.diagnostics.push_back(L"Level: " + status.level_name);
+    }
+
+    if (status.map_remap_enabled)
+    {
+        std::wstring map_line = L"Map remap: ";
+        map_line += status.map_remap_hooks_installed ? L"armed" : L"unavailable";
+        map_line += L", source=";
+        map_line += status.map_remap_source.empty() ? L"<capture on second load>" : status.map_remap_source;
+        map_line += L", target=" + status.map_remap_target;
+        map_line += status.map_remap_use_source_radar ? L", radar=target-alpha-fix" : L", radar=target";
+        map_line += L", replacements=" + std::to_wstring(status.map_remap_replacement_count);
+        map_line += L", stale-geometry-blocked=" +
+            std::to_wstring(status.map_remap_suppressed_source_geometry_count) + L".";
+        status.diagnostics.push_back(std::move(map_line));
+        if (!status.map_remap_issue.empty())
+        {
+            status.diagnostics.push_back(L"Map remap issue: " + status.map_remap_issue);
+        }
     }
 
     const auto runtime_issue = SnapshotRuntimeIssue();

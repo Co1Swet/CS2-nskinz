@@ -17,7 +17,7 @@ bool LaunchExternalUiHost(HMODULE module, DWORD runtime_process_id);
 bool PublishExternalConfigUpdate(
     DWORD runtime_process_id,
     const std::filesystem::path& config_path,
-    const model::ConfigDocument& document);
+    model::ConfigDocument& document);
 }
 
 extern "C" __declspec(dllexport) void CALLBACK nSkinzUiHost(

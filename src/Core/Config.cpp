@@ -391,25 +391,60 @@ static void from_json(const json& j, KeychainProfile& value)
     value.explicit_clear = j.value("explicit_clear", false);
 }
 
+static void to_json(json& j, const MapRemapProfile& value)
+{
+    j = json {
+        {"enabled", value.enabled},
+        {"use_source_radar", value.use_source_radar},
+        {"source_map_name", value.source_map_name},
+        {"workshop_id", value.workshop_id},
+        {"workshop_title", value.workshop_title},
+        {"addon_name", value.addon_name},
+        {"target_map_name", value.target_map_name},
+        {"target_skybox_resource_prefix", value.target_skybox_resource_prefix},
+        {"radar_overlay_virtual_path", value.radar_overlay_virtual_path},
+        {"radar_overlay_root_path", value.radar_overlay_root_path},
+        {"radar_overlay_file_path", value.radar_overlay_file_path},
+    };
+}
+
+static void from_json(const json& j, MapRemapProfile& value)
+{
+    value.enabled = j.value("enabled", false);
+    value.use_source_radar = j.value("use_source_radar", true);
+    value.source_map_name = j.value("source_map_name", std::string {});
+    value.workshop_id = j.value("workshop_id", std::string {});
+    value.workshop_title = j.value("workshop_title", std::string {});
+    value.addon_name = j.value("addon_name", std::string {});
+    value.target_map_name = j.value("target_map_name", std::string {});
+    value.target_skybox_resource_prefix =
+        j.value("target_skybox_resource_prefix", std::string {});
+    value.radar_overlay_virtual_path = j.value("radar_overlay_virtual_path", std::string {});
+    value.radar_overlay_root_path = j.value("radar_overlay_root_path", std::string {});
+    value.radar_overlay_file_path = j.value("radar_overlay_file_path", std::string {});
+}
+
 static void to_json(json& j, const ConfigDocument& value)
 {
     j = json {
-        {"version", 5},
+        {"version", 6},
         {"profiles", value.profiles},
         {"knife_profiles", value.knife_profiles},
         {"glove_profiles", value.glove_profiles},
         {"keychain_profiles", value.keychain_profiles},
+        {"map_remap", value.map_remap},
         {"experimental_allow_hud_alias_synthetic_proxy_model_write", value.experimental_allow_hud_alias_synthetic_proxy_model_write},
     };
 }
 
 static void from_json(const json& j, ConfigDocument& value)
 {
-    value.version = j.value("version", 5);
+    value.version = j.value("version", 6);
     value.profiles = j.value("profiles", std::vector<CosmeticProfile> {});
     value.knife_profiles = j.value("knife_profiles", std::vector<KnifeProfile> {});
     value.glove_profiles = j.value("glove_profiles", std::vector<GloveProfile> {});
     value.keychain_profiles = j.value("keychain_profiles", std::vector<KeychainProfile> {});
+    value.map_remap = j.value("map_remap", MapRemapProfile {});
     value.experimental_allow_hud_alias_synthetic_proxy_model_write =
         j.value("experimental_allow_hud_alias_synthetic_proxy_model_write", false);
 }
@@ -460,7 +495,7 @@ nskinzcs2::model::ConfigDocument nskinzcs2::ConfigStore::Load(const std::filesys
             parsed.keychain_profiles.push_back(model::KeychainProfile {});
         }
 
-        parsed.version = 5;
+        parsed.version = 6;
         return parsed;
     }
     catch (const std::exception&)
@@ -478,7 +513,7 @@ bool nskinzcs2::ConfigStore::Save(const std::filesystem::path& path, const model
     }
 
     auto normalized = document;
-    normalized.version = 5;
+    normalized.version = 6;
     normalized.knife_profiles = model::DeduplicateProfilesByXuidKeepLast(normalized.knife_profiles);
     normalized.keychain_profiles =
         model::DeduplicateKeychainProfilesKeepLast(normalized.keychain_profiles);

@@ -1,0 +1,3 @@
+#define IDR_NIRAGE_RADAR_VTEX 201
+
+IDR_NIRAGE_RADAR_VTEX RCDATA "../../assets/radar_overlays/nirage/panorama/images/overheadmaps/nirage_radar_tga.vtex_c"

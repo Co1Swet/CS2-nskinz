@@ -4,9 +4,13 @@
 #include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
 #include "Cs2/CatalogStore.hpp"
+#include "Runtime/RadarAlphaFix.hpp"
+#include "Runtime/RadarNativeCompiler.hpp"
 #include "UI/MainWindow.hpp"
 
 #include <charconv>
+#include <cstring>
+#include <exception>
 #include <filesystem>
 #include <sstream>
 #include <string>
@@ -95,6 +99,169 @@ bool IsExpectedCs2Process(const HANDLE process)
     path.resize(size);
     return _wcsicmp(std::filesystem::path(path).filename().c_str(), L"cs2.exe") == 0;
 }
+
+std::string WideToUtf8(const std::wstring_view text)
+{
+    if (text.empty())
+    {
+        return {};
+    }
+    const int count = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        text.data(),
+        static_cast<int>(text.size()),
+        nullptr,
+        0,
+        nullptr,
+        nullptr);
+    if (count <= 0)
+    {
+        return {};
+    }
+    std::string result(static_cast<std::size_t>(count), '\0');
+    WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        text.data(),
+        static_cast<int>(text.size()),
+        result.data(),
+        count,
+        nullptr,
+        nullptr);
+    return result;
+}
+
+std::filesystem::path RuntimeCs2InstallRoot(const DWORD process_id)
+{
+    const auto process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id);
+    if (process == nullptr)
+    {
+        return {};
+    }
+    std::wstring path(32768, L'\0');
+    DWORD size = static_cast<DWORD>(path.size());
+    const bool queried = QueryFullProcessImageNameW(process, 0, path.data(), &size) != FALSE;
+    CloseHandle(process);
+    if (!queried || size == 0)
+    {
+        return {};
+    }
+    path.resize(size);
+    if (_wcsicmp(std::filesystem::path(path).filename().c_str(), L"cs2.exe") != 0)
+    {
+        return {};
+    }
+    auto root = std::filesystem::path(path).parent_path();
+    for (int level = 0; level < 3 && !root.empty(); ++level)
+    {
+        root = root.parent_path();
+    }
+    return root;
+}
+
+void ClearPreparedRadar(nskinzcs2::model::MapRemapProfile& profile)
+{
+    profile.radar_overlay_virtual_path.clear();
+    profile.radar_overlay_root_path.clear();
+    profile.radar_overlay_file_path.clear();
+}
+
+void PrepareExternalRadarOverlay(
+    const DWORD runtime_process_id,
+    nskinzcs2::model::MapRemapProfile& profile)
+{
+    ClearPreparedRadar(profile);
+    if (!profile.enabled || !profile.use_source_radar)
+    {
+        return;
+    }
+
+    nskinzcs2::Logger::Info(
+        L"[MapRemap/RadarTexture] external radar preparation started; CS2 will not decode or compile this texture.");
+    try
+    {
+        nskinzcs2::runtime::RadarAlphaOverlay overlay;
+        std::wstring diagnostic;
+        const auto outcome = nskinzcs2::runtime::BuildWorkshopRadarAlphaOverlay(
+            profile.workshop_id,
+            profile.target_map_name,
+            overlay,
+            diagnostic,
+            runtime_process_id);
+        if (outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::NotNeeded)
+        {
+            nskinzcs2::Logger::Info(
+                L"[MapRemap/RadarTexture] target radar already has usable transparency; no external overlay is needed.");
+            return;
+        }
+        if (outcome != nskinzcs2::runtime::RadarAlphaFixOutcome::Generated)
+        {
+            nskinzcs2::Logger::Warn(
+                L"[MapRemap/RadarTexture] external radar decode was skipped; map replacement will continue without an alpha overlay. " +
+                diagnostic);
+            return;
+        }
+
+        nskinzcs2::Logger::Info(
+            L"[MapRemap/RadarTexture] external radar PNG generated; starting native CS2 resource compilation.");
+        const auto cs2_root = RuntimeCs2InstallRoot(runtime_process_id);
+        if (cs2_root.empty() ||
+            !nskinzcs2::runtime::CompileRadarOverlayWithCs2(cs2_root, overlay, diagnostic))
+        {
+            nskinzcs2::Logger::Warn(
+                L"[MapRemap/RadarTexture] external native compilation failed; map replacement will continue without an alpha overlay. " +
+                diagnostic);
+            return;
+        }
+
+        std::filesystem::path overlay_root;
+        std::filesystem::path overlay_file;
+        if (!nskinzcs2::runtime::MaterializeCompiledRadarOverlay(
+                overlay,
+                overlay_root,
+                overlay_file,
+                diagnostic))
+        {
+            nskinzcs2::Logger::Warn(
+                L"[MapRemap/RadarTexture] external compiled radar could not be materialized; map replacement will continue without it. " +
+                diagnostic);
+            return;
+        }
+
+        profile.radar_overlay_virtual_path = overlay.virtual_path;
+        profile.radar_overlay_root_path = WideToUtf8(overlay_root.wstring());
+        profile.radar_overlay_file_path = WideToUtf8(overlay_file.wstring());
+        if (profile.radar_overlay_root_path.empty() || profile.radar_overlay_file_path.empty())
+        {
+            ClearPreparedRadar(profile);
+            nskinzcs2::Logger::Warn(
+                L"[MapRemap/RadarTexture] external overlay paths could not be encoded as UTF-8; map replacement will continue without it.");
+            return;
+        }
+
+        std::wstringstream message;
+        message << L"[MapRemap/RadarTexture] external native overlay ready ("
+                << overlay.width << L'x' << overlay.height << L", visible="
+                << overlay.visible_pixels << L", transparent=" << overlay.transparent_pixels
+                << L", soft_edge=" << overlay.softened_edge_pixels
+                << L"): " << overlay_file.wstring();
+        nskinzcs2::Logger::Info(message.str());
+    }
+    catch (const std::exception& exception)
+    {
+        ClearPreparedRadar(profile);
+        nskinzcs2::Logger::Warn(
+            L"[MapRemap/RadarTexture] external radar preparation threw an exception; map replacement will continue without it: " +
+            std::wstring(exception.what(), exception.what() + std::strlen(exception.what())));
+    }
+    catch (...)
+    {
+        ClearPreparedRadar(profile);
+        nskinzcs2::Logger::Warn(
+            L"[MapRemap/RadarTexture] external radar preparation failed unexpectedly; map replacement will continue without it.");
+    }
+}
 }
 
 bool nskinzcs2::ui::LaunchExternalUiHost(
@@ -150,9 +317,14 @@ bool nskinzcs2::ui::LaunchExternalUiHost(
 bool nskinzcs2::ui::PublishExternalConfigUpdate(
     const DWORD runtime_process_id,
     const std::filesystem::path& config_path,
-    const model::ConfigDocument& document)
+    model::ConfigDocument& document)
 {
-    if (runtime_process_id == 0 || !ConfigStore::Save(config_path, document))
+    if (runtime_process_id == 0)
+    {
+        return false;
+    }
+    PrepareExternalRadarOverlay(runtime_process_id, document.map_remap);
+    if (!ConfigStore::Save(config_path, document))
     {
         return false;
     }

@@ -19,22 +19,23 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-EN.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.5.0-beta"><img src="https://img.shields.io/badge/Beta-v0.5.0-8250df?style=for-the-badge" alt="v0.5.0 beta notes"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.1-beta/Lyan_nskinz-v0.5.1-beta-EN.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.1-beta/Lyan_nskinz-v0.5.1-beta-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.5.1-beta"><img src="https://img.shields.io/badge/Beta-v0.5.1-8250df?style=for-the-badge" alt="v0.5.1 beta notes"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/Report%20an%20issue-f85149?style=for-the-badge" alt="Report an issue"></a>
 </p>
 
 > **Safety first:** nSkinzCS2 is intended only for offline demo playback started through HLAE with `-insecure`. Never load it on VAC-protected or online servers. The author does not guarantee account safety for use outside this scope.
 
-## What's new in v0.5.0 Beta
+## What's new in v0.5.1 Beta
 
 - Firearm skins retain the verified v0.4.5 runtime path; no file rewriter or `.dem` mutation is used.
 - Stock T/CT gloves construct native paint, seed and wear attributes before item identity is committed. Every partial failure restores the complete original state, preventing a half-initialized glove view from reaching Source 2.
 - Knife model/animation listeners survive demo reload and entity-generation adoption. Weapon-slot and HUD consumers are separated to address knives appearing in the pistol position and stale pistol/original-dagger actions.
-- Filenames, panel title and startup log identify `v0.5.0-beta`. Baseline: CS2 Steam Build `25218825`, Client/Server `2000908`, Patch `1.41.8.1`, Source revision `10981323`; HLAE `2.191.1`.
+- Added released Workshop map-model replacement: discover installed subscriptions, select a target map, arm it during the first demo load, then apply it while the same demo is loaded a second time. Safe stale source-map generated models are suppressed; compiled/baked geometry remains map-dependent.
+- Filenames, panel title and startup log identify `v0.5.1-beta`. Baseline: CS2 Steam Build `25218825`, Client/Server `2000908`, Patch `1.41.8.1`, Source revision `10981323`; HLAE `2.192.2`.
 
-This is a rendered-acceptance beta for knife models/actions and stock gloves. The full native suite and isolated loader gates pass, but automated validation is not a substitute for testing a specific demo. See the [bilingual v0.5.0 Beta release notes](docs/releases/v0.5.0-beta.md).
+This is a rendered-acceptance beta for map models, knife models/actions and stock gloves. The full native suite and isolated loader gates pass, but automated validation is not a substitute for testing a specific demo/map pair. See the [bilingual v0.5.1 Beta release notes](docs/releases/v0.5.1-beta.md).
 
 ## What's new in v0.4.5 (previous stable)
 
@@ -80,47 +81,62 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Feature matrix
 
-| Area | Supported in v0.5.0 Beta | Notes |
+| Area | Supported in v0.5.1 Beta | Notes |
 | --- | --- | --- |
 | Weapons | Compatible finish list, seed, wear, quality, name tag and sticker fields | Includes initial stock-weapon material generation. Exact weapon/paint checks protect runtime writes and configs; meshes follow paint metadata. |
 | Knives | Finish, seed and wear; experimental finish + model replacement | Finish-only hides model selection. Model/deploy/inspect replacement is active, but first-deploy, dropped-knife and HUD handoffs remain experimental. |
 | Gloves | T/CT default glove carriers, model and finish | Default glove definitions `5028` and `5029` are supported on the verified build. |
+| Workshop maps | Detect installed subscriptions; replace the map and safe source-map generated models on the demo's second load | Released beta feature. It does not rewrite the `.dem` or Workshop files. Geometry baked into the source BSP/VPK may remain when the target map has no safe one-to-one replacement. |
 | Keychains | Modify or clear an existing live module | Creating a keychain module on an item that has none remains experimental. |
 | Vanilla / no finish | Explicit `Vanilla (No Finish)` option | This is different from `- (Do not modify)`. A stale first-person knife material may survive on some demo items. |
 | Languages | English and Simplified Chinese DLLs | The Chinese build reads names from the installed `csgo_schinese.txt` catalog. |
 
 ## Quick start
 
-v0.5.0 Beta embeds precompiled UI shaders and retains `/MT`. No additional runtime installation is needed beyond Windows 10/11 x64, CS2 and HLAE. See [single-DLL loading and diagnostics](docs/portable-loading.md) for `LoadLibrary failed` troubleshooting.
+v0.5.1 Beta embeds precompiled UI shaders and retains `/MT`. No additional runtime installation is needed beyond Windows 10/11 x64, CS2 and HLAE. See [single-DLL loading and diagnostics](docs/portable-loading.md) for `LoadLibrary failed` troubleshooting.
 
 1. Start CS2 through HLAE with `-insecure`, then open an offline demo.
 2. Download one of the two Release DLLs. Release binaries use the static MSVC runtime (`/MT`), so no Visual C++ Redistributable, Python, SDK or compiler is required.
 3. In HLAE, load the DLL:
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.5.0-beta-EN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.5.1-beta-EN.dll"
 ```
 
 For the Simplified Chinese UI:
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.5.0-beta-zh-CN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.5.1-beta-zh-CN.dll"
 ```
 
 These examples require the DLL to be in the root of drive D. Use your actual full path. Paths without spaces need no quotes; if there are spaces, use exactly one pair of ASCII quotes, e.g. `mirv_loadlibrary "D:\My Tools\nSkinzCS2.dll"`. Never double-wrap the path or use typographic quotes.
 
 Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Keep the DLL in a writable folder: the isolated panel and runtime share generated catalog/config sidecars there. Runtime diagnostics are written to `nSkinzCS2.log`; panel diagnostics to `nSkinzCS2.ui.log`.
 
-When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 beta ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-CS2-2000908-windows-x64.zip) contains both language options, game-version evidence and loading instructions.
+When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 beta ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.1-beta/Lyan_nskinz-v0.5.1-beta-CS2-2000908-windows-x64.zip) contains both language options, game-version evidence, license/notices and loading instructions.
+
+## Workshop map and model replacement
+
+Subscribe to and fully download the target CS2 Workshop map before starting. The new `Maps` tab detects installed subscriptions from Steam's local Workshop manifest and reads only top-level `maps/<name>.vpk` packages.
+
+1. Load the source demo once through HLAE and load nSkinzCS2.
+2. Open `Maps`, click `Rescan subscribed maps`, select the target, enable demo map replacement, and click `Use selected workshop map`.
+3. Leave `Source demo map` blank for automatic capture, then click the main `Update` button while the first load is active.
+4. Confirm the log contains `Map remap ready` and `Map remap armed`.
+5. Run `playdemo` for the same demo again. The replacement is applied while the second load is parsed.
+
+All verified protobuf, KeyValues, manifest and resource hooks must be available for the detected CS2 build; otherwise the feature fails closed without installing a partial chain. This has passed compilation, native regression and local Workshop discovery checks, but each target map still needs rendered in-game acceptance.
+
+See the [MulNX map-remap parity audit](docs/map-remap-mulnx-audit.md) for the hook-by-hook comparison and intentional framework differences.
 
 ## Compatibility baseline
 
-`v0.5.0 Beta` targets the checked baseline below. Firearms retain the prior path; knives, actions and stock gloves remain beta acceptance items:
+`v0.5.1 Beta` targets the checked baseline below. Firearms retain the prior path; map models, knives, actions and stock gloves remain beta acceptance items:
 
 - Steam app build ID `25218825`
 - CS2 Client/Server `2000908`, patch `1.41.8.1`, Source revision `10981323` (2026-09-09 15:23:58)
 - `client.dll` SHA-256 `A0C195F0B6EC00915EF08C548200A010EBBE7982D3A4BC468CAD939B67C8C4E3`
-- HLAE `2.191.1`
+- HLAE `2.192.2`
 - `Source2Client002`, `ResourceSystem013` and `VFileSystem017`
 
 CS2 updates can change memory layouts. The DLL logs its detected identity and fails closed when required signatures are missing or ambiguous.
@@ -137,7 +153,7 @@ Select ReleaseZhCn | x64   # Simplified Chinese
 Build the solution
 ```
 
-Outputs are `build/Release/Lyan_nskinz v0.5.0-beta EN.dll`, `build/Release/Lyan_nskinz v0.5.0-beta zh-CN.dll` and `build/Release/nSkinzCS2.Tests.exe`. `run-build-and-tests.cmd` builds and runs the native regression suite; `run-tests.cmd` runs the existing test binary.
+Outputs are `build/Release/Lyan_nskinz v0.5.1-beta EN.dll`, `build/Release/Lyan_nskinz v0.5.1-beta zh-CN.dll` and `build/Release/nSkinzCS2.Tests.exe`. `run-build-and-tests.cmd` builds and runs the native regression suite; `run-tests.cmd` runs the existing test binary.
 
 </details>
 
@@ -159,6 +175,7 @@ Outputs are `build/Release/Lyan_nskinz v0.5.0-beta EN.dll`, `build/Release/Lyan_
 ## Known limitations and roadmap
 
 - Knife model replacement and some animation/HUD handoffs remain experimental, especially the first deploy after reconstruction and dropped or teammate-issued knives.
+- Workshop map replacement depends on the current CS2 binary signatures and the selected map's assets. A CS2 update or an incomplete subscription disables or prevents the replacement; visual acceptance remains per map.
 - If a demo knife already owns a compiled custom material, `Vanilla (No Finish)` can leave that old first-person material visible. Positive knife paint kits are verified; this stale-material reset is not claimed as fixed in v0.4.5.
 - Fully live item-schema walking is not yet preferred over installed game data.
 
@@ -178,7 +195,7 @@ Planned work includes a more complete vanilla-material reset, broader knife mode
 
 **Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.5 vanilla path cannot always clear; this is the documented limitation above.
 
-**Which build should I use?** Download `Lyan_nskinz-v0.5.0-beta-EN.dll` for English or `Lyan_nskinz-v0.5.0-beta-zh-CN.dll` for the Chinese UI and catalog names. The combined ZIP retains the compiled filenames with spaces. Both DLLs target the same CS2 compatibility baseline.
+**Which build should I use?** Download `Lyan_nskinz-v0.5.1-beta-EN.dll` for English or `Lyan_nskinz-v0.5.1-beta-zh-CN.dll` for the Chinese UI and catalog names. The combined ZIP retains the compiled filenames with spaces. Both DLLs target the same CS2 compatibility baseline.
 
 **The repository opens, but its images show broken icons.** Some networks cannot reach GitHub's raw asset host. The README already uses GitHub-relative image paths; as a temporary Windows network workaround, open `C:\Windows\System32\drivers\etc\hosts` in Notepad **as Administrator** and add these lines:
 
@@ -204,7 +221,7 @@ If nSkinzCS2 is useful to your offline demo workflow, optional support is apprec
 
 ## Acknowledgements
 
-nSkinzCS2 uses Dear ImGui, MinHook and nlohmann/json. Please review the upstream notices under `third_party/` before redistributing modified source or binaries. This repository intentionally has no root license at this time.
+nSkinzCS2 v0.5.1 Beta is released under [`AGPL-3.0-only`](LICENSE). Its map-remap implementation is adapted from and audited against [MulNX_CS2](https://github.com/Co1Swet/MulNX_CS2) commit `361008b208326d9e7916ff2cd58dd57a0492c400`; it does not use MulNX's file rewriter. The complete DLL Corresponding Source is released with the binaries. Preserve [`NOTICE.md`](NOTICE.md), the AGPL license, source availability and the component notices under `third_party/` when redistributing or modifying it.
 
 <p align="center"><a href="https://star-history.com/#Lyan-edit/CS2-nskinz&Date"><img src="https://api.star-history.com/svg?repos=Lyan-edit/CS2-nskinz&type=Date" alt="Star History" width="760"></a></p>
 

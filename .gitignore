@@ -36,6 +36,8 @@ imgui.ini
 
 # Local runtime/reference installations
 hlae_2_191_1/
+hlae_2_192_2/
+MulNX/
 
 # Reverse-engineering scratch artifacts
 *.dmp

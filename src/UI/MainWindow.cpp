@@ -4,6 +4,7 @@
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
+#include "Runtime/WorkshopMaps.hpp"
 #include "UI/ExternalUiHost.hpp"
 #include "UI/UiText.hpp"
 
@@ -18,6 +19,7 @@
 #include <array>
 #include <chrono>
 #include <cfloat>
+#include <cctype>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
@@ -48,6 +50,9 @@ using nskinzcs2::model::KeychainProfile;
 using nskinzcs2::model::KnifeProfile;
 using nskinzcs2::model::KnifeProfileMode;
 using nskinzcs2::model::NamedId;
+using nskinzcs2::runtime::WorkshopMapEntry;
+using nskinzcs2::runtime::WorkshopMapScanResult;
+using nskinzcs2::runtime::IsLikelyAuxiliaryWorkshopMap;
 using nskinzcs2::model::kMaximumCosmeticWear;
 using nskinzcs2::model::kMinimumCosmeticWear;
 using nskinzcs2::ui::UiTextId;
@@ -569,6 +574,48 @@ bool DrawKnifeModeCombo(KnifeProfileMode& mode)
         return true;
     }
 
+    bool TryValidateMapRemapForApply(
+        const ConfigDocument& document,
+        std::wstring& issue)
+    {
+        issue.clear();
+        const auto& profile = document.map_remap;
+        if (!profile.enabled)
+        {
+            return true;
+        }
+        const bool valid_workshop_id = !profile.workshop_id.empty() &&
+            std::all_of(profile.workshop_id.begin(), profile.workshop_id.end(), [](const unsigned char character)
+            {
+                return std::isdigit(character) != 0;
+            });
+        const auto valid_map_name = [](const std::string& value, const bool allow_empty)
+        {
+            if (value.empty())
+            {
+                return allow_empty;
+            }
+            return value.size() < 256 &&
+                std::all_of(value.begin(), value.end(), [](const unsigned char character)
+                {
+                    return std::isalnum(character) != 0 || character == '_' || character == '-' ||
+                        character == '/' || character == '\\' || character == '.';
+                });
+        };
+        if (!valid_workshop_id || !valid_map_name(profile.target_map_name, false) ||
+            !valid_map_name(profile.source_map_name, true))
+        {
+            issue = L"Map replacement is invalid: select an installed workshop map and use a numeric workshop ID.";
+            return false;
+        }
+        if (IsLikelyAuxiliaryWorkshopMap(profile.target_map_name))
+        {
+            issue = L"Map replacement is invalid: the selected target is an auxiliary skybox/background map. Rescan and select the playable map from the same workshop item.";
+            return false;
+        }
+        return true;
+    }
+
 const char* AvailabilityText(const nskinzcs2::runtime::Availability availability)
 {
     switch (availability)
@@ -975,6 +1022,22 @@ std::string Narrow(const std::wstring& value)
     return output;
 }
 
+std::wstring Wide(const std::string& value)
+{
+    if (value.empty())
+    {
+        return {};
+    }
+    const auto count = MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0);
+    if (count <= 0)
+    {
+        return std::wstring(value.begin(), value.end());
+    }
+    std::wstring output(static_cast<std::size_t>(count), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), output.data(), count);
+    return output;
+}
+
 class WindowController
 {
 public:
@@ -996,6 +1059,7 @@ public:
         }
 
         working_config_dirty_ = false;
+        RefreshWorkshopMaps();
     }
 
     ~WindowController()
@@ -1499,6 +1563,12 @@ private:
                 ImGui::NextColumn();
                 DrawKeychainProfileEditor(catalog);
                 ImGui::Columns(1);
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem(Ui(UiTextId::TabMaps)))
+            {
+                DrawMapRemapEditor(status);
                 ImGui::EndTabItem();
             }
 
@@ -2223,6 +2293,223 @@ private:
         ImGui::TextWrapped("%s", Ui(UiTextId::KeychainRuntimeDescription));
     }
 
+    void RefreshWorkshopMaps()
+    {
+        const auto selected_id = working_config_.map_remap.workshop_id;
+        const auto selected_map = working_config_.map_remap.target_map_name;
+        workshop_scan_ = nskinzcs2::runtime::DiscoverSubscribedWorkshopMaps(external_runtime_process_id_);
+        selected_workshop_map_ = -1;
+        for (int index = 0; index < static_cast<int>(workshop_scan_.entries.size()); ++index)
+        {
+            const auto& entry = workshop_scan_.entries[static_cast<std::size_t>(index)];
+            if (entry.workshop_id == selected_id && entry.map_name == selected_map)
+            {
+                selected_workshop_map_ = index;
+                if (working_config_.map_remap.target_skybox_resource_prefix !=
+                    entry.skybox_resource_prefix)
+                {
+                    working_config_.map_remap.target_skybox_resource_prefix =
+                        entry.skybox_resource_prefix;
+                    PushWorkingConfig();
+                    Logger::Info(
+                        L"Refreshed the selected Workshop map 3D skybox resource prefix: " +
+                        (entry.skybox_resource_prefix.empty()
+                            ? std::wstring(L"<not uniquely detected>")
+                            : Wide(entry.skybox_resource_prefix)) + L".");
+                }
+                break;
+            }
+        }
+
+        // Older builds exposed separately compiled skybox worlds in the map
+        // list. Repair that saved choice only when its Workshop item now has
+        // exactly one playable target, so packages with real variants still
+        // require an explicit user selection.
+        if (selected_workshop_map_ < 0 && IsLikelyAuxiliaryWorkshopMap(selected_map))
+        {
+            int unique_playable_index = -1;
+            for (int index = 0; index < static_cast<int>(workshop_scan_.entries.size()); ++index)
+            {
+                if (workshop_scan_.entries[static_cast<std::size_t>(index)].workshop_id != selected_id)
+                {
+                    continue;
+                }
+                if (unique_playable_index >= 0)
+                {
+                    unique_playable_index = -2;
+                    break;
+                }
+                unique_playable_index = index;
+            }
+
+            if (unique_playable_index >= 0)
+            {
+                const auto& replacement =
+                    workshop_scan_.entries[static_cast<std::size_t>(unique_playable_index)];
+                selected_workshop_map_ = unique_playable_index;
+                working_config_.map_remap.workshop_title = replacement.title;
+                working_config_.map_remap.addon_name = replacement.addon_name;
+                working_config_.map_remap.target_map_name = replacement.map_name;
+                working_config_.map_remap.target_skybox_resource_prefix =
+                    replacement.skybox_resource_prefix;
+                working_config_.map_remap.radar_overlay_virtual_path.clear();
+                working_config_.map_remap.radar_overlay_root_path.clear();
+                working_config_.map_remap.radar_overlay_file_path.clear();
+                PushWorkingConfig();
+                workshop_scan_.diagnostics.push_back(
+                    L"Replaced saved auxiliary map '" + Wide(selected_map) +
+                    L"' with playable map '" + Wide(replacement.map_name) + L"'.");
+                Logger::Info(
+                    L"Migrated the saved auxiliary workshop target from " +
+                    Wide(selected_map) + L" to " + Wide(replacement.map_name) + L".");
+            }
+        }
+
+        Logger::Info(
+            L"Workshop map scan completed: " +
+            std::to_wstring(workshop_scan_.entries.size()) +
+            L" CS2 map entries detected.");
+    }
+
+    void DrawMapRemapEditor(const nskinzcs2::runtime::Status& status)
+    {
+        auto& profile = working_config_.map_remap;
+        if (ImGui::Button(Ui(UiTextId::MapRescan)))
+        {
+            RefreshWorkshopMaps();
+        }
+        ImGui::SameLine();
+        ImGui::Text(
+            Ui(UiTextId::MapDetectedFormat),
+            static_cast<int>(workshop_scan_.entries.size()));
+
+        for (const auto& diagnostic : workshop_scan_.diagnostics)
+        {
+            ImGui::TextDisabled("%s", Narrow(diagnostic).c_str());
+        }
+
+        if (workshop_scan_.entries.empty())
+        {
+            ImGui::TextWrapped("%s", Ui(UiTextId::MapNoEntries));
+        }
+
+        ImGui::Separator();
+        ImGui::Columns(2, "MapRemapColumns", false);
+        ImGui::BeginChild("WorkshopMapList", ImVec2(0.0f, 300.0f), true);
+        for (int index = 0; index < static_cast<int>(workshop_scan_.entries.size()); ++index)
+        {
+            const auto& entry = workshop_scan_.entries[static_cast<std::size_t>(index)];
+            std::string label = entry.title + "  [" + entry.map_name + "]##" +
+                entry.workshop_id + "/" + entry.map_name;
+            if (ImGui::Selectable(label.c_str(), selected_workshop_map_ == index))
+            {
+                selected_workshop_map_ = index;
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::NextColumn();
+        if (ImGui::Checkbox(Ui(UiTextId::MapEnable), &profile.enabled))
+        {
+            PushWorkingConfig();
+        }
+        if (ImGui::Checkbox(Ui(UiTextId::MapUseSourceRadar), &profile.use_source_radar))
+        {
+            PushWorkingConfig();
+        }
+        ImGui::TextWrapped("%s", Ui(UiTextId::MapUseSourceRadarHelp));
+
+        if (profile.source_map_name.empty())
+        {
+            const auto detected_source = !status.level_name.empty()
+                ? Narrow(status.level_name)
+                : Narrow(status.map_remap_source);
+            if (!detected_source.empty())
+            {
+                profile.source_map_name = detected_source;
+                PushWorkingConfig();
+                Logger::Info(
+                    L"Auto-filled the source demo map from runtime state: " +
+                    Wide(detected_source) + L".");
+            }
+        }
+
+        char source_map_buffer[256] {};
+        strncpy_s(source_map_buffer, profile.source_map_name.c_str(), _TRUNCATE);
+        if (ImGui::InputText(Ui(UiTextId::MapSourceName), source_map_buffer, sizeof(source_map_buffer)))
+        {
+            profile.source_map_name = source_map_buffer;
+            PushWorkingConfig();
+        }
+        ImGui::TextWrapped("%s", Ui(UiTextId::MapSourceHelp));
+        ImGui::Spacing();
+
+        if (selected_workshop_map_ >= 0 &&
+            selected_workshop_map_ < static_cast<int>(workshop_scan_.entries.size()))
+        {
+            const auto& selected = workshop_scan_.entries[static_cast<std::size_t>(selected_workshop_map_)];
+            ImGui::TextWrapped(
+                Ui(UiTextId::MapTargetFormat),
+                selected.map_name.c_str(),
+                selected.addon_name.c_str());
+            ImGui::Text(Ui(UiTextId::MapWorkshopFormat), selected.workshop_id.c_str());
+            if (ImGui::Button(Ui(UiTextId::MapUseSelected), ImVec2(-1.0f, 30.0f)))
+            {
+                profile.enabled = true;
+                profile.workshop_id = selected.workshop_id;
+                profile.workshop_title = selected.title;
+                profile.addon_name = selected.addon_name;
+                profile.target_map_name = selected.map_name;
+                profile.target_skybox_resource_prefix = selected.skybox_resource_prefix;
+                profile.radar_overlay_virtual_path.clear();
+                profile.radar_overlay_root_path.clear();
+                profile.radar_overlay_file_path.clear();
+                PushWorkingConfig();
+                Logger::Info(
+                    L"Staged workshop map " +
+                    Wide(selected.title) +
+                    L" (" + Wide(selected.workshop_id) + L"/" + Wide(selected.map_name) + L").");
+            }
+        }
+        else
+        {
+            ImGui::TextWrapped("%s", Ui(UiTextId::MapSelectHelp));
+        }
+
+        if (!profile.target_map_name.empty())
+        {
+            ImGui::Separator();
+            ImGui::TextWrapped(
+                Ui(UiTextId::MapTargetFormat),
+                profile.target_map_name.c_str(),
+                profile.addon_name.c_str());
+            ImGui::Text(Ui(UiTextId::MapWorkshopFormat), profile.workshop_id.c_str());
+        }
+        ImGui::Columns(1);
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", Ui(UiTextId::MapSecondLoadHelp));
+
+        if (status.map_remap_enabled || status.map_remap_hooks_installed)
+        {
+            const auto source = status.map_remap_source.empty()
+                ? std::string("<DemoHeader>")
+                : Narrow(status.map_remap_source);
+            ImGui::TextWrapped(
+                Ui(UiTextId::MapRuntimeFormat),
+                status.map_remap_hooks_installed ? Ui(UiTextId::Yes) : Ui(UiTextId::No),
+                source.c_str(),
+                Narrow(status.map_remap_target).c_str(),
+                static_cast<unsigned long long>(status.map_remap_replacement_count));
+            if (!status.map_remap_issue.empty())
+            {
+                ImGui::TextColored(
+                    ImVec4(0.94f, 0.42f, 0.25f, 1.0f),
+                    "%s",
+                    Narrow(status.map_remap_issue).c_str());
+            }
+        }
+    }
+
     void DrawStickersEditor(
         const Catalog& catalog,
         std::array<nskinzcs2::model::StickerProfile, 5>& stickers,
@@ -2286,7 +2573,8 @@ private:
             std::wstring validation_issue;
             if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
                 !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue) ||
-                !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue))
+                !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue) ||
+                !TryValidateMapRemapForApply(working_config_, validation_issue))
             {
                 Logger::Warn(L"UI rejected staged config update: " + validation_issue);
             }
@@ -2335,7 +2623,8 @@ private:
             std::wstring validation_issue;
             if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
                 !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue) ||
-                !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue))
+                !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue) ||
+                !TryValidateMapRemapForApply(working_config_, validation_issue))
             {
                 Logger::Warn(L"UI rejected config save: " + validation_issue);
             }
@@ -2510,10 +2799,14 @@ private:
         case kAutomatedRuntimeRefreshMessage:
             if (external_runtime_process_id_ != 0)
             {
-                nskinzcs2::ui::PublishExternalConfigUpdate(
+                auto config = state_.SnapshotConfig();
+                if (nskinzcs2::ui::PublishExternalConfigUpdate(
                     external_runtime_process_id_,
                     config_path_,
-                    state_.SnapshotConfig());
+                    config))
+                {
+                    state_.ReplaceConfig(config);
+                }
             }
             else
             {
@@ -2559,7 +2852,9 @@ private:
     int selected_knife_profile_ = 0;
     int selected_glove_profile_ = 0;
     int selected_keychain_profile_ = 0;
+    int selected_workshop_map_ = -1;
     int selected_weapon_sticker_ = 0;
+    WorkshopMapScanResult workshop_scan_;
     bool last_insert_state_ = false;
     bool imgui_initialized_ = false;
     bool resources_created_ = false;

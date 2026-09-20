@@ -119,13 +119,37 @@ struct DemoMirvPlayerEntry
     std::string label;
 };
 
+struct MapRemapProfile
+{
+    bool enabled = false;
+    // Keep the demo's original GameSession map name for Panorama/POV radar
+    // while the world-loading messages are redirected to the workshop map.
+    bool use_source_radar = true;
+    // Blank means: capture the currently loaded demo map when Update is pressed.
+    std::string source_map_name;
+    std::string workshop_id;
+    std::string workshop_title;
+    std::string addon_name;
+    std::string target_map_name;
+    // Filled by Workshop discovery when the selected map ships a separate
+    // compiled 3D skybox package (for example de_nuke_skybox02_d).
+    std::string target_skybox_resource_prefix;
+    // Generated only by the isolated rundll32 control-panel process.  The
+    // injected CS2 runtime never decodes or compiles radar textures; it only
+    // validates and mounts this already compiled native Source 2 resource.
+    std::string radar_overlay_virtual_path;
+    std::string radar_overlay_root_path;
+    std::string radar_overlay_file_path;
+};
+
 struct ConfigDocument
 {
-    int version = 5;
+    int version = 6;
     std::vector<CosmeticProfile> profiles;
     std::vector<KnifeProfile> knife_profiles;
     std::vector<GloveProfile> glove_profiles;
     std::vector<KeychainProfile> keychain_profiles;
+    MapRemapProfile map_remap;
     bool experimental_allow_hud_alias_synthetic_proxy_model_write = false;
 };
 
@@ -253,6 +277,10 @@ struct Status
     bool runtime_created_wearable_bound = false;
     bool glove_pawn_fallback_bound = false;
     bool knife_viewmodel_sync_ready = false;
+    bool map_remap_enabled = false;
+    bool map_remap_hooks_installed = false;
+    bool map_remap_source_captured = false;
+    bool map_remap_use_source_radar = true;
     bool runtime_rebuilding = false;
     bool demo_keychain_create_disabled = false;
     std::uint64_t frame_callback_count = 0;
@@ -279,8 +307,13 @@ struct Status
     int applied_weapon_count = 0;
     int applied_glove_count = 0;
     int skipped_knife_override_count = 0;
+    std::uint64_t map_remap_replacement_count = 0;
+    std::uint64_t map_remap_suppressed_source_geometry_count = 0;
     std::wstring knife_runtime_path;
     std::wstring knife_runtime_reason;
+    std::wstring map_remap_source;
+    std::wstring map_remap_target;
+    std::wstring map_remap_issue;
     std::wstring process_path;
     std::wstring level_name;
     std::wstring last_error;

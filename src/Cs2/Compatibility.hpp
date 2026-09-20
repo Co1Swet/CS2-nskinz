@@ -14,18 +14,18 @@ namespace nskinzcs2::compatibility
 inline constexpr std::string_view kVerifiedClientVersion = "2000908";
 inline constexpr std::string_view kVerifiedPatchVersion = "1.41.8.1";
 inline constexpr std::string_view kVerifiedSourceRevision = "10981323";
-inline constexpr std::string_view kVerifiedHlaeVersion = "2.191.1.0";
+inline constexpr std::string_view kVerifiedHlaeVersion = "2.192.2.0";
 
 inline constexpr char kSource2ClientInterface[] = "Source2Client002";
 inline constexpr char kResourceSystemInterface[] = "ResourceSystem013";
 inline constexpr char kFileSystemInterface[] = "VFileSystem017";
 inline constexpr std::size_t kFrameStageNotifyVtableIndex = 36;
-// ClientFrameStage_t layout used by HLAE 2.191.1. Runtime polling must run at
+// ClientFrameStage_t layout used by HLAE 2.192.2. Runtime polling must run at
 // FRAME_RENDER_PASS; using the previous value (11) leaves every manual Update
 // pending forever even though FrameStageNotify callbacks are active.
 inline constexpr int kFrameStartStage = 0;
 inline constexpr int kFrameRenderPassStage = 12;
-// Source2EngineToClient001 layout verified on HLAE 2.191.1 / CS2 build 2000908.
+// Source2EngineToClient001 layout verified on HLAE 2.192.2 / CS2 build 2000908.
 inline constexpr std::size_t kEngineIsPlayingDemoVtableIndex = 42;
 inline constexpr std::size_t kEngineGetDemoFilePathVtableIndex = 43;
 inline constexpr std::size_t kEngineGetLevelNameShortVtableIndex = 65;

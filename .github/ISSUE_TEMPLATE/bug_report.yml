@@ -20,7 +20,7 @@ body:
     id: hlae-version
     attributes:
       label: HLAE version / HLAE 版本
-      placeholder: "2.191.1"
+      placeholder: "2.192.2"
     validations:
       required: true
   - type: dropdown

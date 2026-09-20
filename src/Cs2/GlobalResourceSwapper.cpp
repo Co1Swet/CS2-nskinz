@@ -2059,6 +2059,12 @@ bool TryActivateNextFileSystemProbeLocked(std::wstring& reason) noexcept
         : g_state.file_system_next_slot;
     for (std::size_t slot = start_slot; slot <= kFileSystemLastSlotIndex; ++slot)
     {
+        // MapRemap owns VFileSystem017::ReadFile (slot 25). The rotating
+        // forensic probe must never replace or remove that radar hook.
+        if (slot == 25)
+        {
+            continue;
+        }
         void* target = nullptr;
         if (!TryValidateFileSystemSlotTarget(g_state.file_system_interface, slot, target))
         {

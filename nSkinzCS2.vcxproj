@@ -63,14 +63,14 @@
   <PropertyGroup>
     <IntDir>$(ProjectDir)build\$(Configuration)\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\$(Configuration)\</OutDir>
-    <TargetName>Lyan_nskinz v0.5.0-beta EN</TargetName>
+    <TargetName>Lyan_nskinz v0.5.1-beta EN</TargetName>
     <VCToolsVersion>14.44.35207</VCToolsVersion>
     <IncludePath>$(ProjectDir)src;$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;$(ProjectDir)third_party\json;$(ProjectDir)third_party\MinHook\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseZhCn|x64'">
     <IntDir>$(ProjectDir)build\ReleaseZhCn\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\Release\</OutDir>
-    <TargetName>Lyan_nskinz v0.5.0-beta zh-CN</TargetName>
+    <TargetName>Lyan_nskinz v0.5.1-beta zh-CN</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -86,7 +86,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;windowscodecs.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -110,7 +110,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;windowscodecs.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseZhCn|x64'">
@@ -134,7 +134,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;windowscodecs.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -162,6 +162,12 @@
     <ClInclude Include="src\Runtime\KnifeAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponAppearance.hpp" />
     <ClInclude Include="src\Runtime\WeaponMaterialInit.hpp" />
+    <ClInclude Include="src\Runtime\MapRemap.hpp" />
+    <ClInclude Include="src\Runtime\RadarAlphaFix.hpp" />
+    <ClInclude Include="src\Runtime\RadarNativeCompiler.hpp" />
+    <ClInclude Include="src\Runtime\Shaders\RadarDecodePixel.generated.hpp" />
+    <ClInclude Include="src\Runtime\Shaders\RadarDecodeVertex.generated.hpp" />
+    <ClInclude Include="src\Runtime\WorkshopMaps.hpp" />
     <ClInclude Include="src\UI\MainWindow.hpp" />
     <ClInclude Include="src\UI\ExternalUiHost.hpp" />
     <ClInclude Include="src\UI\UiText.hpp" />
@@ -198,6 +204,10 @@
     <ClCompile Include="src\Runtime\KnifeUpdateProbe.cpp" />
     <ClCompile Include="src\Runtime\KnifeAppearance.cpp" />
     <ClCompile Include="src\Runtime\WeaponAppearance.cpp" />
+    <ClCompile Include="src\Runtime\MapRemap.cpp" />
+    <ClCompile Include="src\Runtime\RadarAlphaFix.cpp" />
+    <ClCompile Include="src\Runtime\RadarNativeCompiler.cpp" />
+    <ClCompile Include="src\Runtime\WorkshopMaps.cpp" />
     <ClCompile Include="src\UI\MainWindow.cpp" />
     <ClCompile Include="src\UI\ExternalUiHost.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_dx11.cpp" />

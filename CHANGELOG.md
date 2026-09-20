@@ -1,5 +1,26 @@
 # Changelog / 更新记录
 
+## Unreleased / 未发布
+
+## v0.5.1-beta — 2026-09-20
+
+- Added a `Maps` panel that discovers installed CS2 Workshop subscriptions and stages a selected map for the second parse/load of the same HLAE demo; no `.dem` or Workshop files are rewritten.
+- 新增“地图更换”面板：自动识别本机已安装的 CS2 创意工坊订阅，并在同一 HLAE Demo 第二次解析／加载时应用目标地图；不改写 `.dem` 或工坊文件。
+- Added an atomic fail-closed runtime chain covering Demo protobuf map/addon fields, client map KeyValues, manifest fallback and missing-model resource requests for the verified CS2 baseline.
+- 新增原子化、失败关闭的运行时链：覆盖 Demo protobuf 地图／addon 字段、客户端地图 KeyValues、manifest 回退及缺失模型资源请求，并只针对已验证 CS2 基线启用。
+- The map-remap implementation is adapted from the AGPL-3.0 MulNX_CS2 runtime behavior and second-load workflow without incorporating its file-rewriter path. This release includes the complete AGPL-3.0 license, provenance notice and Corresponding Source.
+- 地图更换实现移植自 AGPL-3.0 的 MulNX_CS2 运行时行为与二次加载流程，但不纳入其文件改写路径；本版随附完整 AGPL-3.0 许可证、来源与改动声明及对应源码。
+- Fixed the map bridge publication order so MinHook receives an executable detour instead of rejecting the first hook; the Maps panel now also fills the source-map field from the active runtime level.
+- 修复地图桥代码页发布顺序，避免 MinHook 因 detour 尚不可执行而拒绝第一条 Hook；“地图更换”页现在也会从当前运行时 Level 自动回填原始地图。
+- Re-audited the implementation against MulNX_CS2 commit `361008b208326d9e7916ff2cd58dd57a0492c400`: addon replacement is independent of the raw-map match, KeyValues no longer depends on DemoHeader ordering, and manifest/missing-vmdl fallback follows MulNX's always-on hook behavior. Added deferred per-stage replacement diagnostics.
+- 按 MulNX_CS2 提交 `361008b208326d9e7916ff2cd58dd57a0492c400` 重新逐文件核对：addon 替换不再依赖原地图先命中，KeyValues 不再依赖 DemoHeader 调用顺序，manifest／缺失 vmdl 回退改为 MulNX 的常驻 Hook 行为，并增加非阻塞的分阶段替换日志。
+- Added safe source-map generated-model suppression for Workshop map replacement and removed the experimental skybox VPK redirect after it caused fatal errors or stalled demo loading. Complete replacement of geometry baked into a compiled map remains map-dependent.
+- 为创意工坊地图替换加入安全的原地图生成模型抑制；导致致命错误或 Demo 卡加载的 skybox VPK 重定向实验不随发布版提供。已烘焙进编译地图的几何体能否完整替换仍取决于目标地图资源。
+- Updated the verified HLAE baseline to `2.192.2.0`; the CS2 baseline remains Steam Build `25218825`, Client/Server `2000908`, Patch `1.41.8.1`, Source revision `10981323`.
+- 已验证 HLAE 基线更新至 `2.192.2.0`；CS2 基线仍为 Steam Build `25218825`、Client/Server `2000908`、Patch `1.41.8.1`、Source revision `10981323`。
+
+This beta adds Workshop map-model replacement to the released feature set. Firearm skins retain the previous path; knife actions, stock gloves, radar edge pixels and map-specific baked geometry remain acceptance limitations. See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.1-beta.md).
+
 ## v0.5.0-beta — 2026-09-15
 
 - Preserved the proven firearm skin path while integrating the current experimental knife-model/animation lifecycle and default-team glove transaction paths for HLAE demo-time updates.

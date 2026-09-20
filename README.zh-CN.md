@@ -19,22 +19,23 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.5.0-beta"><img src="https://img.shields.io/badge/测试版-v0.5.0%20Beta-8250df?style=for-the-badge" alt="v0.5.0 测试版说明"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.1-beta/Lyan_nskinz-v0.5.1-beta-EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.1-beta/Lyan_nskinz-v0.5.1-beta-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.5.1-beta"><img src="https://img.shields.io/badge/测试版-v0.5.1%20Beta-8250df?style=for-the-badge" alt="v0.5.1 测试版说明"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/提交问题-f85149?style=for-the-badge" alt="提交问题"></a>
 </p>
 
 > **安全提示：** nSkinzCS2 只用于通过 HLAE、带 `-insecure` 启动的离线 Demo 回放。请勿加载到 VAC 保护服务器或任何联机服务器。超出此范围使用造成的账号风险由使用者自行承担。
 
-## v0.5.0 Beta 更新
+## v0.5.1 Beta 更新
 
 - 枪械皮肤继续沿用 v0.4.5 已验证的路径；不使用文件改写器，也不修改 `.dem`。
 - T/CT 默认手套先通过 CS2 原生路径构造涂装、种子和磨损属性，确认完整成功后才提交物品身份；任一步失败都会完整回滚，避免半初始化手套导致闪退。
 - 刀实体在 Demo 重载和代际变化时保留模型/动画监听器，并分离武器位置与 HUD 消费者，针对刀模落到手枪位置、手枪检视动作及原皮匕首动作残留进行修正。
-- 文件名、控制面板标题和启动日志均标记 `v0.5.0-beta`。兼容 CS2 Steam Build `25218825`、Client/Server `2000908`、Patch `1.41.8.1`、Source revision `10981323`；HLAE `2.191.1`。
+- 创意工坊地图模型替换正式纳入发布版：自动识别已安装订阅，第一次加载 Demo 时配置并启用，第二次加载同一 Demo 时替换地图；同时安全抑制可确认属于原地图的生成模型。已烘焙进编译地图且没有安全一一对应关系的几何体仍可能残留。
+- 文件名、控制面板标题和启动日志均标记 `v0.5.1-beta`。兼容 CS2 Steam Build `25218825`、Client/Server `2000908`、Patch `1.41.8.1`、Source revision `10981323`；HLAE `2.192.2`。
 
-这是刀模、动作与默认手套的测试版。完整回归和隔离加载门禁已通过，但具体 Demo 的画面表现仍需测试者验收。详见[中英双语 v0.5.0 Beta 发布说明](docs/releases/v0.5.0-beta.md)。
+这是地图模型、刀模、动作与默认手套的测试版。完整回归和隔离加载门禁已通过，但具体 Demo／地图组合的画面表现仍需测试者验收。详见[中英双语 v0.5.1 Beta 发布说明](docs/releases/v0.5.1-beta.md)。
 
 ## v0.4.5 更新（历史稳定版）
 
@@ -93,47 +94,62 @@ nSkinzCS2 是一个 Windows x64 DLL，用于在观看 Counter-Strike 2 Demo 时�
 
 ## 功能矩阵
 
-| 模块 | v0.5.0 Beta 支持情况 | 说明 |
+| 模块 | v0.5.1 Beta 支持情况 | 说明 |
 | --- | --- | --- |
 | 枪械 | 按枪型筛选的涂装、种子、磨损、品质、名称标签和贴纸字段 | 包含原皮物品首次材质生成；运行时及导入配置同样校验兼容性，新旧网格跟随目标涂装元数据。 |
 | 刀 | 饰面、种子和磨损；实验性饰面＋模型替换 | 仅饰面隐藏模型选项；模型/切刀/检视替换已接入，但首次重建、拾取刀和 HUD 交接仍属实验功能。 |
 | 手套 | T/CT 默认手套、手套模型和涂装 | 已在当前兼容版本验证默认手套定义 `5028`、`5029`。 |
+| 创意工坊地图 | 自动识别已安装订阅；在 Demo 第二次加载时替换地图并抑制可安全识别的原地图生成模型 | 已纳入本测试版；不改写 `.dem` 或创意工坊文件。已烘焙几何体在无安全替代时可能残留。 |
 | 挂件 | 修改或清除已有实时模块 | 对没有挂件模块的物品创建模块仍属实验功能。 |
 | 原皮 / 无涂装 | 独立的 `原皮（无涂装）` 选项 | 与 `-（不修改）` 不同；部分 Demo 刀的第一人称旧材质可能残留。 |
 | 语言 | 英文和简体中文 DLL | 中文版从本机 `csgo_schinese.txt` 读取名称。 |
 
 ## 快速开始
 
-v0.5.0 Beta 已内嵌预编译面板着色器并保留 `/MT`。除 Windows 10/11 x64、CS2 和 HLAE 外，不需要安装其它运行库。`LoadLibrary failed` 排查见[单 DLL 加载说明](docs/portable-loading.md)。
+v0.5.1 Beta 已内嵌预编译面板着色器并保留 `/MT`。除 Windows 10/11 x64、CS2 和 HLAE 外，不需要安装其它运行库。`LoadLibrary failed` 排查见[单 DLL 加载说明](docs/portable-loading.md)。
 
 1. 使用 HLAE、带 `-insecure` 启动 CS2，然后打开离线 Demo。
 2. 下载一个 Release DLL。发布版使用 MSVC 静态运行库（`/MT`），不需要另装 Visual C++ Redistributable、Python、SDK 或 Visual Studio。
 3. 在 HLAE 中加载 DLL：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.5.0-beta-zh-CN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.5.1-beta-zh-CN.dll"
 ```
 
 英文版：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.5.0-beta-EN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.5.1-beta-EN.dll"
 ```
 
 上述示例要求 DLL 位于 D 盘根目录，请改成实际完整路径。ZIP 内 DLL 文件名包含空格，加载时必须使用一对英文半角双引号；不要叠加两对引号或使用中文弯引号。
 
 按 `Insert` 显示面板，选择观战玩家 XUID 和外观配置，点击“更新”（`Update`）。请把 DLL 放在可写文件夹，独立面板与运行时需要在此生成和共享目录/配置文件。运行日志为 `nSkinzCS2.log`，面板日志为 `nSkinzCS2.ui.log`。
 
-升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 测试包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.0-beta/Lyan_nskinz-v0.5.0-beta-CS2-2000908-windows-x64.zip)含中英文 DLL、游戏版本与加载说明。
+升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 测试包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.1-beta/Lyan_nskinz-v0.5.1-beta-CS2-2000908-windows-x64.zip)含中英文 DLL、游戏版本、许可证／声明与加载说明。
+
+## 创意工坊地图与模型替换
+
+开始前请先订阅并完整下载目标 CS2 创意工坊地图。新增的“地图更换”页会读取 Steam 本地创意工坊清单，只识别顶层 `maps/<地图名>.vpk`，不会把地图内部 prefab 误列为独立地图。
+
+1. 通过 HLAE 第一次加载原 Demo，并加载 nSkinzCS2。
+2. 打开“地图更换”，点击“重新识别已订阅地图”，选择目标地图，勾选“启用 Demo 地图替换”，再点击“使用选中的创意工坊地图”。
+3. “原始 Demo 地图”可留空自动捕获；在第一次加载仍处于活动状态时点击主界面的“更新”。
+4. 确认日志出现 `Map remap ready` 和 `Map remap armed`。
+5. 对同一个 Demo 再执行一次 `playdemo`；地图会在第二次解析／加载过程中替换。
+
+只有当前 CS2 版本的 protobuf、KeyValues、manifest 与资源回退入口全部验证成功时才会启用；任一点缺失或不唯一都会整体拒绝安装，不留下半套 hook。该实现已通过编译、完整原生回归和本机创意工坊识别检查，但不同地图仍需在游戏画面中逐个验收。
+
+逐 Hook 对照和有意保留的框架差异见 [MulNX 地图更换对照审计](docs/map-remap-mulnx-audit.md)。
 
 ## 兼容基线
 
-`v0.5.0 Beta` 对应以下已检查基线。枪械沿用旧路径；刀模、动作和默认手套仍属于测试验收范围：
+`v0.5.1 Beta` 对应以下已检查基线。枪械沿用旧路径；地图模型、刀模、动作和默认手套仍属于测试验收范围：
 
 - Steam app build ID `25218825`
 - CS2 Client/Server `2000908`、Patch `1.41.8.1`、Source revision `10981323`（2026-09-09 15:23:58）
 - `client.dll` SHA-256：`A0C195F0B6EC00915EF08C548200A010EBBE7982D3A4BC468CAD939B67C8C4E3`
-- HLAE `2.191.1`
+- HLAE `2.192.2`
 - `Source2Client002`、`ResourceSystem013`、`VFileSystem017`
 
 CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签名缺失或匹配不唯一时拒绝不确定的写入。
@@ -150,7 +166,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 生成解决方案
 ```
 
-输出文件为 `build/Release/Lyan_nskinz v0.5.0-beta EN.dll`、`build/Release/Lyan_nskinz v0.5.0-beta zh-CN.dll` 和 `build/Release/nSkinzCS2.Tests.exe`。`run-build-and-tests.cmd` 会构建并运行原生回归测试，`run-tests.cmd` 只运行现有测试程序。
+输出文件为 `build/Release/Lyan_nskinz v0.5.1-beta EN.dll`、`build/Release/Lyan_nskinz v0.5.1-beta zh-CN.dll` 和 `build/Release/nSkinzCS2.Tests.exe`。`run-build-and-tests.cmd` 会构建并运行原生回归测试，`run-tests.cmd` 只运行现有测试程序。
 
 </details>
 
@@ -172,6 +188,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 ## 已知限制与路线图
 
 - 刀模替换及部分动画/HUD 交接仍属实验功能，尤其是实体重建后首次切刀、队友发刀或拾取刀。
+- 创意工坊地图更换依赖当前 CS2 二进制签名及目标地图资源；游戏更新或订阅下载不完整会使功能停用或加载失败，画面效果仍需逐地图验收。
 - 如果 Demo 中的刀已经拥有编译后的自定义材质，选择 `原皮（无涂装）` 后第一人称视角仍可能显示旧材质。正数刀涂装已验证；该旧材质清理问题不在 v0.4.5 的已修复声明内。
 - 当前优先读取已安装的 CS2 游戏数据，尚未完全改为实时物品 Schema 遍历。
 
@@ -191,7 +208,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 **为什么刀上仍有旧材质？** 部分 Demo 物品带有编译后的第一人称材质，当前 v0.4.5 原皮路径无法保证全部清除，详见上面的已知限制。
 
-**应该下载哪个 DLL？** 单独下载时，英文界面使用 `Lyan_nskinz-v0.5.0-beta-EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz-v0.5.0-beta-zh-CN.dll`；双语 ZIP 内保留带空格编译文件名。两者兼容同一套 CS2 基线。
+**应该下载哪个 DLL？** 单独下载时，英文界面使用 `Lyan_nskinz-v0.5.1-beta-EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz-v0.5.1-beta-zh-CN.dll`；双语 ZIP 内保留带空格编译文件名。两者兼容同一套 CS2 基线。
 
 **仓库能打开，但图片显示破图标怎么办？** 某些网络无法访问 GitHub 的 raw 图片域名。本 README 已使用 GitHub 推荐的相对图片路径；如果仍然加载失败，可临时用管理员身份打开记事本，编辑 `C:\Windows\System32\drivers\etc\hosts`，追加：
 
@@ -217,7 +234,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 ## 致谢与授权说明
 
-nSkinzCS2 使用 Dear ImGui、MinHook 和 nlohmann/json。重新发布修改后的源码或二进制文件前，请阅读 `third_party/` 下的上游声明。本仓库目前暂不添加根目录许可证。
+nSkinzCS2 v0.5.1 Beta 以 [`AGPL-3.0-only`](LICENSE) 发布。地图更换实现移植并核对自 [MulNX_CS2](https://github.com/Co1Swet/MulNX_CS2) 提交 `361008b208326d9e7916ff2cd58dd57a0492c400`，但不使用 MulNX 文件改写器；发布附件同时提供 DLL 对应的完整源码。再分发或修改时必须保留 [`NOTICE.md`](NOTICE.md)、AGPL 许可证、源码提供义务和 `third_party/` 内各组件声明。
 
 <p align="center"><a href="https://star-history.com/#Lyan-edit/CS2-nskinz&Date"><img src="https://api.star-history.com/svg?repos=Lyan-edit/CS2-nskinz&type=Date" alt="Star History" width="760"></a></p>
 

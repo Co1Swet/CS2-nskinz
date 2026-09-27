@@ -97,6 +97,7 @@
     <ClInclude Include="src\Cs2\Runtime.hpp" />
     <ClInclude Include="src\Core\Log.hpp" />
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
+    <ClInclude Include="src\Runtime\DemoSkinRewrite.hpp" />
     <ClInclude Include="src\Runtime\GloveVisualRefresh.hpp" />
     <ClInclude Include="src\Runtime\KnifeAnimation.hpp" />
     <ClInclude Include="src\Runtime\KnifeModel.hpp" />
@@ -129,6 +130,7 @@
     <ClCompile Include="src\Cs2\GlobalResourceSwapper.cpp" />
     <ClCompile Include="src\Cs2\Runtime.cpp" />
     <ClCompile Include="src\Runtime\GloveAppearance.cpp" />
+    <ClCompile Include="src\Runtime\DemoSkinRewrite.cpp" />
     <ClCompile Include="src\Runtime\GloveVisualRefresh.cpp" />
     <ClCompile Include="src\Runtime\KnifeAnimation.cpp" />
     <ClCompile Include="src\Runtime\KnifeModel.cpp" />
@@ -142,6 +144,7 @@
     <ClCompile Include="src\Tests\KnifePairTests.cpp" />
     <ClCompile Include="src\Tests\KnifeGraphTests.cpp" />
     <ClCompile Include="src\Tests\KnifeModelTests.cpp" />
+    <ClCompile Include="src\Tests\DemoSkinRewriteTests.cpp" />
     <ClCompile Include="src\Runtime\KnifeAppearance.cpp" />
     <ClCompile Include="src\Runtime\WeaponAppearance.cpp" />
     <ClCompile Include="src\Runtime\MapRemap.cpp" />

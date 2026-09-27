@@ -9,12 +9,12 @@
 
 namespace nskinzcs2::runtime
 {
-inline constexpr std::uintptr_t kKnifeNativeUpdateRva = 0x8EA030;
-inline constexpr std::uintptr_t kKnifeNativeUpdateCall1Rva = 0x105343E;
-inline constexpr std::uintptr_t kKnifeNativeUpdateCall2Rva = 0x1053462;
-inline constexpr std::uintptr_t kKnifeNativeGraphEvaluationCallRva = 0x10534FF;
-inline constexpr std::uintptr_t kKnifeArmsUpdateRva = 0x1053340;
-inline constexpr std::uintptr_t kKnifeArmsUpdateCallRva = 0x10532B2;
+inline constexpr std::uintptr_t kKnifeNativeUpdateRva = 0x912B70;
+inline constexpr std::uintptr_t kKnifeNativeUpdateCall1Rva = 0x10CCC5E;
+inline constexpr std::uintptr_t kKnifeNativeUpdateCall2Rva = 0x10CCC82;
+inline constexpr std::uintptr_t kKnifeNativeGraphEvaluationCallRva = 0x10CCD1F;
+inline constexpr std::uintptr_t kKnifeArmsUpdateRva = 0x10CCB60;
+inline constexpr std::uintptr_t kKnifeArmsUpdateCallRva = 0x10CCAC6;
 bool MatchesKnifeArmsUpdateEvidence(std::span<const std::uint8_t> entry, std::span<const std::uint8_t> call) noexcept;
 bool MatchesKnifeUpdateCallEvidence(std::span<const std::uint8_t> entry,
     std::span<const std::uint8_t> call1, std::span<const std::uint8_t> call2,
@@ -30,6 +30,10 @@ struct KnifeUpdateTiming
     std::uint64_t matched = 0, call1 = 0, call2 = 0, same_thread = 0;
     std::uint64_t source_verified = 0, rejected = 0;
     std::uint64_t boundaries = 0, nested_updates = 0;
+    std::uint64_t unfiltered_boundaries = 0, unfiltered_weapon_updates = 0;
+    std::uintptr_t last_unfiltered_arms = 0;
+    std::uintptr_t last_unfiltered_controller = 0;
+    std::uintptr_t last_unfiltered_world = 0;
     bool operator==(const KnifeUpdateTiming&) const = default;
 };
 
@@ -83,5 +87,9 @@ private:
     std::atomic<std::uintptr_t> controller_ {0}, world_ {0}, graph_ {0}, source_ {0};
     std::atomic<std::uint64_t> matched_ {0}, call1_ {0}, call2_ {0}, same_thread_ {0}, source_verified_ {0}, rejected_ {0};
     std::atomic<std::uint64_t> boundaries_ {0}, nested_updates_ {0};
+    std::atomic<std::uint64_t> unfiltered_boundaries_ {0}, unfiltered_weapon_updates_ {0};
+    std::atomic<std::uintptr_t> last_unfiltered_arms_ {0};
+    std::atomic<std::uintptr_t> last_unfiltered_controller_ {0};
+    std::atomic<std::uintptr_t> last_unfiltered_world_ {0};
 };
 }

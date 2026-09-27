@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -498,8 +499,14 @@ bool ApplyRadarForegroundMask(
     std::size_t& visible_pixels,
     std::size_t& transparent_pixels,
     std::size_t& softened_edge_pixels,
+    std::size_t& recovered_detail_pixels,
+    int& applied_black_tolerance,
+    int& detected_neutral_mode,
+    std::size_t& detected_neutral_pixels,
+    std::size_t& detected_neutral_mode_pixels,
     bool& changed,
-    std::wstring& diagnostic)
+    std::wstring& diagnostic,
+    const nskinzcs2::runtime::RadarAlphaMaskSettings& settings)
 {
     const auto pixel_count = static_cast<std::size_t>(width) * height;
     if (rgba.size() != pixel_count * 4)
@@ -509,7 +516,22 @@ bool ApplyRadarForegroundMask(
     }
     std::size_t already_transparent = 0;
     std::size_t opaque_near_black = 0;
-    std::vector<std::uint8_t> map_pixel(pixel_count, 0);
+    constexpr int kDefaultBlackTolerance = 12;
+    const auto configured_black_tolerance = std::clamp(settings.black_tolerance, 0, 96);
+    // Wide dark corridors in water/night conversions can exceed the previous
+    // six-pixel cap. Recovery still requires retained map pixels on opposite
+    // sides and remains confined to the main map bounds.
+    const auto dark_detail_radius = std::clamp(settings.dark_detail_radius, 0, 32);
+    const auto background_alpha_percent =
+        std::clamp(settings.background_alpha_percent, 0, 100);
+    // Some Workshop overviews bake a neutral editor grid one or two values
+    // above the configured cutoff (Ancient Night uses an opaque 25/255 grid
+    // with the default cutoff at 24). Find the dominant opaque neutral matte
+    // value. The user setting is a signed correction around the road-safe
+    // default, not a minimum: moving the slider in either direction must
+    // change the effective cutoff instead of being hidden by auto-detection.
+    std::array<std::size_t, 65> neutral_dark_histogram {};
+    std::size_t neutral_dark_pixels = 0;
     for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
     {
         const auto offset = pixel * 4;
@@ -524,7 +546,75 @@ bool ApplyRadarForegroundMask(
         {
             ++already_transparent;
         }
-        if (alpha > 240 && maximum < 48 && chroma < 6)
+        if (alpha > 240 && maximum <= 64 && chroma <= 4)
+        {
+            ++neutral_dark_histogram[maximum];
+            ++neutral_dark_pixels;
+        }
+    }
+    int dominant_neutral_value = 0;
+    std::size_t dominant_neutral_count = 0;
+    for (int value = 0; value <= 64; ++value)
+    {
+        if (neutral_dark_histogram[static_cast<std::size_t>(value)] > dominant_neutral_count)
+        {
+            dominant_neutral_value = value;
+            dominant_neutral_count = neutral_dark_histogram[static_cast<std::size_t>(value)];
+        }
+    }
+    // A fully black field can be the dominant value while the baked grid is
+    // a second, brighter neutral peak just above the configured cutoff. Look
+    // for that peak only when the black field itself occupies a large part of
+    // the image; this avoids treating ordinary dark map shading as a matte.
+    auto detected_matte_value = dominant_neutral_value;
+    auto detected_matte_count = dominant_neutral_count;
+    if (dominant_neutral_count >= pixel_count / 4 &&
+        dominant_neutral_value <= configured_black_tolerance &&
+        configured_black_tolerance < 40)
+    {
+        int secondary_value = 0;
+        std::size_t secondary_count = 0;
+        for (int value = configured_black_tolerance + 1; value <= 40; ++value)
+        {
+            const auto count = neutral_dark_histogram[static_cast<std::size_t>(value)];
+            if (count > secondary_count)
+            {
+                secondary_value = value;
+                secondary_count = count;
+            }
+        }
+        if (secondary_count >= std::max<std::size_t>(pixel_count / 1000, 64))
+        {
+            detected_matte_value = secondary_value;
+            detected_matte_count = secondary_count;
+        }
+    }
+    detected_neutral_mode = detected_matte_value;
+    detected_neutral_pixels = neutral_dark_pixels;
+    detected_neutral_mode_pixels = detected_matte_count;
+    auto black_tolerance = configured_black_tolerance;
+    if (neutral_dark_pixels >= pixel_count / 20 &&
+        detected_matte_value > 0 &&
+        detected_matte_count >= std::max<std::size_t>(pixel_count / 2000, 64))
+    {
+        const auto user_correction = configured_black_tolerance - kDefaultBlackTolerance;
+        black_tolerance = std::clamp(detected_matte_value + 2 + user_correction, 0, 96);
+    }
+    applied_black_tolerance = black_tolerance;
+    const auto coloured_detail_floor = std::max(1, black_tolerance * 2 / 3);
+    const auto coloured_detail_chroma = std::clamp(black_tolerance * 3 / 8, 3, 24);
+    std::vector<std::uint8_t> map_pixel(pixel_count, 0);
+    for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
+    {
+        const auto offset = pixel * 4;
+        const auto red = rgba[offset];
+        const auto green = rgba[offset + 1];
+        const auto blue = rgba[offset + 2];
+        const auto alpha = rgba[offset + 3];
+        const auto maximum = std::max({red, green, blue});
+        const auto minimum = std::min({red, green, blue});
+        const auto chroma = static_cast<int>(maximum) - minimum;
+        if (alpha > 240 && maximum < std::max(48, black_tolerance + 24) && chroma < 6)
         {
             ++opaque_near_black;
         }
@@ -532,13 +622,13 @@ bool ApplyRadarForegroundMask(
         // into the radar image. CS2's cl_hud_radar_background_alpha only
         // controls the separate Panorama background layer, so that baked
         // field must become transparent before the native slider can behave
-        // like it does for Valve maps. Values above 24 are already distinct
-        // from this overview's editor grid. Keeping them recovers neutral and
-        // coloured interior details (including A-palace/A2 pixels) which the
-        // previous value of 56 incorrectly punched out.
+        // like it does for Valve maps. Workshop authors use different matte
+        // brightness levels, so the cutoff is configurable. Saturated detail
+        // gets a lower floor to retain coloured labels and floor accents.
         if (alpha > 8)
         {
-            map_pixel[pixel] = maximum > 24 || (maximum > 16 && chroma > 9);
+            map_pixel[pixel] = maximum > black_tolerance ||
+                (maximum > coloured_detail_floor && chroma > coloured_detail_chroma);
         }
     }
     if (opaque_near_black < pixel_count / 20 ||
@@ -547,6 +637,7 @@ bool ApplyRadarForegroundMask(
         visible_pixels = pixel_count - already_transparent;
         transparent_pixels = already_transparent;
         softened_edge_pixels = 0;
+        recovered_detail_pixels = 0;
         changed = false;
         return true;
     }
@@ -559,6 +650,7 @@ bool ApplyRadarForegroundMask(
         int maximum_x = 0;
         int maximum_y = 0;
         int maximum_colour_value = 0;
+        int maximum_chroma = 0;
     };
 
     constexpr auto kUnassignedComponent = std::numeric_limits<std::uint32_t>::max();
@@ -595,6 +687,12 @@ bool ApplyRadarForegroundMask(
                 component.maximum_colour_value,
                 static_cast<int>(std::max({
                     rgba[current_offset], rgba[current_offset + 1], rgba[current_offset + 2]})));
+            component.maximum_chroma = std::max(
+                component.maximum_chroma,
+                static_cast<int>(std::max({
+                    rgba[current_offset], rgba[current_offset + 1], rgba[current_offset + 2]})) -
+                    static_cast<int>(std::min({
+                        rgba[current_offset], rgba[current_offset + 1], rgba[current_offset + 2]})));
             for (int delta_y = -1; delta_y <= 1; ++delta_y)
             {
                 for (int delta_x = -1; delta_x <= 1; ++delta_x)
@@ -631,7 +729,6 @@ bool ApplyRadarForegroundMask(
     // by a fully black source pixel. Retain coloured components inside the
     // main map bounds even when they are small. The discarded coordinate-grid
     // fragments are both outside those bounds and much darker.
-    constexpr std::size_t kIndependentMapComponentPixels = 64;
     const auto& main_component = components[largest_component];
     std::vector<std::uint8_t> retained_component(components.size(), 0);
     for (std::size_t index = 0; index < components.size(); ++index)
@@ -642,10 +739,23 @@ bool ApplyRadarForegroundMask(
             component.maximum_x <= main_component.maximum_x &&
             component.minimum_y >= main_component.minimum_y &&
             component.maximum_y <= main_component.maximum_y;
+        const bool overlaps_main_bounds =
+            component.maximum_x >= main_component.minimum_x &&
+            component.minimum_x <= main_component.maximum_x &&
+            component.maximum_y >= main_component.minimum_y &&
+            component.minimum_y <= main_component.maximum_y;
+        const bool coloured_component =
+            component.maximum_chroma > coloured_detail_chroma;
+        const bool substantial_neutral_component =
+            component.size >= 32 &&
+            component.maximum_colour_value > black_tolerance + 4;
         retained_component[index] =
             index == largest_component ||
-            component.size >= kIndependentMapComponentPixels ||
-            (inside_main_bounds && component.maximum_colour_value > 32);
+            (inside_main_bounds && component.maximum_colour_value > 32 &&
+                (coloured_component || substantial_neutral_component)) ||
+            (overlaps_main_bounds && component.size >= 16 &&
+                component.maximum_colour_value > black_tolerance &&
+                (coloured_component || component.size >= 64));
     }
 
     std::vector<std::uint8_t> foreground(pixel_count, 0);
@@ -658,6 +768,91 @@ bool ApplyRadarForegroundMask(
             continue;
         }
         foreground[pixel] = 1;
+    }
+
+    // Recover only dark runs that are bounded by retained map pixels on
+    // opposite sides. A simple dilation also grows the outside matte and is
+    // the reason earlier builds left a black halo. Opposite-side bridging
+    // restores thin neutral corridors / catwalks (common in Nuke overviews)
+    // while leaving one-sided editor grid lines outside the map transparent.
+    recovered_detail_pixels = 0;
+    std::vector<std::uint8_t> recovered_detail(pixel_count, 0);
+    if (dark_detail_radius > 0)
+    {
+        const auto has_foreground_in_direction = [&foreground, width, height](
+            const int x,
+            const int y,
+            const int dx,
+            const int dy,
+            const int radius)
+        {
+            for (int distance = 1; distance <= radius; ++distance)
+            {
+                const auto target_x = x + dx * distance;
+                const auto target_y = y + dy * distance;
+                if (target_x < 0 || target_y < 0 || target_x >= width || target_y >= height)
+                {
+                    return false;
+                }
+                if (foreground[static_cast<std::size_t>(target_y) * width + target_x])
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
+        {
+            if (foreground[pixel])
+            {
+                continue;
+            }
+            const auto x = static_cast<int>(pixel % width);
+            const auto y = static_cast<int>(pixel / width);
+            if (x < main_component.minimum_x || x > main_component.maximum_x ||
+                y < main_component.minimum_y || y > main_component.maximum_y)
+            {
+                continue;
+            }
+            const auto offset = pixel * 4;
+            const auto maximum = static_cast<int>(std::max({
+                rgba[offset], rgba[offset + 1], rgba[offset + 2]}));
+            const auto minimum = static_cast<int>(std::min({
+                rgba[offset], rgba[offset + 1], rgba[offset + 2]}));
+            if (rgba[offset + 3] <= 8 || maximum > black_tolerance ||
+                maximum - minimum > coloured_detail_chroma)
+            {
+                continue;
+            }
+            const auto bounded_axis_count = [&](const int radius)
+            {
+                int count = 0;
+                count += has_foreground_in_direction(x, y, -1, 0, radius) &&
+                    has_foreground_in_direction(x, y, 1, 0, radius);
+                count += has_foreground_in_direction(x, y, 0, -1, radius) &&
+                    has_foreground_in_direction(x, y, 0, 1, radius);
+                count += has_foreground_in_direction(x, y, -1, -1, radius) &&
+                    has_foreground_in_direction(x, y, 1, 1, radius);
+                count += has_foreground_in_direction(x, y, 1, -1, radius) &&
+                    has_foreground_in_direction(x, y, -1, 1, radius);
+                return count;
+            };
+            const auto conservative_radius = std::min(dark_detail_radius, 4);
+            const bool short_bounded_gap = bounded_axis_count(conservative_radius) > 0;
+            const bool enclosed_wide_gap =
+                dark_detail_radius > conservative_radius && bounded_axis_count(dark_detail_radius) >= 1;
+            if (short_bounded_gap || enclosed_wide_gap)
+            {
+                recovered_detail[pixel] = 1;
+            }
+        }
+        for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
+        {
+            if (recovered_detail[pixel])
+            {
+                foreground[pixel] = 1;
+            }
+        }
     }
 
     // The baked grid has a one-pixel near-black antialias fringe at many map
@@ -673,7 +868,7 @@ bool ApplyRadarForegroundMask(
         }
         const auto offset = pixel * 4;
         const auto maximum = std::max({rgba[offset], rgba[offset + 1], rgba[offset + 2]});
-        if (rgba[offset + 3] <= 8 || maximum < 4 || maximum > 24)
+        if (rgba[offset + 3] <= 8 || maximum < 4 || maximum > black_tolerance)
         {
             continue;
         }
@@ -704,7 +899,76 @@ bool ApplyRadarForegroundMask(
             foreground[pixel] = 1;
         }
     }
-    visible_pixels = 0;
+
+    // A recovered gap was classified as background in the source image. Do
+    // not retain its original near-black RGB: that recreated opaque black
+    // crumbs in Inferno Water even though the surrounding matte had become
+    // transparent. Preserve the recovered coverage, but borrow RGB from the
+    // nearest trusted foreground pixel. If no trusted neighbour exists, the
+    // candidate is not a safe road/detail recovery and remains background.
+    for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
+    {
+        if (!recovered_detail[pixel])
+        {
+            continue;
+        }
+        const auto x = static_cast<int>(pixel % width);
+        const auto y = static_cast<int>(pixel / width);
+        std::size_t reference_pixel = pixel;
+        bool found_reference = false;
+        for (int radius = 1; radius <= std::max(dark_detail_radius, 4) && !found_reference; ++radius)
+        {
+            int best_maximum = -1;
+            for (int delta_y = -radius; delta_y <= radius; ++delta_y)
+            {
+                for (int delta_x = -radius; delta_x <= radius; ++delta_x)
+                {
+                    if (std::max(std::abs(delta_x), std::abs(delta_y)) != radius ||
+                        x + delta_x < 0 || y + delta_y < 0 ||
+                        x + delta_x >= width || y + delta_y >= height)
+                    {
+                        continue;
+                    }
+                    const auto candidate =
+                        static_cast<std::size_t>(y + delta_y) * width + (x + delta_x);
+                    if (!foreground[candidate] || recovered_detail[candidate] || soften_edge[candidate] ||
+                        rgba[candidate * 4 + 3] <= 8)
+                    {
+                        continue;
+                    }
+                    const auto candidate_offset = candidate * 4;
+                    const auto candidate_maximum = static_cast<int>(std::max({
+                        rgba[candidate_offset],
+                        rgba[candidate_offset + 1],
+                        rgba[candidate_offset + 2]}));
+                    if (candidate_maximum > best_maximum)
+                    {
+                        best_maximum = candidate_maximum;
+                        reference_pixel = candidate;
+                        found_reference = true;
+                    }
+                }
+            }
+        }
+        if (!found_reference)
+        {
+            foreground[pixel] = 0;
+            recovered_detail[pixel] = 0;
+            continue;
+        }
+        const auto offset = pixel * 4;
+        const auto reference_offset = reference_pixel * 4;
+        if (rgba[offset] != rgba[reference_offset] ||
+            rgba[offset + 1] != rgba[reference_offset + 1] ||
+            rgba[offset + 2] != rgba[reference_offset + 2])
+        {
+            rgba[offset] = rgba[reference_offset];
+            rgba[offset + 1] = rgba[reference_offset + 1];
+            rgba[offset + 2] = rgba[reference_offset + 2];
+            changed = true;
+        }
+        ++recovered_detail_pixels;
+    }
     transparent_pixels = 0;
     softened_edge_pixels = 0;
     changed = false;
@@ -713,9 +977,12 @@ bool ApplyRadarForegroundMask(
         auto& alpha = rgba[pixel * 4 + 3];
         if (!foreground[pixel])
         {
-            if (alpha != 0)
+            const auto target_alpha = static_cast<std::uint8_t>(
+                (static_cast<unsigned int>(alpha) *
+                    static_cast<unsigned int>(background_alpha_percent) + 50u) / 100u);
+            if (alpha != target_alpha)
             {
-                alpha = 0;
+                alpha = target_alpha;
                 changed = true;
             }
         }
@@ -746,7 +1013,8 @@ bool ApplyRadarForegroundMask(
                         const auto candidate_offset = candidate * 4;
                         const auto candidate_maximum = static_cast<int>(std::max({
                             rgba[candidate_offset], rgba[candidate_offset + 1], rgba[candidate_offset + 2]}));
-                        if (candidate_maximum > 32 && candidate_maximum > best_maximum)
+                        if (candidate_maximum > std::max(32, black_tolerance + 8) &&
+                            candidate_maximum > best_maximum)
                         {
                             best_maximum = candidate_maximum;
                             reference_pixel = candidate;
@@ -786,11 +1054,9 @@ bool ApplyRadarForegroundMask(
         {
             ++transparent_pixels;
         }
-        else
-        {
-            ++visible_pixels;
-        }
     }
+    visible_pixels = static_cast<std::size_t>(std::count(
+        foreground.begin(), foreground.end(), static_cast<std::uint8_t>(1)));
     if (visible_pixels < pixel_count / 100 || visible_pixels > pixel_count * 9 / 10)
     {
         diagnostic = L"The generated radar foreground mask failed its coverage safety check.";
@@ -904,13 +1170,42 @@ bool EncodePng(
     return true;
 }
 
+std::string BuildContentAddressedRadarVirtualPath(
+    const std::string_view request_virtual_path,
+    const std::vector<std::uint8_t>& png)
+{
+    std::uint64_t hash = 14695981039346656037ull;
+    const auto mix = [&hash](const std::uint8_t value)
+    {
+        hash ^= value;
+        hash *= 1099511628211ull;
+    };
+    for (const auto character : request_virtual_path)
+    {
+        mix(static_cast<std::uint8_t>(character));
+    }
+    for (const auto byte : png)
+    {
+        mix(byte);
+    }
+    std::array<char, 17> hexadecimal {};
+    std::snprintf(
+        hexadecimal.data(),
+        hexadecimal.size(),
+        "%016llx",
+        static_cast<unsigned long long>(hash));
+    return "panorama/images/overheadmaps/nskinz_" + std::string(hexadecimal.data()) +
+        "_radar_tga.vtex_c";
+}
+
 }
 
 nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
     const std::string_view virtual_path,
     const std::vector<std::uint8_t>& source_vtex,
     RadarAlphaOverlay& output,
-    std::wstring& diagnostic)
+    std::wstring& diagnostic,
+    const RadarAlphaMaskSettings& settings)
 {
     output = {};
     diagnostic.clear();
@@ -934,12 +1229,18 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOver
             output.visible_pixels,
             output.transparent_pixels,
             output.softened_edge_pixels,
+            output.recovered_detail_pixels,
+            output.applied_black_tolerance,
+            output.detected_neutral_mode,
+            output.detected_neutral_pixels,
+            output.detected_neutral_mode_pixels,
             changed,
-            diagnostic))
+            diagnostic,
+            settings))
     {
         return RadarAlphaFixOutcome::Unsupported;
     }
-    output.virtual_path = virtual_path;
+    output.request_virtual_path = virtual_path;
     output.width = decoded_width;
     output.height = decoded_height;
     if (!changed)
@@ -953,6 +1254,7 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOver
         output = {};
         return RadarAlphaFixOutcome::Failed;
     }
+    output.virtual_path = BuildContentAddressedRadarVirtualPath(virtual_path, png);
     output.png_bytes = std::move(png);
     output.vtex_bytes.clear();
     diagnostic.clear();
@@ -964,7 +1266,8 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildWorkshopRadarA
     const std::string_view target_map_name,
     RadarAlphaOverlay& output,
     std::wstring& diagnostic,
-    const DWORD cs2_process_id)
+    const DWORD cs2_process_id,
+    const RadarAlphaMaskSettings& settings)
 {
     const auto source = ReadWorkshopRadarTexture(
         workshop_id,
@@ -980,5 +1283,6 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildWorkshopRadarA
         source->virtual_path,
         source->bytes,
         output,
-        diagnostic);
+        diagnostic,
+        settings);
 }

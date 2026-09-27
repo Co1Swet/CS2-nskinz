@@ -1,0 +1,3 @@
+#!/bin/bash
+
+UPDATE_PROTOBUFS=1 FETCH_PROTOBUFS_FROM_GITHUB=1 cargo build

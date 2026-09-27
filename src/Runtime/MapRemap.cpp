@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Map-remap behavior adapted from Co1Swet/MulNX_CS2 commit
-// 361008b208326d9e7916ff2cd58dd57a0492c400; see NOTICE.md.
+// 361008b208326d9e7916ff2cd58dd57a0492c400, with the current GameSession
+// parser signature/layout synchronized from f2466e18e26a8fc3daf4ac7945bc45220ba95993;
+// see NOTICE.md.
 
 #include "Runtime/MapRemap.hpp"
 
@@ -112,6 +114,7 @@ std::atomic_bool g_source_skybox_route_logged {false};
 std::atomic_uint64_t g_replacement_count {0};
 std::atomic_uint64_t g_suppressed_source_geometry_count {0};
 std::atomic_uint32_t g_source_geometry_log_count {0};
+std::atomic_uint32_t g_source_runtime_data_log_count {0};
 std::mutex g_install_mutex;
 std::mutex g_issue_mutex;
 std::wstring g_issue;
@@ -127,9 +130,6 @@ constexpr std::array<std::uint8_t, 17> kServerInfoSignature {
 };
 constexpr std::array<std::uint8_t, 14> kClearTablesSignature {
     0x48, 0x8B, 0xD8, 0x48, 0x85, 0xC0, 0x0F, 0x85, 0xC0, 0xFE, 0xFF, 0xFF, 0xEB, 0x60,
-};
-constexpr std::array<std::uint8_t, 17> kGameSessionSignature {
-    0x48, 0x8B, 0xD8, 0x48, 0x85, 0xC0, 0x0F, 0x85, 0x55, 0xFC, 0xFF, 0xFF, 0xE9, 0x26, 0x02, 0x00, 0x00,
 };
 constexpr std::array<std::uint8_t, 21> kUtlStringAssignSignature {
     0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x41, 0x18, 0x49, 0x8B, 0xF8, 0x48, 0x8B, 0xD9, 0x4C,
@@ -493,6 +493,33 @@ void LogSourceSkyboxRedirect(
     }
 }
 
+void LogSourceRuntimeDataRedirect(
+    const wchar_t* stage,
+    const char* source,
+    const char* target) noexcept
+{
+    const auto log_index = g_source_runtime_data_log_count.fetch_add(1, std::memory_order_relaxed);
+    if (log_index < 12)
+    {
+        LogMapReplacement(stage, source, target);
+    }
+    else
+    {
+        g_replacement_count.fetch_add(1, std::memory_order_relaxed);
+        if (log_index == 12)
+        {
+            try
+            {
+                nskinzcs2::Logger::Info(
+                    L"[MapRemap/RuntimeData] further target entity/probe/cubemap routes are counted but not individually logged.");
+            }
+            catch (...)
+            {
+            }
+        }
+    }
+}
+
 bool EndsWithPathInsensitive(const char* path, const char* suffix) noexcept
 {
     if (path == nullptr || suffix == nullptr)
@@ -547,6 +574,32 @@ bool ResolveRadarOverviewPath(
     return strcpy_s(replacement, replacement_size, source.data()) == 0;
 }
 
+bool ResolveMapRuntimeDataPath(
+    const char* requested_path,
+    char* replacement,
+    const std::size_t replacement_size) noexcept
+{
+    std::array<char, 1024> requested {};
+    if (!CopyCString(requested_path, requested.data(), requested.size()))
+    {
+        return false;
+    }
+
+    std::array<char, 256> source {};
+    std::array<char, 256> target {};
+    AcquireSRWLockShared(&g_config_lock);
+    const bool active = g_config.enabled;
+    strcpy_s(source.data(), source.size(), g_config.source_map);
+    strcpy_s(target.data(), target.size(), g_config.target_map);
+    ReleaseSRWLockShared(&g_config_lock);
+    return active && nskinzcs2::runtime::BuildSourceMapRuntimeDataRedirect(
+        requested.data(),
+        source.data(),
+        target.data(),
+        replacement,
+        replacement_size);
+}
+
 void LogRadarOverviewReplacement(
     const wchar_t* stage,
     const char* requested,
@@ -567,7 +620,12 @@ void* __fastcall HookedFileSystemOpen(
 {
     nskinzcs2::Logger::DeferredScope deferred_log;
     std::array<char, 512> replacement {};
-    if (ResolveRadarOverviewPath(file_name, replacement.data(), replacement.size()))
+    if (ResolveMapRuntimeDataPath(file_name, replacement.data(), replacement.size()))
+    {
+        LogSourceRuntimeDataRedirect(L"RuntimeData/Open", file_name, replacement.data());
+        file_name = replacement.data();
+    }
+    else if (ResolveRadarOverviewPath(file_name, replacement.data(), replacement.size()))
     {
         LogRadarOverviewReplacement(L"RadarTexture/Open", file_name, replacement.data());
         file_name = replacement.data();
@@ -588,7 +646,12 @@ bool __fastcall HookedFileSystemReadFile(
 {
     nskinzcs2::Logger::DeferredScope deferred_log;
     std::array<char, 512> replacement {};
-    if (ResolveRadarOverviewPath(file_name, replacement.data(), replacement.size()))
+    if (ResolveMapRuntimeDataPath(file_name, replacement.data(), replacement.size()))
+    {
+        LogSourceRuntimeDataRedirect(L"RuntimeData/ReadFile", file_name, replacement.data());
+        file_name = replacement.data();
+    }
+    else if (ResolveRadarOverviewPath(file_name, replacement.data(), replacement.size()))
     {
         LogRadarOverviewReplacement(L"RadarTexture/ReadFile", file_name, replacement.data());
         file_name = replacement.data();
@@ -887,7 +950,11 @@ extern "C" void* __fastcall MapRemapHookCallback(
     case MessageKind::GameSession:
         if (message != nullptr && HasBit(message, 0x4))
         {
-            ReplaceMatchingMap(message, 0x28, L"GameSession/s1_mapname");
+            // CSVCMsg_GameSessionConfiguration field 11 is s1_mapname.  In
+            // build 2000918 the first four scalar fields moved the string
+            // slots: bit 2 still identifies the field, but its CUtlString is
+            // now at +0x40 instead of +0x28.
+            ReplaceMatchingMap(message, 0x40, L"GameSession/s1_mapname");
         }
         break;
     case MessageKind::MapKeyValues:
@@ -968,6 +1035,19 @@ extern "C" void* __fastcall MapRemapHookCallback(
             ReleaseSRWLockShared(&g_config_lock);
             thread_local std::array<char, 1024> skybox_redirect {};
             skybox_redirect.fill('\0');
+            if (active && nskinzcs2::runtime::BuildSourceMapRuntimeDataRedirect(
+                    path.data(),
+                    source.data(),
+                    target.data(),
+                    skybox_redirect.data(),
+                    skybox_redirect.size()))
+            {
+                LogSourceRuntimeDataRedirect(
+                    L"RuntimeData/Manifest",
+                    path.data(),
+                    skybox_redirect.data());
+                return skybox_redirect.data();
+            }
             if (active && nskinzcs2::runtime::BuildSourceSkyboxResourceRedirect(
                     path.data(),
                     source.data(),
@@ -1290,7 +1370,8 @@ bool MountPreparedRadarOverlay(
     {
         return true;
     }
-    if (profile.radar_overlay_virtual_path.empty() &&
+    if (profile.radar_overlay_request_virtual_path.empty() &&
+        profile.radar_overlay_virtual_path.empty() &&
         profile.radar_overlay_root_path.empty() &&
         profile.radar_overlay_file_path.empty())
     {
@@ -1298,7 +1379,8 @@ bool MountPreparedRadarOverlay(
             L"[MapRemap/RadarTexture] no external alpha overlay was published; the target radar resource will remain unchanged.");
         return true;
     }
-    if (profile.radar_overlay_virtual_path.empty() ||
+    if (profile.radar_overlay_request_virtual_path.empty() ||
+        profile.radar_overlay_virtual_path.empty() ||
         profile.radar_overlay_root_path.empty() ||
         profile.radar_overlay_file_path.empty())
     {
@@ -1310,7 +1392,8 @@ bool MountPreparedRadarOverlay(
         diagnostic = L"VFileSystem017 is unavailable, so the externally prepared radar overlay cannot be mounted.";
         return false;
     }
-    if (!IsSafeRadarVirtualPath(profile.radar_overlay_virtual_path))
+    if (!IsSafeRadarVirtualPath(profile.radar_overlay_request_virtual_path) ||
+        !IsSafeRadarVirtualPath(profile.radar_overlay_virtual_path))
     {
         diagnostic = L"The externally prepared radar virtual path was rejected.";
         return false;
@@ -1342,7 +1425,7 @@ bool MountPreparedRadarOverlay(
     const auto overlay_file_utf8 = WideToUtf8(file.wstring());
     if (overlay_root_utf8.empty() || overlay_root_utf8.size() >= g_radar_overlay_search_path.size() ||
         overlay_file_utf8.empty() || overlay_file_utf8.size() >= sizeof(g_config.source_overview) ||
-        profile.radar_overlay_virtual_path.size() >= sizeof(g_config.target_overview))
+        profile.radar_overlay_request_virtual_path.size() >= sizeof(g_config.target_overview))
     {
         diagnostic = L"The externally prepared radar overlay path exceeds an internal path limit.";
         return false;
@@ -1357,11 +1440,11 @@ bool MountPreparedRadarOverlay(
     g_radar_overlay_mounted = true;
     AcquireSRWLockExclusive(&g_config_lock);
     strcpy_s(g_config.source_overview, overlay_file_utf8.c_str());
-    strcpy_s(g_config.target_overview, profile.radar_overlay_virtual_path.c_str());
+    strcpy_s(g_config.target_overview, profile.radar_overlay_request_virtual_path.c_str());
     ReleaseSRWLockExclusive(&g_config_lock);
 
     nskinzcs2::Logger::Info(
-        L"[MapRemap/RadarTexture] mounted the externally prepared CS2-native radar overlay; no texture decoding or resource compilation ran inside cs2.exe.");
+        L"[MapRemap/RadarTexture] mounted a cache-isolated CS2-native radar overlay; the Workshop request path is redirected to a content-addressed compiled resource and no decoding or compilation ran inside cs2.exe.");
     diagnostic.clear();
     return true;
 }
@@ -1412,7 +1495,16 @@ bool EnsureHooksInstalled()
     const auto spawn = FindMatches(*engine_text, kSpawnGroupSignature);
     const auto clear = FindMatches(*engine_text, kClearTablesSignature);
     const auto server = FindMatches(*engine_text, kServerInfoSignature);
-    const auto session = FindMatches(*engine_text, kGameSessionSignature);
+    // MulNX upstream f2466e18 (2026-09-27) anchors the shared string-parser
+    // exit to the following field-10 branch instead of hard-coding relative
+    // jump displacements.  The displacements change whenever Valve adds a
+    // protobuf field, while this context still uniquely identifies the
+    // CSVCMsg_GameSessionConfiguration parser in build 2000918.
+    const auto session = FindMaskedMatches(*engine_text, {
+        0x48, 0x8B, 0xD8, 0x48, 0x85, 0xC0, 0x0F, 0x85,
+        -1, -1, -1, -1, 0xE9, -1, -1, -1, -1,
+        0x40, 0x80, 0xFF, 0x52, 0x0F, 0x85, -1, -1, -1, -1, 0x83, 0x4E,
+    });
     const auto assign = FindMatches(*engine_text, kUtlStringAssignSignature);
     const auto map_key_values = FindMaskedMatches(*client_text, {
         0x89, 0x5C, -1, -1, 0xA9, 0xFF, 0xFF, 0xFF, 0x7F, 0x76, 0x1C, 0xC1, 0xE8, 0x1F,
@@ -1669,6 +1761,132 @@ bool nskinzcs2::runtime::BuildSourceSkyboxResourceRedirect(
     }
 }
 
+bool nskinzcs2::runtime::BuildSourceMapRuntimeDataRedirect(
+    const std::string_view resource_path,
+    const std::string_view source_map_name,
+    const std::string_view target_map_name,
+    char* replacement,
+    const std::size_t replacement_size) noexcept
+{
+    if (replacement == nullptr || replacement_size == 0)
+    {
+        return false;
+    }
+    replacement[0] = '\0';
+    try
+    {
+        const auto source = NormalizeMapLeaf(source_map_name);
+        const auto target = NormalizeMapLeaf(target_map_name);
+        const auto path = NormalizeResourcePath(resource_path);
+        if (source.empty() || target.empty() || source == target || path.empty())
+        {
+            return false;
+        }
+
+        const auto source_root = "maps/" + source + "/";
+        const auto target_root = "maps/" + target + "/";
+        const bool use_compatible_source_probe_atlas =
+            source == "de_nuke" && target == "de_nuke_rainy";
+        if (use_compatible_source_probe_atlas)
+        {
+            const auto target_offset = path.find(target_root);
+            if (target_offset != std::string::npos)
+            {
+                const auto target_tail = path.substr(target_offset + target_root.size());
+                const bool target_light_probe_atlas =
+                    target_tail == "lightmaps/env_light_probe_volume_atlas.vtex" ||
+                    target_tail == "lightmaps/env_light_probe_volume_atlas.vtex_c" ||
+                    target_tail == "lightmaps/env_light_probe_volume_atlas_dlshd.vtex" ||
+                    target_tail == "lightmaps/env_light_probe_volume_atlas_dlshd.vtex_c";
+                if (target_light_probe_atlas)
+                {
+                    // Rainy Nuke was verified to retain stock Nuke's complete
+                    // probe-volume layout and atlas coordinates. Its baked
+                    // target atlas leaves demo-driven player models too dark,
+                    // so keep the Workshop world/weather but supply stock
+                    // Nuke's compatible dynamic-model probe samples.
+                    const auto redirect = source_root + target_tail;
+                    return redirect.size() < replacement_size &&
+                        strcpy_s(replacement, replacement_size, redirect.c_str()) == 0;
+                }
+            }
+        }
+        const auto source_offset = path.find(source_root);
+        if (source_offset == std::string::npos)
+        {
+            return false;
+        }
+        const auto tail = path.substr(source_offset + source_root.size());
+        const bool default_entity_lump =
+            tail == "entities/default_ents.vents" ||
+            tail == "entities/default_ents.vents_c";
+        const bool light_probe_atlas =
+            tail == "lightmaps/env_light_probe_volume_atlas.vtex" ||
+            tail == "lightmaps/env_light_probe_volume_atlas.vtex_c" ||
+            tail == "lightmaps/env_light_probe_volume_atlas_dlshd.vtex" ||
+            tail == "lightmaps/env_light_probe_volume_atlas_dlshd.vtex_c";
+        const bool cubemap_data =
+            tail == "cubemaps/env_cubemap_array.vtex" ||
+            tail == "cubemaps/env_cubemap_array.vtex_c";
+        if (use_compatible_source_probe_atlas && light_probe_atlas)
+        {
+            // This path is already the desired source atlas. Returning false
+            // also prevents a target -> source -> target redirect cycle.
+            return false;
+        }
+        if (default_entity_lump || light_probe_atlas || cubemap_data)
+        {
+            const auto redirect = "maps/" + target + "/" + tail;
+            return redirect.size() < replacement_size &&
+                strcpy_s(replacement, replacement_size, redirect.c_str()) == 0;
+        }
+
+        // Probe-octree handshakes are regenerated whenever Hammer recompiles a
+        // map. Keeping the source numeric ID normally points at no target file.
+        // Rainy Nuke is a verified geometry-identical Nuke recompile: all 92
+        // probe volumes retain their origin, dimensions and atlas coordinates,
+        // while their generated IDs are reversed.
+        constexpr std::string_view probe_prefix =
+            "lightmaps/env_light_probe_volume_";
+        constexpr std::string_view probe_suffix = "_octree.dat";
+        if (!tail.starts_with(probe_prefix) || !tail.ends_with(probe_suffix) ||
+            source != "de_nuke" || target != "de_nuke_rainy")
+        {
+            return false;
+        }
+        const auto id_text = tail.substr(
+            probe_prefix.size(),
+            tail.size() - probe_prefix.size() - probe_suffix.size());
+        if (id_text.empty() ||
+            !std::all_of(id_text.begin(), id_text.end(), [](const unsigned char character)
+            {
+                return std::isdigit(character) != 0;
+            }))
+        {
+            return false;
+        }
+        const auto source_id = std::stoull(id_text);
+        constexpr std::uint64_t first_source_id = 1372856349ull;
+        constexpr std::uint64_t last_source_id = 1372856443ull;
+        constexpr std::uint64_t first_target_id = 303904010ull;
+        if (source_id < first_source_id || source_id > last_source_id)
+        {
+            return false;
+        }
+        const auto target_id = first_target_id - (source_id - first_source_id);
+        const auto redirect = "maps/" + target + "/" +
+            std::string(probe_prefix) + std::to_string(target_id) +
+            std::string(probe_suffix);
+        return redirect.size() < replacement_size &&
+            strcpy_s(replacement, replacement_size, redirect.c_str()) == 0;
+    }
+    catch (...)
+    {
+        replacement[0] = '\0';
+        return false;
+    }
+}
+
 bool nskinzcs2::runtime::ShouldSuppressSourceMapModelPath(
     const std::string_view resource_path,
     const std::string_view source_map_name,
@@ -1759,6 +1977,7 @@ void nskinzcs2::runtime::ConfigureMapRemap(
     g_replacement_count.store(0, std::memory_order_release);
     g_suppressed_source_geometry_count.store(0, std::memory_order_release);
     g_source_geometry_log_count.store(0, std::memory_order_release);
+    g_source_runtime_data_log_count.store(0, std::memory_order_release);
     g_source_radar_route_logged.store(false, std::memory_order_release);
     g_radar_overview_route_logged.store(false, std::memory_order_release);
     g_source_skybox_route_logged.store(false, std::memory_order_release);
@@ -1850,6 +2069,7 @@ void nskinzcs2::runtime::ShutdownMapRemap()
     ReleaseSRWLockExclusive(&g_failed_resource_lock);
     g_suppressed_source_geometry_count.store(0, std::memory_order_release);
     g_source_geometry_log_count.store(0, std::memory_order_release);
+    g_source_runtime_data_log_count.store(0, std::memory_order_release);
     g_source_skybox_route_logged.store(false, std::memory_order_release);
     nskinzcs2::Logger::Info(L"Map remap hooks removed.");
 }

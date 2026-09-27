@@ -396,12 +396,16 @@ static void to_json(json& j, const MapRemapProfile& value)
     j = json {
         {"enabled", value.enabled},
         {"use_source_radar", value.use_source_radar},
+        {"radar_black_tolerance", value.radar_black_tolerance},
+        {"radar_dark_detail_radius", value.radar_dark_detail_radius},
+        {"radar_background_alpha_percent", value.radar_background_alpha_percent},
         {"source_map_name", value.source_map_name},
         {"workshop_id", value.workshop_id},
         {"workshop_title", value.workshop_title},
         {"addon_name", value.addon_name},
         {"target_map_name", value.target_map_name},
         {"target_skybox_resource_prefix", value.target_skybox_resource_prefix},
+        {"radar_overlay_request_virtual_path", value.radar_overlay_request_virtual_path},
         {"radar_overlay_virtual_path", value.radar_overlay_virtual_path},
         {"radar_overlay_root_path", value.radar_overlay_root_path},
         {"radar_overlay_file_path", value.radar_overlay_file_path},
@@ -412,6 +416,10 @@ static void from_json(const json& j, MapRemapProfile& value)
 {
     value.enabled = j.value("enabled", false);
     value.use_source_radar = j.value("use_source_radar", true);
+    value.radar_black_tolerance = std::clamp(j.value("radar_black_tolerance", 12), 0, 96);
+    value.radar_dark_detail_radius = std::clamp(j.value("radar_dark_detail_radius", 12), 0, 32);
+    value.radar_background_alpha_percent =
+        std::clamp(j.value("radar_background_alpha_percent", 0), 0, 100);
     value.source_map_name = j.value("source_map_name", std::string {});
     value.workshop_id = j.value("workshop_id", std::string {});
     value.workshop_title = j.value("workshop_title", std::string {});
@@ -419,6 +427,8 @@ static void from_json(const json& j, MapRemapProfile& value)
     value.target_map_name = j.value("target_map_name", std::string {});
     value.target_skybox_resource_prefix =
         j.value("target_skybox_resource_prefix", std::string {});
+    value.radar_overlay_request_virtual_path =
+        j.value("radar_overlay_request_virtual_path", std::string {});
     value.radar_overlay_virtual_path = j.value("radar_overlay_virtual_path", std::string {});
     value.radar_overlay_root_path = j.value("radar_overlay_root_path", std::string {});
     value.radar_overlay_file_path = j.value("radar_overlay_file_path", std::string {});
@@ -427,7 +437,7 @@ static void from_json(const json& j, MapRemapProfile& value)
 static void to_json(json& j, const ConfigDocument& value)
 {
     j = json {
-        {"version", 6},
+        {"version", 7},
         {"profiles", value.profiles},
         {"knife_profiles", value.knife_profiles},
         {"glove_profiles", value.glove_profiles},
@@ -472,6 +482,7 @@ nskinzcs2::model::ConfigDocument nskinzcs2::ConfigStore::Load(const std::filesys
     {
         const auto root = json::parse(stream);
         auto parsed = root.get<model::ConfigDocument>();
+        const auto loaded_version = parsed.version;
         model::NormalizeKnifeProfiles(parsed, root);
         if (parsed.profiles.empty())
         {
@@ -495,7 +506,24 @@ nskinzcs2::model::ConfigDocument nskinzcs2::ConfigStore::Load(const std::filesys
             parsed.keychain_profiles.push_back(model::KeychainProfile {});
         }
 
-        parsed.version = 6;
+        // v6 shipped with a high road-destructive cutoff and a recovery
+        // radius that was silently clamped to six. Migrate only the exact old
+        // defaults; explicit user tuning remains intact.
+        if (loaded_version <= 6 &&
+            parsed.map_remap.radar_black_tolerance == 24 &&
+            parsed.map_remap.radar_dark_detail_radius == 4)
+        {
+            parsed.map_remap.radar_black_tolerance = 12;
+            parsed.map_remap.radar_dark_detail_radius = 12;
+        }
+        if (loaded_version <= 6)
+        {
+            parsed.map_remap.radar_overlay_request_virtual_path.clear();
+            parsed.map_remap.radar_overlay_virtual_path.clear();
+            parsed.map_remap.radar_overlay_root_path.clear();
+            parsed.map_remap.radar_overlay_file_path.clear();
+        }
+        parsed.version = 7;
         return parsed;
     }
     catch (const std::exception&)
@@ -513,7 +541,7 @@ bool nskinzcs2::ConfigStore::Save(const std::filesystem::path& path, const model
     }
 
     auto normalized = document;
-    normalized.version = 6;
+    normalized.version = 7;
     normalized.knife_profiles = model::DeduplicateProfilesByXuidKeepLast(normalized.knife_profiles);
     normalized.keychain_profiles =
         model::DeduplicateKeychainProfilesKeepLast(normalized.keychain_profiles);

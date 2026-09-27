@@ -12,6 +12,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -53,6 +54,13 @@ std::wstring RuntimeEventName(const DWORD process_id)
 {
     std::wstringstream name;
     name << L"Local\\nSkinzCS2.ManualRefresh." << process_id;
+    return name.str();
+}
+
+std::wstring RuntimeDemoCommandEventName(const DWORD process_id)
+{
+    std::wstringstream name;
+    name << L"Local\\nSkinzCS2.DemoCommand." << process_id;
     return name.str();
 }
 
@@ -162,6 +170,7 @@ std::filesystem::path RuntimeCs2InstallRoot(const DWORD process_id)
 
 void ClearPreparedRadar(nskinzcs2::model::MapRemapProfile& profile)
 {
+    profile.radar_overlay_request_virtual_path.clear();
     profile.radar_overlay_virtual_path.clear();
     profile.radar_overlay_root_path.clear();
     profile.radar_overlay_file_path.clear();
@@ -182,13 +191,18 @@ void PrepareExternalRadarOverlay(
     try
     {
         nskinzcs2::runtime::RadarAlphaOverlay overlay;
+        nskinzcs2::runtime::RadarAlphaMaskSettings mask_settings;
+        mask_settings.black_tolerance = profile.radar_black_tolerance;
+        mask_settings.dark_detail_radius = profile.radar_dark_detail_radius;
+        mask_settings.background_alpha_percent = profile.radar_background_alpha_percent;
         std::wstring diagnostic;
         const auto outcome = nskinzcs2::runtime::BuildWorkshopRadarAlphaOverlay(
             profile.workshop_id,
             profile.target_map_name,
             overlay,
             diagnostic,
-            runtime_process_id);
+            runtime_process_id,
+            mask_settings);
         if (outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::NotNeeded)
         {
             nskinzcs2::Logger::Info(
@@ -229,6 +243,7 @@ void PrepareExternalRadarOverlay(
             return;
         }
 
+        profile.radar_overlay_request_virtual_path = overlay.request_virtual_path;
         profile.radar_overlay_virtual_path = overlay.virtual_path;
         profile.radar_overlay_root_path = WideToUtf8(overlay_root.wstring());
         profile.radar_overlay_file_path = WideToUtf8(overlay_file.wstring());
@@ -245,6 +260,18 @@ void PrepareExternalRadarOverlay(
                 << overlay.width << L'x' << overlay.height << L", visible="
                 << overlay.visible_pixels << L", transparent=" << overlay.transparent_pixels
                 << L", soft_edge=" << overlay.softened_edge_pixels
+                << L", recovered_dark_detail=" << overlay.recovered_detail_pixels
+                << L", black_tolerance=" << mask_settings.black_tolerance
+                << L", applied_black_tolerance=" << overlay.applied_black_tolerance
+                << L", neutral_mode=" << overlay.detected_neutral_mode
+                << L", neutral_pixels=" << overlay.detected_neutral_pixels
+                << L", neutral_mode_pixels=" << overlay.detected_neutral_mode_pixels
+                << L", detail_radius=" << mask_settings.dark_detail_radius
+                << L", background_alpha=" << mask_settings.background_alpha_percent << L'%'
+                << L", request="
+                << std::wstring(overlay.request_virtual_path.begin(), overlay.request_virtual_path.end())
+                << L", alias="
+                << std::wstring(overlay.virtual_path.begin(), overlay.virtual_path.end())
                 << L"): " << overlay_file.wstring();
         nskinzcs2::Logger::Info(message.str());
     }
@@ -331,6 +358,51 @@ bool nskinzcs2::ui::PublishExternalConfigUpdate(
 
     const auto event_name = RuntimeEventName(runtime_process_id);
     const auto event = OpenEventW(EVENT_MODIFY_STATE, FALSE, event_name.c_str());
+    if (event == nullptr)
+    {
+        return false;
+    }
+    const auto signaled = SetEvent(event) != FALSE;
+    CloseHandle(event);
+    return signaled;
+}
+
+bool nskinzcs2::ui::PublishExternalDemoCommand(
+    const DWORD runtime_process_id,
+    const std::filesystem::path& dll_directory,
+    const std::string& command)
+{
+    if (runtime_process_id == 0 || dll_directory.empty() || command.empty() ||
+        command.find_first_of("\r\n") != std::string::npos)
+    {
+        return false;
+    }
+
+    const auto destination = dll_directory / L"nSkinzCS2.demo-command.txt";
+    const auto temporary = dll_directory / L"nSkinzCS2.demo-command.tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream)
+        {
+            return false;
+        }
+        stream.write(command.data(), static_cast<std::streamsize>(command.size()));
+        stream.put('\n');
+    }
+    if (!MoveFileExW(
+            temporary.c_str(),
+            destination.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        return false;
+    }
+
+    const auto event = OpenEventW(
+        EVENT_MODIFY_STATE,
+        FALSE,
+        RuntimeDemoCommandEventName(runtime_process_id).c_str());
     if (event == nullptr)
     {
         return false;

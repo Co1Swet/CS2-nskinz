@@ -2,6 +2,42 @@
 
 namespace nskinzcs2::runtime
 {
+SyntheticEconItemIdentity BuildSyntheticGloveEconItemIdentity(
+    const std::uint64_t xuid,
+    const int definition_index) noexcept
+{
+    constexpr std::uint32_t synthetic_namespace = 0xC5210000u;
+    constexpr std::uint64_t fnv_offset = 1469598103934665603ull;
+    constexpr std::uint64_t fnv_prime = 1099511628211ull;
+    constexpr std::uint64_t glove_slot_salt = 0x474C4F56455F4944ull; // "GLOVE_ID"
+
+    const auto normalized_definition =
+        static_cast<std::uint32_t>(definition_index > 0 ? definition_index : 0) & 0xFFFFu;
+    SyntheticEconItemIdentity identity;
+    identity.high = synthetic_namespace | normalized_definition;
+
+    std::uint64_t hash = fnv_offset;
+    const auto mix = [&hash](const std::uint64_t value)
+    {
+        hash ^= value;
+        hash *= fnv_prime;
+    };
+    mix(glove_slot_salt);
+    mix(xuid);
+    mix(normalized_definition);
+
+    identity.low = static_cast<std::uint32_t>(hash ^ (hash >> 32u));
+    if (identity.low == 0 || identity.low == 0xFFFFFFFFu)
+    {
+        identity.low ^= 0x6E536B7Au; // "nSkz"
+    }
+    if (identity.low == 0 || identity.low == 0xFFFFFFFFu)
+    {
+        identity.low = 1u;
+    }
+    return identity;
+}
+
 GloveSlotMode ResolveGloveSlotMode(const nskinzcs2::model::GloveProfile& profile) noexcept
 {
     return profile.mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish
@@ -24,8 +60,8 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     case GloveSlotMode::FinishOnly:
         return pawn_glove_available ? GloveCarrierKind::PawnEconGloves : GloveCarrierKind::None;
     case GloveSlotMode::ModelAndFinish:
-        // Build 2000908's native visual updater reads pawn m_EconGloves at
-        // +0x1690 and materialises its own client-only output at +0x1518. It
+        // Build 2000918's native visual updater reads pawn m_EconGloves at
+        // +0x1770 and materialises its own client-only output at +0x15F8. It
         // never reads m_hMyWearables. Prefer that single authoritative input
         // even for an initially empty stock T/CT slot; retain a published
         // wearable only as a compatibility fallback when the Pawn view is

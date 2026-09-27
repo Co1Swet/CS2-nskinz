@@ -6,17 +6,17 @@
 
 namespace nskinzcs2::runtime
 {
-// Build 2000908: the native pawn glove component's output is consumed by HUD.
+// Build 2000918: the native pawn glove component's output is consumed by HUD.
 // This is NOT m_hMyWearables or a fabricated CEconWearable.
-inline constexpr std::uintptr_t kGloveVisualRefreshRva = 0xC13450;
-// Build 2000908: the continuously reached HUD glove assembly consumer. It
-// resolves the observed Pawn from this+0x520, then consumes Pawn+0x1518.
-inline constexpr std::uintptr_t kGloveHudConsumerRva = 0x1053530;
+inline constexpr std::uintptr_t kGloveVisualRefreshRva = 0xC659D0;
+// Build 2000918: the continuously reached HUD glove assembly consumer. It
+// resolves the observed Pawn from this+0x520, then consumes Pawn+0x15F8.
+inline constexpr std::uintptr_t kGloveHudConsumerRva = 0x10CCD50;
 inline constexpr std::ptrdiff_t kGloveHudConsumerPawnHandleOffset = 0x520;
-// Build 2000908: the native glove updater resolves its output handle through
+// Build 2000918: the native glove updater resolves its output handle through
 // this client-only identity chunk root, not the networked client entity system.
-inline constexpr std::uintptr_t kGloveVisualEntityChunksRva = 0x21F7760;
-inline constexpr std::ptrdiff_t kGloveVisualComponentOffset = 0x1518;
+inline constexpr std::uintptr_t kGloveVisualEntityChunksRva = 0x236A460;
+inline constexpr std::ptrdiff_t kGloveVisualComponentOffset = 0x15F8;
 inline constexpr std::ptrdiff_t kGloveVisualComponentOwnerOffset = 0xB0;
 struct GloveVisualEvidenceWindow
 {

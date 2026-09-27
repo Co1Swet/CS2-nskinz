@@ -48,6 +48,19 @@ bool BuildSourceSkyboxResourceRedirect(
     char* replacement,
     std::size_t replacement_size) noexcept;
 
+// Redirects stale demo-map entity-lump and dynamic-lighting resource paths.
+// A verified geometry-identical pair may deliberately keep the source probe
+// atlas so dynamic demo models remain readable under the Workshop world.
+// Numeric probe-octree handshakes are redirected only when a source/target
+// entity-lump mapping has been verified; guessing an ID creates a nonexistent
+// target path and black models.
+bool BuildSourceMapRuntimeDataRedirect(
+    std::string_view resource_path,
+    std::string_view source_map_name,
+    std::string_view target_map_name,
+    char* replacement,
+    std::size_t replacement_size) noexcept;
+
 // Called on Update. Hooks are intentionally installed only after the user has
 // staged a valid map replacement, before the second playdemo invocation.
 void ConfigureMapRemap(

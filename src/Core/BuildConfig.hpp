@@ -4,9 +4,9 @@
 
 namespace nskinzcs2::build
 {
-inline constexpr std::string_view kVersion = "0.5.1-beta";
-inline constexpr std::wstring_view kVersionWide = L"0.5.1-beta";
-inline constexpr std::wstring_view kDisplayName = L"nSkinzCS2 v0.5.1 Beta";
+inline constexpr std::string_view kVersion = "0.5.3-beta";
+inline constexpr std::wstring_view kVersionWide = L"0.5.3-beta";
+inline constexpr std::wstring_view kDisplayName = L"nSkinzCS2 v0.5.3 Beta";
 
 #ifdef NSKINZCS2_UI_LANG_ZH_CN
 inline constexpr bool kUiLanguageChinese = true;

@@ -4,7 +4,7 @@ This release is distributed under the GNU Affero General Public License v3.0 onl
 
 ## MulNX_CS2-derived map-remap work
 
-The HLAE demo map-remap implementation was adapted from and audited against [`Co1Swet/MulNX_CS2`](https://github.com/Co1Swet/MulNX_CS2), commit `361008b208326d9e7916ff2cd58dd57a0492c400` (2026-09-16), distributed upstream under AGPL-3.0. Copyright in MulNX_CS2 remains with its respective author(s) and contributor(s).
+The HLAE demo map-remap implementation was adapted from and audited against [`Co1Swet/MulNX_CS2`](https://github.com/Co1Swet/MulNX_CS2), commit `361008b208326d9e7916ff2cd58dd57a0492c400` (2026-09-16), with the CS2 2000918 `CSVCMsg_GameSessionConfiguration` parser signature and `s1_mapname` layout synchronized from upstream commit `f2466e18e26a8fc3daf4ac7945bc45220ba95993` (2026-09-27). MulNX_CS2 is distributed under AGPL-3.0. Copyright in MulNX_CS2 remains with its respective author(s) and contributor(s).
 
 The adapted behavior covers the Demo protobuf map/addon fields, spawn-group and string-table messages, server/session fields, root map KeyValues, failed-model tracking, manifest fallback, missing-vmdl lookup, and the `CUtlString` ABI used by those hooks.
 

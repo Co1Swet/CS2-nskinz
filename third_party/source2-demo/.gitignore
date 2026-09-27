@@ -1,0 +1,6 @@
+.idea
+.vscode
+replays
+target
+*.lock
+*.dem

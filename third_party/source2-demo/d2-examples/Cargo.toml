@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "chat",
+    "combatlog",
+    "lifestate",
+    "opendota",
+    "wards",
+    "remove-chat"
+]
+
+[profile.dev]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

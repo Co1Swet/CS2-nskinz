@@ -5,11 +5,13 @@
 
 namespace nskinzcs2::runtime
 {
-inline constexpr std::uintptr_t kKnifeEntityModelDereferenceRva = 0x21D281;
-inline constexpr std::uintptr_t kKnifeModelSkeletonCountRva = 0x165AAB0;
-inline constexpr std::uintptr_t kKnifeModelSkeletonReferenceRva = 0x165AA10;
-inline constexpr std::uintptr_t kKnifeGraphSkeletonHeaderRva = 0x12678DF;
-inline constexpr std::uintptr_t kKnifeGraphSkeletonCopyRva = 0x126790E;
+inline constexpr std::uintptr_t kKnifeEntityModelDereferenceRva = 0x21C121;
+inline constexpr std::uintptr_t kKnifeModelSkeletonCountRva = 0x1770D80;
+inline constexpr std::uintptr_t kKnifeModelSkeletonReferenceRva = 0x1770CE0;
+inline constexpr std::uintptr_t kKnifeGraphSkeletonHeaderRva = 0x12E375F;
+inline constexpr std::uintptr_t kKnifeGraphSkeletonCopyRva = 0x12E378E;
+inline constexpr std::size_t kKnifeModelSkeletonCountOffset = 0x440;
+inline constexpr std::size_t kKnifeModelSkeletonReferencesOffset = 0x448;
 
 struct KnifeResourceEvidenceWindow
 {

@@ -695,6 +695,7 @@ private:
     void ConsumeDemoKeychainRefresh(runtime::Status& status);
     void ConsumeManualRefresh(runtime::Status& status);
     void AppendHookTelemetry(runtime::Status& status) const;
+    void PublishDemoFilePathSidecar(const std::wstring& demo_file_path);
     void LogStatusIfChanged(const runtime::Status& status);
 
     AppState& state_;
@@ -712,5 +713,7 @@ private:
     std::wstring global_swapper_early_reason_;
     std::wstring global_swapper_early_route_;
     std::wstring last_logged_status_;
+    std::wstring last_published_demo_file_path_;
+    bool demo_file_path_sidecar_published_ = false;
 };
 }

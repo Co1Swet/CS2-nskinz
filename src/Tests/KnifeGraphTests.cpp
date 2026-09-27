@@ -5,6 +5,7 @@
 #include "Runtime/KnifeLifecycle.hpp"
 #include "Runtime/KnifeFinish.hpp"
 #include "Runtime/KnifeUpdateProbe.hpp"
+#include "Runtime/GloveVisualRefresh.hpp"
 #include "Cs2/Runtime.hpp"
 
 #include <Windows.h>
@@ -47,7 +48,7 @@ struct Memory final : KnifeGraphReader
     {
         ++reads;
         if (address == 0x21000 && ++resource_reads == 2 && on_second_resource) { on_second_resource(); }
-        if (address == 0x500E8 && ++name_reads == 2 && on_second_sample) { on_second_sample(); }
+        if (address == 0x50120 && ++name_reads == 2 && on_second_sample) { on_second_sample(); }
         if (address == 0x60448 && ++body_reads == 2 && on_second_body) { on_second_body(); }
         if (address == 0x60020 && ++secondary_reads == 2 && on_second_secondary) { on_second_secondary(); }
         if (address >= 0x71000 && address < 0x71100) { ++table_reads; }
@@ -79,9 +80,9 @@ struct Fixture
         binding.weapon_graph_controller = 0x50000;
         binding.body_animation_controller = 0x60000;
         binding.graph_instance = 0x70000;
-        memory.Set<std::uintptr_t>(0x500E8, symbols.weapon_type_name);
-        memory.Set<std::uintptr_t>(0x500F0, binding.graph_instance);
-        memory.Set<std::int16_t>(0x500F8, 2);
+        memory.Set<std::uintptr_t>(0x50120, symbols.weapon_type_name);
+        memory.Set<std::uintptr_t>(0x50128, binding.graph_instance);
+        memory.Set<std::int16_t>(0x50130, 2);
         memory.Set<std::uintptr_t>(0x60448, binding.body_animation_controller);
         memory.Set<std::uintptr_t>(0x60450, binding.graph_instance);
         memory.Set<std::int32_t>(0x70008, 3);
@@ -153,7 +154,7 @@ void BoundedNodeLookup()
     for (const std::int16_t index : {std::int16_t(-1), std::int16_t(3), std::int16_t(32767)})
     {
         Fixture f;
-        f.memory.Set(0x500F8, index);
+        f.memory.Set(0x50130, index);
         f.Expect(Status::InvalidNodeRange);
         Check(f.memory.table_reads == 0, "invalid signed index rejected before indexed read");
     }
@@ -176,8 +177,8 @@ void OwnershipAndNativeId()
         Status expected = Status::Ready;
         switch (change)
         {
-        case 0: f.memory.Set<std::uintptr_t>(0x500E8, 0xBAD); expected = Status::ParameterNameMismatch; break;
-        case 1: f.memory.Set<std::uintptr_t>(0x500F0, 0xBAD); expected = Status::GraphMismatch; break;
+        case 0: f.memory.Set<std::uintptr_t>(0x50120, 0xBAD); expected = Status::ParameterNameMismatch; break;
+        case 1: f.memory.Set<std::uintptr_t>(0x50128, 0xBAD); expected = Status::GraphMismatch; break;
         case 2: f.memory.Set<std::uintptr_t>(0x60448, 0xBAD); expected = Status::GraphMismatch; break;
         case 3: f.memory.id_node = 0xBAD; expected = Status::WrongNodeType; break;
         case 4: f.memory.Set<std::int16_t>(0x90008, 1); expected = Status::WrongNodeDefinition; break;
@@ -198,7 +199,7 @@ void ConcurrentRebuildRejected()
         {
             switch (change)
             {
-            case 0: f.memory.Set<std::uintptr_t>(0x500F0, 0xBAD); break;
+            case 0: f.memory.Set<std::uintptr_t>(0x50128, 0xBAD); break;
             case 1: f.memory.Set<std::int32_t>(0x70008, 4); break;
             case 2: f.memory.Set<std::uintptr_t>(0x80018, f.symbols.target_type); break;
             case 3: f.memory.bytes.erase(0x90008); break;
@@ -308,10 +309,10 @@ void ResourcePairOwnership()
         f.memory.Set<std::uintptr_t>(0xE0000, 0xF0000);
         f.memory.Set<std::uintptr_t>(0xE1000, 0xF1000);
         f.memory.Set<std::uintptr_t>(0xE2000, 0xF2000);
-        f.memory.Set<int>(0xF0430, 1);
-        f.memory.Set<int>(0xF1430, 1);
-        f.memory.Set<std::uintptr_t>(0xF0438, 0xF3000);
-        f.memory.Set<std::uintptr_t>(0xF1438, 0xF4000);
+        f.memory.Set<int>(0xF0440, 1);
+        f.memory.Set<int>(0xF1440, 1);
+        f.memory.Set<std::uintptr_t>(0xF0448, 0xF3000);
+        f.memory.Set<std::uintptr_t>(0xF1448, 0xF4000);
         f.memory.Set<std::uintptr_t>(0xF3000, 0xF5000);
         f.memory.Set<std::uintptr_t>(0xF4000, 0xF5000);
         f.memory.Set<int>(0x70338, 2);
@@ -342,8 +343,8 @@ void ResourcePairOwnership()
         case 2: bad.memory.Set<std::uintptr_t>(0xE1000, 0); break;
         case 3: bad.memory.Set<std::uintptr_t>(0xE0000, 0xE0000); break;
         case 4: bad.memory.Set<std::uintptr_t>(0xE2000, 0xF0000); break;
-        case 5: bad.memory.Set<int>(0xF0430, 0); break;
-        case 6: bad.memory.Set<int>(0xF1430, 2); break;
+        case 5: bad.memory.Set<int>(0xF0440, 0); break;
+        case 6: bad.memory.Set<int>(0xF1440, 2); break;
         case 7: bad.memory.Set<std::uintptr_t>(0xF4000, 0); break;
         case 8: bad.memory.Set<int>(0x70338, -1); break;
         case 9: bad.memory.Set<int>(0x70338, 65); break;
@@ -353,7 +354,7 @@ void ResourcePairOwnership()
         case 13: bad.memory.Set<std::uintptr_t>(0x60450, 0x71000); break;
         case 14: input.world = std::numeric_limits<std::uintptr_t>::max() - 4; break;
         case 15: bad.memory.Set<std::uintptr_t>(0x70340, std::numeric_limits<std::uintptr_t>::max() - 4); break;
-        case 16: bad.memory.bytes.erase(0xF1430); break;
+        case 16: bad.memory.bytes.erase(0xF1440); break;
         }
         Check(!ProbeKnifeResourcePair(bad.binding, input, true, bad.memory, pair) && pair == KnifeResourcePair {},
             "invalid resources clear outputs and cannot qualify for a model transaction");
@@ -421,8 +422,8 @@ struct NativeFixture final : KnifeNativeHost
         Set<std::uintptr_t>(0x21000, 0xE0000); Set<std::uintptr_t>(0x31000, 0xE1000);
         Set<std::uintptr_t>(0x41000, 0xE2000);
         Set<std::uintptr_t>(0xE0000, 0xF0000); Set<std::uintptr_t>(0xE1000, 0xF0000); Set<std::uintptr_t>(0xE2000, 0xF2000);
-        Set<int>(0xF0430, 1); Set<int>(0xF1430, 1);
-        Set<std::uintptr_t>(0xF0438, 0xF3000); Set<std::uintptr_t>(0xF1438, 0xF4000);
+        Set<int>(0xF0440, 1); Set<int>(0xF1440, 1);
+        Set<std::uintptr_t>(0xF0448, 0xF3000); Set<std::uintptr_t>(0xF1448, 0xF4000);
         Set<std::uintptr_t>(0xF3000, 0xF5000); Set<std::uintptr_t>(0xF4000, 0xFA000);
         Set<int>(0x70338, 1); Set<std::uintptr_t>(0x70340, 0xF6000); Set<std::uintptr_t>(0xF6000, 0xF5000);
         Set<int>(0x60020, 1); Set<std::uintptr_t>(0x60028, 0xB0000); Set<int>(0x60030, 4);
@@ -477,7 +478,7 @@ struct NativeFixture final : KnifeNativeHost
     void NewGraph()
     {
         f.binding.graph_instance = 0x72000;
-        Set<std::uintptr_t>(0x60450, f.binding.graph_instance); Set<std::uintptr_t>(0x500F0, f.binding.graph_instance);
+        Set<std::uintptr_t>(0x60450, f.binding.graph_instance); Set<std::uintptr_t>(0x50128, f.binding.graph_instance);
         Set<int>(0x72008, 3); Set<std::uintptr_t>(0x72010, 0x73000);
         f.memory.id_node = 0x81000;
         Set<std::uintptr_t>(0x73010, f.memory.id_node); Set<std::uintptr_t>(0x81008, 0x90000);
@@ -1349,7 +1350,13 @@ void InstalledBinaryEvidence()
     }
     update.pop_back();
     Check(!MatchesKnifeGraphLayoutEvidence(update, destruction, construction), "truncated evidence rejected");
-    std::cout << "knife_graph_installed_evidence=PASS; file_only=1; game_not_loaded=1\n";
+    for (const auto& window : GloveVisualEvidenceWindows())
+    {
+        const auto bytes = ReadPeRva(client, window.rva, window.bytes.size());
+        Check(std::equal(bytes.begin(), bytes.end(), window.bytes.begin(), window.bytes.end()),
+            "installed default-glove native/HUD instruction window");
+    }
+    std::cout << "knife_graph_installed_evidence=PASS; glove_visual_installed_evidence=PASS; file_only=1; game_not_loaded=1\n";
 }
 }
 

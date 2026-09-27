@@ -11,21 +11,21 @@
 
 namespace nskinzcs2::compatibility
 {
-inline constexpr std::string_view kVerifiedClientVersion = "2000908";
-inline constexpr std::string_view kVerifiedPatchVersion = "1.41.8.1";
-inline constexpr std::string_view kVerifiedSourceRevision = "10981323";
-inline constexpr std::string_view kVerifiedHlaeVersion = "2.192.2.0";
+inline constexpr std::string_view kVerifiedClientVersion = "2000918";
+inline constexpr std::string_view kVerifiedPatchVersion = "1.41.8.5";
+inline constexpr std::string_view kVerifiedSourceRevision = "11039926";
+inline constexpr std::string_view kVerifiedHlaeVersion = "2.192.6.0";
 
 inline constexpr char kSource2ClientInterface[] = "Source2Client002";
 inline constexpr char kResourceSystemInterface[] = "ResourceSystem013";
 inline constexpr char kFileSystemInterface[] = "VFileSystem017";
 inline constexpr std::size_t kFrameStageNotifyVtableIndex = 36;
-// ClientFrameStage_t layout used by HLAE 2.192.2. Runtime polling must run at
+// ClientFrameStage_t layout re-verified with HLAE 2.192.6. Runtime polling must run at
 // FRAME_RENDER_PASS; using the previous value (11) leaves every manual Update
 // pending forever even though FrameStageNotify callbacks are active.
 inline constexpr int kFrameStartStage = 0;
 inline constexpr int kFrameRenderPassStage = 12;
-// Source2EngineToClient001 layout verified on HLAE 2.192.2 / CS2 build 2000908.
+// Source2EngineToClient001 layout verified on HLAE 2.192.6 / CS2 build 2000918.
 inline constexpr std::size_t kEngineIsPlayingDemoVtableIndex = 42;
 inline constexpr std::size_t kEngineGetDemoFilePathVtableIndex = 43;
 inline constexpr std::size_t kEngineGetLevelNameShortVtableIndex = 65;
@@ -41,7 +41,7 @@ inline constexpr char kEntitySystemRootPattern[] =
     "40 55 53 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 33 D2 E8 ?? ?? ?? ??";
 inline constexpr char kGetEntityFromIndexPattern[] =
     "4C 8D 49 10 81 FA FE 7F 00 00";
-// Build 2000908 CUtlVector<CEconItemAttribute>::AddToTail(const T&).  This is
+// Build 2000918 CUtlVector<CEconItemAttribute>::AddToTail(const T&).  This is
 // the engine-owned construction path used when a stock demo weapon has no
 // paint/seed/wear records and Schema does not expose a network-vector callback.
 // Runtime additionally validates the complete fixed instruction window and
@@ -54,7 +54,7 @@ inline constexpr char kResourceSystemQueryPattern[] =
     "48 83 EC 38 41 B1 01 C6 44 24 20 01 E8 ? ? ? ? 48 83 C4 38 C3";
 inline constexpr char kBindModelPattern[] =
     "48 8B C4 53 57 48 83 EC 68 48 89 70 18 41 0F B6 D8 4C 89 70 20 48 8B F9 4C 89 78 E8 4C 8B F2 48 8B 41 30 45 8B F9 48 85 C0 74 33";
-// Current build 2000908 no longer exposes a callable create function in the
+// Current build 2000918 no longer exposes a callable create function in the
 // fd26f92 ClientClass chain. These four signatures identify one internally
 // cross-referenced CGameEntitySystem creation chain; model_and_finish remains
 // fail-closed unless every member is unique and its call targets agree.
@@ -87,7 +87,7 @@ inline constexpr char kBaseModelEntitySetModelPattern[] =
 // additionally verifies that the embedded VData displacement equals the
 // Schema-resolved m_nSubclassID offset + 8 before invoking it.
 inline constexpr char kBaseEntitySubclassChangedPattern[] =
-    "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 48 83 BB ?? ?? ?? ?? 00 74 ?? 48 8B 03 BA 01 00 00 00 48 8B CB 48 83 C4 20 5B 48 FF A0 28 06 00 00 48 83 C4 20 5B C3";
+    "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 48 83 BB ?? ?? ?? ?? 00 74 ?? 48 8B 03 BA 01 00 00 00 48 8B CB 48 83 C4 20 5B 48 FF A0 40 06 00 00 48 83 C4 20 5B C3";
 // CUtlStringToken::Make returns its four-byte value through a hidden result
 // pointer on x64 (RCX=result, RDX=text), despite the small logical return
 // type. Calling it as uint64_t(const char*) writes through the class-name
@@ -96,7 +96,15 @@ inline constexpr char kBaseEntitySubclassChangedPattern[] =
 // this exact entry before any native subclass transition.
 inline constexpr char kUtlStringTokenMakeSretPattern[] =
     "40 53 48 83 EC 20 C7 01 00 00 00 00 48 8B C2 48 8B D9 48 85 D2";
-// Reference-only high-level model-provider binding entry for build 2000908.
+// Optional map-remap evidence synchronized from MulNX_CS2 upstream
+// f2466e18e26a8fc3daf4ac7945bc45220ba95993.  Relative protobuf parser
+// branches are intentionally masked; the following field-10 branch keeps the
+// shared CSVCMsg_GameSessionConfiguration string exit unique on build 2000918.
+// MapRemap independently fails closed when this evidence is absent, so it is
+// reference-only here and does not disable firearm/knife/glove functionality.
+inline constexpr char kMapRemapGameSessionParserPattern[] =
+    "48 8B D8 48 85 C0 0F 85 ?? ?? ?? ?? E9 ?? ?? ?? ?? 40 80 FF 52 0F 85 ?? ?? ?? ?? 83 4E";
+// Reference-only high-level model-provider binding entry for build 2000918.
 // m_pGameSceneNode is the scene outer: its current vtable slot 10 owns the
 // direct call and passes that object in R8, its embedded CSkeletonInstance at
 // outer+0x140 in RCX, and outer+0x10 in R9. Runtime model initialization remains
@@ -119,7 +127,7 @@ struct SignatureSpec
     bool required = true;
 };
 
-inline constexpr std::array<SignatureSpec, 15> kSignatureSpecs {{
+inline constexpr std::array<SignatureSpec, 16> kSignatureSpecs {{
     {"schema_global", L"game\\bin\\win64\\schemasystem.dll", kSchemaGlobalPattern, true},
     {"entity_system_root", L"game\\csgo\\bin\\win64\\client.dll", kEntitySystemRootPattern, true},
     {"get_entity_from_index", L"game\\csgo\\bin\\win64\\client.dll", kGetEntityFromIndexPattern, true},
@@ -135,6 +143,7 @@ inline constexpr std::array<SignatureSpec, 15> kSignatureSpecs {{
     {"base_model_entity_set_model", L"game\\csgo\\bin\\win64\\client.dll", kBaseModelEntitySetModelPattern, true},
     {"base_entity_subclass_changed", L"game\\csgo\\bin\\win64\\client.dll", kBaseEntitySubclassChangedPattern, true},
     {"utl_string_token_make_sret", L"game\\bin\\win64\\tier0.dll", kUtlStringTokenMakeSretPattern, true},
+    {"map_remap_game_session_parser", L"game\\bin\\win64\\engine2.dll", kMapRemapGameSessionParserPattern, false},
 }};
 
 struct SignatureResult

@@ -1,6 +1,37 @@
 # Changelog / 更新记录
 
-## Unreleased / 未发布
+## v0.5.3-beta — 2026-09-27
+
+- Updated the verified HLAE baseline to `2.192.6` / AfxHookSource2 `0.41.6` (`0E1378B81B5B82974EA8DD5C3E701E924D63C452927B50D64C1580F746D01F8B`).
+- 已验证 HLAE 基线更新为 `2.192.6` / AfxHookSource2 `0.41.6` (`0E1378B81B5B82974EA8DD5C3E701E924D63C452927B50D64C1580F746D01F8B`)。
+- Reworked Workshop radar masking so black tolerance is a real signed user correction, expanded bounded dark-road recovery to 32 pixels, migrated the destructive `24/4` defaults to road-safe `12/12`, and content-addressed every generated overlay to prevent stale slider results.
+- 重做创意工坊雷达遮罩：黑底容差现在是真实的双向手动偏移，受边界约束的暗色道路恢复扩展到 32 像素，旧版会过度删路的 `24/4` 默认值迁移为 `12/12`，并为每次生成的覆盖使用内容寻址资源名，避免滑块结果被旧缓存覆盖。
+
+- Added per-texture neutral-matte detection for Workshop radar overlays. A secondary opaque gray peak above the configured cutoff is now detected automatically, fixing the square/grid background retained by maps such as Ancient Night without forcing every map to use a destructive high threshold.
+- 为创意工坊雷达加入按纹理检测的中性暗底阈值：可自动识别高于手动阈值的第二个不透明灰阶峰，修复 Ancient Night 等地图的方形／网格黑底，不再迫使所有地图使用会吞掉道路的高阈值。
+- Reworked dark-detail recovery so recovered corridors and antialiased boundaries inherit RGB from a trusted neighbouring road instead of restoring the source matte as opaque black. On the installed `de_inferno_water` audit texture, opaque pure-black output pixels dropped from 2,229 to zero while road coverage stayed intact.
+- 重做深色细节恢复：被恢复的窄路与抗锯齿边界现在继承可信相邻道路的 RGB，不再把原纹理的黑底补成不透明黑渣。本机 `de_inferno_water` 审计纹理中的不透明纯黑输出像素由 2,229 降为 0，道路覆盖保持完整。
+- Added real installed-Workshop regression coverage for `de_ancient_night` and retained the existing Nirage, Nuke Rainy, Mirage/Dust2/Inferno Water and All-in-One radar gates. Runtime logs now report configured/effective tolerance and detected neutral-matte statistics.
+- 新增本机真实创意工坊 `de_ancient_night` 回归，并保留 Nirage、Nuke Rainy、Mirage/Dust2/Inferno Water 与 All-in-One 雷达门禁；运行日志新增配置／实际阈值及中性暗底统计。
+- The verified compatibility baseline is CS2 Steam Build `25537370`, Client/Server `2000918`, Patch `1.41.8.5`, Source revision `11039926`, HLAE `2.192.6` / AfxHookSource2 `0.41.6`. Full native regression and isolated x64 loading checks pass.
+- 已验证兼容基线为 CS2 Steam Build `25537370`、Client/Server `2000918`、Patch `1.41.8.5`、Source revision `11039926`、HLAE `2.192.6` / AfxHookSource2 `0.41.6`；完整原生回归与独立 x64 加载检查通过。
+
+This beta is the Workshop-radar transparency, road-preservation and edge-recovery update for the CS2 2000918 / HLAE 2.192.6 baseline. See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.3-beta.md).
+
+## v0.5.2-beta — 2026-09-27
+
+- Rebased the current source and local beta binaries on HLAE `2.192.5.0` / AfxHookSource2 `0.41.5` and CS2 Steam Build `25537370`, Client/Server `2000918`, Patch `1.41.8.5`, Source revision `11039926`.
+- 将当前源码与本地测试 DLL 适配到 HLAE `2.192.5.0` / AfxHookSource2 `0.41.5`，以及 CS2 Steam Build `25537370`、Client/Server `2000918`、Patch `1.41.8.5`、Source revision `11039926`。
+- Migrated the independent knife serialization, model/recollection, skeleton-resource, weapon-type graph, arms lifecycle and material-transfer evidence to the new client/animationsystem layout. The firearm implementation remains the existing attribute/material path, with only the engine's shifted composite-material owner layout updated.
+- 迁移独立刀模链的动画序列化、模型／重收集、骨架资源、weapon-type 动画图、手臂生命周期和材质传递证据；枪械仍沿用既有属性／材质路径，只同步游戏移动后的复合材质所有者布局。
+- Migrated the default-glove path to Pawn `m_EconGloves=0x1770`, `m_bNeedToReApplyGloves=0x176D`, `m_nEconGlovesChanged=0x1D20`, the native output component at `Pawn+0x15F8`, and the current HUD consumer. Added installed-PE evidence for all seven glove windows.
+- 将默认手套路径迁移到 Pawn `m_EconGloves=0x1770`、`m_bNeedToReApplyGloves=0x176D`、`m_nEconGlovesChanged=0x1D20`、`Pawn+0x15F8` 原生输出组件及当前 HUD consumer，并新增全部七处手套指令窗的已安装 PE 验证。
+- Full Release regression, all 16 installed-CS2 manifest entries (14 required skin/runtime gates plus two reference entries), and strict knife/glove file-only ABI checks pass. Actual second-load deploy/inspect animation and stock-glove rendering remain an in-game demo acceptance boundary.
+- Release 全量回归、本机 CS2 兼容清单全部 16 项（14 项换肤／运行时必需门控及 2 项参考证据）及刀／手套严格文件 ABI 检查均通过；二次加载后的切刀／检视动作与默认手套画面仍需在实际 Demo 中验收。
+- Updated the map-remap GameSession parser from MulNX upstream `f2466e18e26a8fc3daf4ac7945bc45220ba95993`: the signature now masks protobuf branch displacements and `CSVCMsg_GameSessionConfiguration::s1_mapname` uses the current `+0x40` slot. This prevents the full map hook set from failing closed after the CS2 update.
+- 按 MulNX 上游 `f2466e18e26a8fc3daf4ac7945bc45220ba95993` 更新地图替换的 GameSession 解析器：特征码改为屏蔽 protobuf 分支位移，`CSVCMsg_GameSessionConfiguration::s1_mapname` 使用当前 `+0x40` 字符串槽，避免 CS2 更新后整组地图 Hook 因单条旧特征失配而关闭。
+
+This beta is the CS2 2000918 / HLAE 2.192.5 compatibility release. Firearm skins keep the previous implementation; map replacement, knife model/action and stock-glove rendering remain demo-specific acceptance items. See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.2-beta.md).
 
 ## v0.5.1-beta — 2026-09-20
 

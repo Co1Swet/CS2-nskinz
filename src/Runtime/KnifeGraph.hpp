@@ -6,12 +6,12 @@
 
 namespace nskinzcs2::runtime
 {
-// Evidence for the installed 2000908 binary, not callable function addresses.
+// Evidence for the installed 2000918 binary, not callable function addresses.
 // Production must match these instruction windows AND the named Schema fields.
-inline constexpr std::uintptr_t kKnifeWeaponTypeUpdateRva = 0x8EA14A;
-inline constexpr std::uintptr_t kKnifeGraphNodeDestructionRva = 0x3ADC57;
-inline constexpr std::uintptr_t kKnifeIdNodeConstructionRva = 0x475120;
-inline constexpr std::uintptr_t kKnifeIdNodeVtableRva = 0x699238;
+inline constexpr std::uintptr_t kKnifeWeaponTypeUpdateRva = 0x912C8A;
+inline constexpr std::uintptr_t kKnifeGraphNodeDestructionRva = 0x390B69;
+inline constexpr std::uintptr_t kKnifeIdNodeConstructionRva = 0x4613D0;
+inline constexpr std::uintptr_t kKnifeIdNodeVtableRva = 0x6A4298;
 inline constexpr std::size_t kKnifeWeaponTypeUpdateSize = 63;
 inline constexpr std::size_t kKnifeGraphNodeDestructionSize = 48;
 inline constexpr std::size_t kKnifeIdNodeConstructionSize = 55;
@@ -21,18 +21,21 @@ bool MatchesKnifeGraphLayoutEvidence(std::span<const std::uint8_t> weapon_update
 // Its +0 owner is the body controller; +8 is the actual graph instance.
 inline constexpr std::size_t kKnifeBodyGraphOwnerOffset = 0x448;
 inline constexpr std::size_t kKnifeBodyGraphPointerOffset = 0x450;
-inline constexpr std::uintptr_t kKnifeBodyGraphConstructionRva = 0x8FD990;
+inline constexpr std::uintptr_t kKnifeBodyGraphConstructionRva = 0x927C80;
 inline constexpr std::size_t kKnifeBodyGraphConstructionSize = 14;
-inline constexpr std::uintptr_t kKnifeBodyGraphUseRva = 0x37B088;
+inline constexpr std::uintptr_t kKnifeBodyGraphUseRva = 0x389A08;
 inline constexpr std::size_t kKnifeBodyGraphUseSize = 15;
 bool MatchesKnifeBodyGraphLayoutEvidence(std::span<const std::uint8_t> construction,
     std::span<const std::uint8_t> use) noexcept;
-inline constexpr std::uintptr_t kKnifeSecondaryHandleAppendRva = 0x93ABCC;
+inline constexpr std::uintptr_t kKnifeSecondaryHandleAppendRva = 0x965FEC;
 inline constexpr std::size_t kKnifeSecondaryHandleAppendSize = 19;
-inline constexpr std::uintptr_t kKnifeSecondarySlotAppendRva = 0x93AC8A;
+inline constexpr std::uintptr_t kKnifeSecondarySlotAppendRva = 0x9660AA;
 inline constexpr std::size_t kKnifeSecondarySlotAppendSize = 16;
 bool MatchesKnifeSecondaryLayoutEvidence(std::span<const std::uint8_t> handle_append,
     std::span<const std::uint8_t> slot_append) noexcept;
+inline constexpr std::size_t kKnifeWeaponTypeNameOffset = 0x120;
+inline constexpr std::size_t kKnifeWeaponTypeGraphOffset = 0x128;
+inline constexpr std::size_t kKnifeWeaponTypeIndexOffset = 0x130;
 
 enum class KnifeGraphProbeStatus
 {

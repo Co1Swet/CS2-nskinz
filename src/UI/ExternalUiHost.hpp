@@ -18,6 +18,14 @@ bool PublishExternalConfigUpdate(
     DWORD runtime_process_id,
     const std::filesystem::path& config_path,
     model::ConfigDocument& document);
+
+// Writes one local demo command beside the DLL and wakes the injected runtime.
+// The runtime validates and dispatches it on FRAME_RENDER_PASS; the isolated UI
+// never calls a CS2 interface directly.
+bool PublishExternalDemoCommand(
+    DWORD runtime_process_id,
+    const std::filesystem::path& dll_directory,
+    const std::string& command);
 }
 
 extern "C" __declspec(dllexport) void CALLBACK nSkinzUiHost(

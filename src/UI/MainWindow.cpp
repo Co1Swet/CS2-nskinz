@@ -4,6 +4,7 @@
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
 #include "Cs2/Catalog.hpp"
+#include "Runtime/DemoSkinRewrite.hpp"
 #include "Runtime/WorkshopMaps.hpp"
 #include "UI/ExternalUiHost.hpp"
 #include "UI/UiText.hpp"
@@ -23,6 +24,7 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <future>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -1572,6 +1574,12 @@ private:
                 ImGui::EndTabItem();
             }
 
+            if (ImGui::BeginTabItem(Ui(UiTextId::TabDemoRewrite)))
+            {
+                DrawDemoSkinRewriteEditor();
+                ImGui::EndTabItem();
+            }
+
             ImGui::EndTabBar();
         }
 
@@ -2418,6 +2426,62 @@ private:
             PushWorkingConfig();
         }
         ImGui::TextWrapped("%s", Ui(UiTextId::MapUseSourceRadarHelp));
+        if (profile.use_source_radar)
+        {
+            bool radar_settings_released = false;
+            const auto invalidate_prepared_radar = [&]()
+            {
+                profile.radar_overlay_virtual_path.clear();
+                profile.radar_overlay_root_path.clear();
+                profile.radar_overlay_file_path.clear();
+                PushWorkingConfig();
+            };
+            if (ImGui::SliderInt(
+                    Ui(UiTextId::MapRadarBlackTolerance),
+                    &profile.radar_black_tolerance,
+                    0,
+                    96,
+                    "%d"))
+            {
+                invalidate_prepared_radar();
+            }
+            radar_settings_released |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::TextWrapped("%s", Ui(UiTextId::MapRadarBlackToleranceHelp));
+            if (ImGui::SliderInt(
+                    Ui(UiTextId::MapRadarDarkDetailRadius),
+                    &profile.radar_dark_detail_radius,
+                    0,
+                    6,
+                    "%d px"))
+            {
+                invalidate_prepared_radar();
+            }
+            radar_settings_released |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::TextWrapped("%s", Ui(UiTextId::MapRadarDarkDetailRadiusHelp));
+            if (ImGui::SliderInt(
+                    Ui(UiTextId::MapRadarBackgroundAlpha),
+                    &profile.radar_background_alpha_percent,
+                    0,
+                    100,
+                    "%d%%"))
+            {
+                invalidate_prepared_radar();
+            }
+            radar_settings_released |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::TextWrapped("%s", Ui(UiTextId::MapRadarBackgroundAlphaHelp));
+            if (ImGui::Button(Ui(UiTextId::MapRadarDefaults), ImVec2(-1.0f, 0.0f)))
+            {
+                profile.radar_black_tolerance = 24;
+                profile.radar_dark_detail_radius = 4;
+                profile.radar_background_alpha_percent = 0;
+                invalidate_prepared_radar();
+                radar_settings_released = true;
+            }
+            if (radar_settings_released)
+            {
+                PublishWorkingConfigUpdate(L"radar-control");
+            }
+        }
 
         if (profile.source_map_name.empty())
         {
@@ -2510,6 +2574,146 @@ private:
         }
     }
 
+    void RefreshDemoSkinRewriteResult()
+    {
+        if (!demo_skin_rewrite_future_.valid() ||
+            demo_skin_rewrite_future_.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        {
+            return;
+        }
+        try
+        {
+            demo_skin_rewrite_result_ = demo_skin_rewrite_future_.get();
+        }
+        catch (const std::exception& exception)
+        {
+            demo_skin_rewrite_result_ = {};
+            demo_skin_rewrite_result_.detail =
+                L"Temporary demo rewrite worker failed: " + Wide(exception.what());
+        }
+        catch (...)
+        {
+            demo_skin_rewrite_result_ = {};
+            demo_skin_rewrite_result_.detail = L"Temporary demo rewrite worker failed unexpectedly.";
+        }
+
+        if (!demo_skin_rewrite_result_.success)
+        {
+            return;
+        }
+        if (!nskinzcs2::ui::PublishExternalDemoCommand(
+                external_runtime_process_id_,
+                config_path_.parent_path(),
+                demo_skin_rewrite_result_.playdemo_command))
+        {
+            demo_skin_rewrite_result_.detail +=
+                L" The file was generated, but the playdemo command bridge was unavailable; press Load generated demo again after the runtime is loaded.";
+            Logger::Warn(demo_skin_rewrite_result_.detail);
+            return;
+        }
+        demo_skin_rewrite_result_.detail += L" The playdemo command was queued in CS2.";
+        Logger::Info(demo_skin_rewrite_result_.detail);
+    }
+
+    void RefreshCapturedDemoSkinSource()
+    {
+        const auto observed = nskinzcs2::runtime::ReadCurrentDemoPathSidecar(
+            config_path_.parent_path());
+        if (!observed || observed->empty() || *observed == demo_skin_last_observed_path_)
+        {
+            return;
+        }
+        demo_skin_last_observed_path_ = *observed;
+        if (!nskinzcs2::runtime::IsGeneratedDemoSkinPath(*observed))
+        {
+            demo_skin_source_path_ = *observed;
+            Logger::Info(L"Temporary demo UI captured original source: " + observed->wstring() + L".");
+        }
+    }
+
+    void DrawDemoSkinRewriteEditor()
+    {
+        RefreshCapturedDemoSkinSource();
+        RefreshDemoSkinRewriteResult();
+
+        ImGui::TextWrapped("%s", Ui(UiTextId::DemoRewriteDescription));
+        ImGui::TextDisabled("%s", Ui(UiTextId::DemoRewriteDependency));
+        ImGui::Separator();
+
+        char source_buffer[2048] {};
+        const auto encoded_source = Narrow(demo_skin_source_path_.wstring());
+        strncpy_s(source_buffer, encoded_source.c_str(), _TRUNCATE);
+        if (ImGui::InputText(
+                Ui(UiTextId::DemoRewriteSource),
+                source_buffer,
+                sizeof(source_buffer)))
+        {
+            demo_skin_source_path_ = std::filesystem::path(Wide(source_buffer));
+        }
+        if (demo_skin_source_path_.empty())
+        {
+            ImGui::TextWrapped("%s", Ui(UiTextId::DemoRewriteSourceWaiting));
+        }
+
+        const auto plan = nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(working_config_);
+        ImGui::Text(
+            Ui(UiTextId::DemoRewriteProfilesFormat),
+            static_cast<int>(plan.passes.size()),
+            plan.knife_item_count,
+            plan.glove_item_count);
+
+        const auto busy = demo_skin_rewrite_future_.valid();
+        ImGui::BeginDisabled(busy || demo_skin_source_path_.empty() || plan.passes.empty());
+        if (ImGui::Button(Ui(UiTextId::DemoRewriteGenerateLoad), ImVec2(-1.0f, 34.0f)))
+        {
+            const auto config = working_config_;
+            const auto source = demo_skin_source_path_;
+            const auto process_id = external_runtime_process_id_;
+            demo_skin_rewrite_result_ = {};
+            demo_skin_rewrite_result_.detail = L"Rewrite started.";
+            demo_skin_rewrite_future_ = std::async(
+                std::launch::async,
+                [config, source, process_id]()
+                {
+                    return nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
+                        config,
+                        source,
+                        process_id);
+                });
+        }
+        ImGui::EndDisabled();
+
+        if (busy)
+        {
+            ImGui::TextWrapped("%s", Ui(UiTextId::DemoRewriteInProgress));
+        }
+        if (!demo_skin_rewrite_result_.detail.empty())
+        {
+            ImGui::TextWrapped(
+                Ui(UiTextId::DemoRewriteResult),
+                Narrow(demo_skin_rewrite_result_.detail).c_str());
+        }
+        if (demo_skin_rewrite_result_.success &&
+            !demo_skin_rewrite_result_.playdemo_command.empty())
+        {
+            if (ImGui::Button(Ui(UiTextId::DemoRewriteLoadAgain), ImVec2(-1.0f, 30.0f)))
+            {
+                if (!nskinzcs2::ui::PublishExternalDemoCommand(
+                        external_runtime_process_id_,
+                        config_path_.parent_path(),
+                        demo_skin_rewrite_result_.playdemo_command))
+                {
+                    demo_skin_rewrite_result_.detail =
+                        L"The generated demo is intact, but the runtime playdemo command bridge is unavailable.";
+                }
+                else
+                {
+                    demo_skin_rewrite_result_.detail = L"The generated demo playdemo command was queued again.";
+                }
+            }
+        }
+    }
+
     void DrawStickersEditor(
         const Catalog& catalog,
         std::array<nskinzcs2::model::StickerProfile, 5>& stickers,
@@ -2567,54 +2771,9 @@ private:
     {
         const float width = ImGui::GetContentRegionAvail().x / 3.0f;
         const auto catalog = state_.SnapshotCatalog();
-        const auto runtime_status = state_.SnapshotStatus();
         if (ImGui::Button(Ui(UiTextId::Update), ImVec2(width - 4.0f, 30.0f)))
         {
-            std::wstring validation_issue;
-            if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
-                !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue) ||
-                !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue) ||
-                !TryValidateMapRemapForApply(working_config_, validation_issue))
-            {
-                Logger::Warn(L"UI rejected staged config update: " + validation_issue);
-            }
-            else
-            {
-                const bool external_update = external_runtime_process_id_ != 0;
-                const bool update_published = !external_update ||
-                    nskinzcs2::ui::PublishExternalConfigUpdate(
-                        external_runtime_process_id_,
-                        config_path_,
-                        working_config_);
-                if (!update_published)
-                {
-                    Logger::Warn(
-                        L"UI could not publish the staged config to the injected runtime; "
-                        L"the editor remains dirty.");
-                }
-                else
-                {
-                    if (!external_update)
-                    {
-                        Logger::Warn(L"Unexpected in-process UI update path used.");
-                    }
-                    state_.ReplaceConfig(working_config_);
-                    if (!external_update &&
-                        ShouldUseLightweightDemoKeychainRefresh(runtime_status, working_config_))
-                    {
-                        state_.RequestDemoKeychainRefresh();
-                    }
-                    else if (!external_update)
-                    {
-                        state_.RequestManualRefresh();
-                    }
-                    working_config_dirty_ = false;
-                    Logger::Info(
-                        external_update
-                            ? L"External UI saved and published staged config via Update."
-                            : L"UI applied staged config via Update.");
-                }
-            }
+            PublishWorkingConfigUpdate(L"Update");
         }
 
         ImGui::SameLine();
@@ -2746,6 +2905,56 @@ private:
         working_config_dirty_ = true;
     }
 
+    bool PublishWorkingConfigUpdate(const wchar_t* source)
+    {
+        const auto catalog = state_.SnapshotCatalog();
+        const auto runtime_status = state_.SnapshotStatus();
+        std::wstring validation_issue;
+        if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
+            !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue) ||
+            !TryValidateKeychainProfilesForApply(working_config_, catalog, validation_issue) ||
+            !TryValidateMapRemapForApply(working_config_, validation_issue))
+        {
+            Logger::Warn(L"UI rejected staged config update: " + validation_issue);
+            return false;
+        }
+
+        const bool external_update = external_runtime_process_id_ != 0;
+        const bool update_published = !external_update ||
+            nskinzcs2::ui::PublishExternalConfigUpdate(
+                external_runtime_process_id_,
+                config_path_,
+                working_config_);
+        if (!update_published)
+        {
+            Logger::Warn(
+                L"UI could not publish the staged config to the injected runtime; "
+                L"the editor remains dirty.");
+            return false;
+        }
+
+        if (!external_update)
+        {
+            Logger::Warn(L"Unexpected in-process UI update path used.");
+        }
+        state_.ReplaceConfig(working_config_);
+        if (!external_update &&
+            ShouldUseLightweightDemoKeychainRefresh(runtime_status, working_config_))
+        {
+            state_.RequestDemoKeychainRefresh();
+        }
+        else if (!external_update)
+        {
+            state_.RequestManualRefresh();
+        }
+        working_config_dirty_ = false;
+        Logger::Info(
+            std::wstring(external_update ? L"External UI" : L"UI") +
+            L" saved and published staged config via " +
+            (source != nullptr ? source : L"Update") + L".");
+        return true;
+    }
+
     static void CopyToBuffer(const std::string& value, char* buffer, const std::size_t buffer_size)
     {
         if (buffer_size == 0)
@@ -2855,6 +3064,10 @@ private:
     int selected_workshop_map_ = -1;
     int selected_weapon_sticker_ = 0;
     WorkshopMapScanResult workshop_scan_;
+    std::filesystem::path demo_skin_source_path_;
+    std::filesystem::path demo_skin_last_observed_path_;
+    std::future<nskinzcs2::runtime::DemoSkinRewriteResult> demo_skin_rewrite_future_;
+    nskinzcs2::runtime::DemoSkinRewriteResult demo_skin_rewrite_result_;
     bool last_insert_state_ = false;
     bool imgui_initialized_ = false;
     bool resources_created_ = false;

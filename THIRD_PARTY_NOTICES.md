@@ -53,3 +53,20 @@ SOFTWARE.
 ## MinHook and Hacker Disassembler Engine
 
 MinHook and its bundled Hacker Disassembler Engine files retain their BSD-style terms and copyright notices in [`third_party/MinHook/LICENSE.txt`](third_party/MinHook/LICENSE.txt). That complete file is also included with the binary release package as `MINHOOK-LICENSE.txt`.
+
+## source2-demo
+
+The independent `Temporary Demo` implementation vendors and modifies
+[`source2-demo`](https://github.com/Rupas1k/source2-demo) version 0.5.8. It is
+used to parse Source 2 entity ownership, materialize knife/glove fields, update
+`AnimAssetData`, and write the new `.dem` file. nSkinzCS2 does not call an
+external skin client or service at runtime.
+
+Upstream is dual-licensed under MIT or Apache License 2.0. The complete
+upstream terms are preserved in:
+
+- [`third_party/source2-demo/LICENSE-MIT`](third_party/source2-demo/LICENSE-MIT)
+- [`third_party/source2-demo/LICENSE-APACHE`](third_party/source2-demo/LICENSE-APACHE)
+
+The vendored source, including nSkinz's field-materialization and string-table
+insertion changes, is distributed in [`third_party/source2-demo`](third_party/source2-demo).

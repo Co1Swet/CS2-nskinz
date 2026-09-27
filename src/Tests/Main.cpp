@@ -31,6 +31,7 @@
 void RunKnifeModelTests();
 void RunKnifeGraphTests();
 void RunKnifePairTests();
+void RunDemoSkinRewriteTests();
 
 namespace
 {
@@ -38,6 +39,33 @@ std::filesystem::path g_compatibility_cs2_root;
 bool g_mesh_benchmark_only = false;
 bool g_knife_model_only = false;
 bool g_weapon_paint_only = false;
+
+void WriteRadarPreviewIfRequested(
+    const std::string_view name,
+    const nskinzcs2::runtime::RadarAlphaOverlay& overlay)
+{
+    const auto* preview_directory = std::getenv("NSKINZ_RADAR_PREVIEW_DIR");
+    if (preview_directory == nullptr || *preview_directory == '\0' || overlay.png_bytes.empty())
+    {
+        return;
+    }
+    std::error_code error;
+    const auto root = std::filesystem::path(preview_directory);
+    std::filesystem::create_directories(root, error);
+    if (error)
+    {
+        return;
+    }
+    std::string safe_name(name);
+    std::replace_if(safe_name.begin(), safe_name.end(), [](const unsigned char character)
+    {
+        return std::isalnum(character) == 0 && character != '-' && character != '_';
+    }, '_');
+    std::ofstream output(root / (safe_name + ".png"), std::ios::binary | std::ios::trunc);
+    output.write(
+        reinterpret_cast<const char*>(overlay.png_bytes.data()),
+        static_cast<std::streamsize>(overlay.png_bytes.size()));
+}
 
 template <typename Fn>
 void RunNamedTest(const char* name, Fn&& fn)
@@ -144,20 +172,20 @@ void TestCatalogStoreRoundTrip()
 void TestCompatibilityManifest()
 {
     using namespace nskinzcs2::compatibility;
-    Expect(kFrameStageNotifyVtableIndex == 36, "HLAE 2.192.2 FrameStageNotify slot should remain explicit");
-    Expect(kFrameStartStage == 0, "HLAE 2.192.2 FRAME_START value should remain explicit");
-    Expect(kFrameRenderPassStage == 12, "HLAE 2.192.2 FRAME_RENDER_PASS value should remain explicit");
-    Expect(kEngineIsPlayingDemoVtableIndex == 42, "HLAE 2.192.2 IsPlayingDemo slot should remain explicit");
-    Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.192.2 GetDemoFilePath slot should remain explicit");
-    Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.192.2 GetLevelNameShort slot should remain explicit");
-    Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.192.2 GetDemoFile slot should remain explicit");
-    Expect(kEngineExecuteClientCmdVtableIndex == 51, "HLAE 2.192.2 ExecuteClientCmd slot should remain explicit");
-    Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.192.2 demo tick slot should remain explicit");
-    Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.192.2 IDemoFile IsPlayingDemo slot should remain explicit");
-    Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.192.2 IDemoFile IsDemoPaused slot should remain explicit");
+    Expect(kFrameStageNotifyVtableIndex == 36, "HLAE 2.192.5 FrameStageNotify slot should remain explicit");
+    Expect(kFrameStartStage == 0, "HLAE 2.192.5 FRAME_START value should remain explicit");
+    Expect(kFrameRenderPassStage == 12, "HLAE 2.192.5 FRAME_RENDER_PASS value should remain explicit");
+    Expect(kEngineIsPlayingDemoVtableIndex == 42, "HLAE 2.192.5 IsPlayingDemo slot should remain explicit");
+    Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.192.5 GetDemoFilePath slot should remain explicit");
+    Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.192.5 GetLevelNameShort slot should remain explicit");
+    Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.192.5 GetDemoFile slot should remain explicit");
+    Expect(kEngineExecuteClientCmdVtableIndex == 51, "HLAE 2.192.5 ExecuteClientCmd slot should remain explicit");
+    Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.192.5 demo tick slot should remain explicit");
+    Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.192.5 IDemoFile IsPlayingDemo slot should remain explicit");
+    Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.192.5 IDemoFile IsDemoPaused slot should remain explicit");
     Expect(
         IsHlae21911InterfaceCombination("Source2Client002", "ResourceSystem013", "VFileSystem017"),
-        "verified HLAE 2.192.2 interfaces should be accepted");
+        "verified HLAE 2.192.5 interfaces should be accepted");
     Expect(
         !IsHlae21911InterfaceCombination("Source2Client001", "ResourceSystem013", "VFileSystem017"),
         "an unverified Source2Client interface should be rejected");
@@ -866,6 +894,9 @@ void TestConfigRoundTrip()
     document.keychain_profiles.push_back(keychain_profile);
     document.map_remap.enabled = true;
     document.map_remap.use_source_radar = false;
+    document.map_remap.radar_black_tolerance = 37;
+    document.map_remap.radar_dark_detail_radius = 9;
+    document.map_remap.radar_background_alpha_percent = 12;
     document.map_remap.source_map_name = "de_mirage";
     document.map_remap.workshop_id = "3415616810";
     document.map_remap.workshop_title = "Rainy Mirage";
@@ -893,6 +924,15 @@ void TestConfigRoundTrip()
     Expect(loaded.keychain_profiles[0].explicit_clear, "keychain clear intent should round-trip");
     Expect(loaded.map_remap.enabled, "map remap enable intent should round-trip");
     Expect(!loaded.map_remap.use_source_radar, "map remap radar source intent should round-trip");
+    Expect(
+        loaded.map_remap.radar_black_tolerance == 37,
+        "map remap radar black tolerance should round-trip");
+    Expect(
+        loaded.map_remap.radar_dark_detail_radius == 6,
+        "legacy oversized radar dark-detail radius should clamp to the safe maximum");
+    Expect(
+        loaded.map_remap.radar_background_alpha_percent == 12,
+        "map remap radar background opacity should round-trip");
     Expect(loaded.map_remap.source_map_name == "de_mirage", "map remap source should round-trip");
     Expect(loaded.map_remap.workshop_id == "3415616810", "map remap workshop id should round-trip");
     Expect(loaded.map_remap.addon_name == "mirage_rain", "map remap addon name should round-trip");
@@ -923,6 +963,11 @@ void TestWorkshopMapDiscovery()
     Expect(
         nskinzcs2::model::MapRemapProfile {}.use_source_radar,
         "map remap should default to the original demo radar");
+    Expect(
+        nskinzcs2::model::MapRemapProfile {}.radar_black_tolerance == 24 &&
+            nskinzcs2::model::MapRemapProfile {}.radar_dark_detail_radius == 4 &&
+            nskinzcs2::model::MapRemapProfile {}.radar_background_alpha_percent == 0,
+        "map remap should default to the balanced transparent radar mask");
     using nskinzcs2::runtime::IsLikelyAuxiliaryWorkshopMap;
     using nskinzcs2::runtime::IsWorkshopVpkIndexFile;
     Expect(IsWorkshopVpkIndexFile(L"3114174859.vpk"), "self-contained workshop VPK should be scanned");
@@ -937,9 +982,95 @@ void TestWorkshopMapDiscovery()
 
     using nskinzcs2::runtime::ShouldSuppressSourceMapModelPath;
     using nskinzcs2::runtime::BuildSourceSkyboxResourceRedirect;
+    using nskinzcs2::runtime::BuildSourceMapRuntimeDataRedirect;
     constexpr std::string_view nuke_skybox =
         "maps/prefabs/de_nuke/de_nuke_skybox02_d";
     std::array<char, 512> skybox_redirect {};
+    std::array<char, 512> runtime_data_redirect {};
+    Expect(
+        BuildSourceMapRuntimeDataRedirect(
+            "maps/de_nuke/entities/default_ents.vents_c",
+            "de_nuke",
+            "de_nuke_rainy",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()) &&
+            std::string_view(runtime_data_redirect.data()) ==
+                "maps/de_nuke_rainy/entities/default_ents.vents_c",
+        "stale demo entity lumps must redirect to the target map so its light-probe volumes are instantiated");
+    Expect(
+        !BuildSourceMapRuntimeDataRedirect(
+            "MAPS\\DE_NUKE\\LIGHTMAPS\\env_light_probe_volume_atlas.vtex_c",
+            "maps/de_nuke.vmap",
+            "de_nuke_rainy",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()),
+        "Rainy Nuke must retain stock Nuke's compatible source probe atlas for dynamic models");
+    Expect(
+        BuildSourceMapRuntimeDataRedirect(
+            "maps/de_nuke_rainy/lightmaps/env_light_probe_volume_atlas.vtex_c",
+            "de_nuke",
+            "de_nuke_rainy",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()) &&
+            std::string_view(runtime_data_redirect.data()) ==
+                "maps/de_nuke/lightmaps/env_light_probe_volume_atlas.vtex_c",
+        "Rainy Nuke target probe samples must use the verified compatible stock Nuke atlas");
+    Expect(
+        BuildSourceMapRuntimeDataRedirect(
+            "maps/de_mirage/lightmaps/env_light_probe_volume_atlas.vtex_c",
+            "de_mirage",
+            "nirage",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()) &&
+            std::string_view(runtime_data_redirect.data()) ==
+                "maps/nirage/lightmaps/env_light_probe_volume_atlas.vtex_c",
+        "unverified map pairs must continue using their target probe atlas");
+    Expect(
+        BuildSourceMapRuntimeDataRedirect(
+            "maps/de_nuke/lightmaps/env_light_probe_volume_1372856349_octree.dat",
+            "de_nuke",
+            "de_nuke_rainy",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()) &&
+            std::string_view(runtime_data_redirect.data()) ==
+                "maps/de_nuke_rainy/lightmaps/env_light_probe_volume_303904010_octree.dat",
+        "Rainy Nuke's first source light-probe octree must map to its verified target handshake");
+    Expect(
+        BuildSourceMapRuntimeDataRedirect(
+            "maps/de_nuke/lightmaps/env_light_probe_volume_1372856443_octree.dat",
+            "de_nuke",
+            "de_nuke_rainy",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()) &&
+            std::string_view(runtime_data_redirect.data()) ==
+                "maps/de_nuke_rainy/lightmaps/env_light_probe_volume_303903916_octree.dat",
+        "Rainy Nuke's last source light-probe octree must map to its verified target handshake");
+    Expect(
+        !BuildSourceMapRuntimeDataRedirect(
+            "maps/de_mirage/lightmaps/env_light_probe_volume_123_octree.dat",
+            "de_mirage",
+            "nirage",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()),
+        "unverified numeric probe handshakes must never be redirected to a guessed target file");
+    Expect(
+        BuildSourceMapRuntimeDataRedirect(
+            "maps/de_nuke/cubemaps/env_cubemap_array.vtex_c",
+            "de_nuke",
+            "de_nuke_rainy",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()) &&
+            std::string_view(runtime_data_redirect.data()) ==
+                "maps/de_nuke_rainy/cubemaps/env_cubemap_array.vtex_c",
+        "source cubemap arrays must redirect with the target light-probe volume");
+    Expect(
+        !BuildSourceMapRuntimeDataRedirect(
+            "maps/de_nuke/entities/unnamed_2516.vmdl_c",
+            "de_nuke",
+            "de_nuke_rainy",
+            runtime_data_redirect.data(),
+            runtime_data_redirect.size()),
+        "map-generated models must stay on the separately guarded suppression path");
     Expect(
         BuildSourceSkyboxResourceRedirect(
             "maps/prefabs/de_mirage/3dskybox_mirage_legacy.vmap",
@@ -1105,6 +1236,43 @@ void TestWorkshopMapDiscovery()
         Expect(
             overlay.softened_edge_pixels >= 50,
             "nirage overlay should recover the near-black boundary as translucent coloured pixels instead of deleting it");
+        WriteRadarPreviewIfRequested("nirage-default", overlay);
+
+        nskinzcs2::runtime::RadarAlphaMaskSettings no_dark_bridge;
+        no_dark_bridge.dark_detail_radius = 0;
+        nskinzcs2::runtime::RadarAlphaOverlay no_dark_bridge_overlay;
+        auto adjustable_outcome = nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+            nirage->virtual_path,
+            nirage->bytes,
+            no_dark_bridge_overlay,
+            diagnostic,
+            no_dark_bridge);
+        Expect(
+            adjustable_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+            "nirage radar should support disabling dark-road recovery");
+        Expect(
+            overlay.visible_pixels >= no_dark_bridge_overlay.visible_pixels,
+            "dark-road recovery must never reduce retained map coverage");
+
+        nskinzcs2::runtime::RadarAlphaMaskSettings translucent_background;
+        translucent_background.background_alpha_percent = 25;
+        nskinzcs2::runtime::RadarAlphaOverlay translucent_background_overlay;
+        adjustable_outcome = nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+            nirage->virtual_path,
+            nirage->bytes,
+            translucent_background_overlay,
+            diagnostic,
+            translucent_background);
+        Expect(
+            adjustable_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+            "nirage radar should support a manually adjustable background opacity");
+        Expect(
+            translucent_background_overlay.visible_pixels == overlay.visible_pixels,
+            "background opacity must not change the classified map-road mask");
+        Expect(
+            translucent_background_overlay.transparent_pixels < overlay.transparent_pixels,
+            "raising background opacity should reduce fully transparent pixels without deleting roads");
+        WriteRadarPreviewIfRequested("nirage-background-25", translucent_background_overlay);
 
         const auto nirage_entry = std::find_if(result.entries.begin(), result.entries.end(), [](const auto& entry)
         {
@@ -1159,6 +1327,7 @@ void TestWorkshopMapDiscovery()
                   << " visible=" << overlay.visible_pixels
                   << " transparent=" << overlay.transparent_pixels
                   << " soft_edge=" << overlay.softened_edge_pixels
+                  << " recovered_dark_detail=" << overlay.recovered_detail_pixels
                   << " native_vtex=" << overlay.vtex_bytes.size() << '\n';
     }
     else
@@ -1166,11 +1335,12 @@ void TestWorkshopMapDiscovery()
         std::cout << "generic_radar_overlay=SKIPPED (nirage Workshop item not installed)\n";
     }
 
-    constexpr std::array<std::string_view, 4> additional_radar_maps {
+    constexpr std::array<std::string_view, 5> additional_radar_maps {
         "de_all_in_one",
         "de_mirage_water",
         "de_dust2_water",
         "de_inferno_water",
+        "de_nuke_rainy",
     };
     for (const auto map_name : additional_radar_maps)
     {
@@ -1204,9 +1374,63 @@ void TestWorkshopMapDiscovery()
             map_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated ||
                 map_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::NotNeeded,
             "each installed audited workshop map radar should be generated or already transparent");
+        WriteRadarPreviewIfRequested(std::string(map_name) + "-default", map_overlay);
+        if (map_name == "de_nuke_rainy")
+        {
+            nskinzcs2::runtime::RadarAlphaMaskSettings oversized_recovery;
+            oversized_recovery.black_tolerance = 24;
+            oversized_recovery.dark_detail_radius = 16;
+            oversized_recovery.background_alpha_percent = 0;
+            nskinzcs2::runtime::RadarAlphaOverlay oversized_recovery_overlay;
+            const auto oversized_recovery_outcome =
+                nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+                    radar->virtual_path,
+                    radar->bytes,
+                    oversized_recovery_overlay,
+                    radar_diagnostic,
+                    oversized_recovery);
+            Expect(
+                oversized_recovery_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+                "Rainy Nuke radar should support a legacy oversized recovery setting safely");
+            Expect(
+                oversized_recovery_overlay.recovered_detail_pixels <=
+                    map_overlay.recovered_detail_pixels + 1500,
+                "an oversized recovery setting must not bridge long black grid lines back into the map");
+            WriteRadarPreviewIfRequested(
+                "de_nuke_rainy-oversized-recovery",
+                oversized_recovery_overlay);
+
+            nskinzcs2::runtime::RadarAlphaMaskSettings maximum_tolerance;
+            maximum_tolerance.black_tolerance = 96;
+            maximum_tolerance.dark_detail_radius = 4;
+            maximum_tolerance.background_alpha_percent = 0;
+            nskinzcs2::runtime::RadarAlphaOverlay maximum_tolerance_overlay;
+            const auto maximum_tolerance_outcome =
+                nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+                    radar->virtual_path,
+                    radar->bytes,
+                    maximum_tolerance_overlay,
+                    radar_diagnostic,
+                    maximum_tolerance);
+            Expect(
+                maximum_tolerance_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+                "Rainy Nuke radar should remain usable at maximum black-grid tolerance");
+            Expect(
+                maximum_tolerance_overlay.visible_pixels >= 40000,
+                "maximum Rainy Nuke tolerance must retain a usable map-road mask");
+            WriteRadarPreviewIfRequested("de_nuke_rainy-max", maximum_tolerance_overlay);
+            std::wcout << L"generic_radar_map=de_nuke_rainy-max"
+                       << L" visible=" << maximum_tolerance_overlay.visible_pixels
+                       << L" transparent=" << maximum_tolerance_overlay.transparent_pixels
+                       << L" recovered_dark_detail=" << maximum_tolerance_overlay.recovered_detail_pixels
+                       << L" diagnostic=" << radar_diagnostic << L'\n';
+        }
         std::wcout << L"generic_radar_map=" << std::wstring(map_name.begin(), map_name.end())
                    << L" source=" << std::wstring(radar->virtual_path.begin(), radar->virtual_path.end())
                    << L" outcome=" << static_cast<int>(map_outcome)
+                   << L" visible=" << map_overlay.visible_pixels
+                   << L" transparent=" << map_overlay.transparent_pixels
+                   << L" recovered_dark_detail=" << map_overlay.recovered_detail_pixels
                    << L" diagnostic=" << radar_diagnostic << L'\n';
     }
 }
@@ -2756,6 +2980,7 @@ void TestWearableFactoryConfirmation()
 void TestKnifeAppearanceModule()
 {
     using nskinzcs2::runtime::BuildKnifeAppearanceRequest;
+    using nskinzcs2::runtime::BuildSyntheticKnifeEconItemHigh;
     using nskinzcs2::runtime::BuildKnifeFinishRequest;
     using nskinzcs2::runtime::BuildKnifeProfileApplySignature;
     using nskinzcs2::runtime::EvaluateKnifeApplyGate;
@@ -2768,6 +2993,25 @@ void TestKnifeAppearanceModule()
     using nskinzcs2::runtime::KnifeRenderVerificationReason;
     using nskinzcs2::runtime::ResolveKnifeAppearancePipelineRoute;
     using nskinzcs2::runtime::ResolveKnifeSlotMode;
+    using nskinzcs2::runtime::ResolveKnifeEconItemHigh;
+    using nskinzcs2::runtime::IsKnifeEconItemHighCompatible;
+
+    Expect(
+        BuildSyntheticKnifeEconItemHigh(507) == 0xC52101FBu,
+        "default karambit materialisation should encode definition 507 in the synthetic high word");
+    Expect(
+        ResolveKnifeEconItemHigh(0x0000000Cu, 515) == 0x0000000Cu,
+        "real knife inventory identities must survive a model replacement");
+    Expect(
+        ResolveKnifeEconItemHigh(0xFFFFFFFFu, 515) == 0xC5210203u,
+        "invalid default knife identities should materialise for the target definition");
+    Expect(
+        IsKnifeEconItemHighCompatible(0xC5210203u, 515) &&
+            !IsKnifeEconItemHighCompatible(0xC52101FBu, 515),
+        "synthetic knife identity verification must reject a different target definition");
+    Expect(
+        IsKnifeEconItemHighCompatible(0x0000000Cu, 515),
+        "real inventory high words should remain compatible with the replacement model");
     using nskinzcs2::runtime::ShouldApplyKnifeModelDefinitionOverride;
     using nskinzcs2::runtime::KnifeSlotMode;
 
@@ -4082,6 +4326,7 @@ void TestKnifeCarrierDiscoveryReadOnlyDiscovery()
 void TestGloveAppearanceModule()
 {
     using nskinzcs2::runtime::BuildGloveAppearanceRequest;
+    using nskinzcs2::runtime::BuildSyntheticGloveEconItemIdentity;
     using nskinzcs2::runtime::GloveCarrierKind;
     using nskinzcs2::runtime::EvaluateGloveCompatibility;
     using nskinzcs2::runtime::EvaluateGloveRenderVerification;
@@ -4095,6 +4340,27 @@ void TestGloveAppearanceModule()
     using nskinzcs2::runtime::ResolveDefaultGloveDefinitionForTeam;
     using nskinzcs2::runtime::ResolveGloveSlotMode;
     using nskinzcs2::runtime::SelectReusableWearableHandleSlot;
+
+    {
+        constexpr std::uint64_t xuid = 76561199674674473ull;
+        const auto specialist = BuildSyntheticGloveEconItemIdentity(xuid, 5034);
+        const auto specialist_again = BuildSyntheticGloveEconItemIdentity(xuid, 5034);
+        const auto sport = BuildSyntheticGloveEconItemIdentity(xuid, 5030);
+        const auto other_player = BuildSyntheticGloveEconItemIdentity(xuid + 1, 5034);
+        Expect(specialist.IsValid(), "synthetic glove identities must avoid invalid econ sentinels");
+        Expect(
+            specialist.high == (0xC5210000u | 5034u),
+            "synthetic glove high word should encode the observable namespace and definition");
+        Expect(
+            specialist.high == specialist_again.high && specialist.low == specialist_again.low,
+            "synthetic glove identities must be stable for one player and definition");
+        Expect(
+            specialist.high != sport.high && specialist.low != sport.low,
+            "different glove definitions should not share a synthetic identity");
+        Expect(
+            specialist.low != other_player.low,
+            "different players should not share the synthetic glove low word");
+    }
 
     Expect(
         ResolveDefaultGloveDefinitionForTeam(2) == 5028,
@@ -5097,8 +5363,8 @@ void TestStandardWeaponStockInitialization()
     Expect(ProbeStandardWeaponStockFinishForTests(),
         "stock AWP BOOM: engine-owned attributes, native initialization, restore, stale identity and retry bounds");
     constexpr std::array<std::uint8_t, 42> calls {
-        0x83,0xBB,0xA8,0x0A,0,0,0,0x7F,9,0x83,0xBB,0xC0,0x0A,0,0,0,0x7E,0x18,
-        0x48,0x8D,0x8B,8,6,0,0,0xB2,1,0xE8,0xF0,0xAE,0xC3,0,0x33,0xD2,0x48,0x8B,0xCB,
+        0x83,0xBB,0xB0,0x0A,0,0,0,0x7F,9,0x83,0xBB,0xC8,0x0A,0,0,0,0x7E,0x18,
+        0x48,0x8D,0x8B,0x10,6,0,0,0xB2,1,0xE8,0xF0,0xAE,0xC3,0,0x33,0xD2,0x48,0x8B,0xCB,
         0xE8,0xD6,0xA6,0xFD,0xFF
     };
     WeaponMaterialCalls decoded;
@@ -5573,6 +5839,7 @@ int RunAllTests()
         RunNamedTest("TestProfileMatching", TestProfileMatching);
         RunNamedTest("TestKeychainConfigAndMatching", TestKeychainConfigAndMatching);
         RunNamedTest("TestGloveConfigAndMatching", TestGloveConfigAndMatching);
+        RunNamedTest("TestDemoSkinRewritePlan", RunDemoSkinRewriteTests);
         RunNamedTest("TestKnifeProfileConfigMigration", TestKnifeProfileConfigMigration);
         RunNamedTest("TestCatalogFallback", TestCatalogFallback);
         RunNamedTest("TestCatalogFromGameFiles", TestCatalogFromGameFiles);

@@ -7,6 +7,7 @@
 #include "Core/Log.hpp"
 #include "Runtime/GloveAppearance.hpp"
 #include "Runtime/GloveVisualRefresh.hpp"
+#include "Runtime/DemoSkinRewrite.hpp"
 #include "Runtime/KnifeAnimation.hpp"
 #include "Runtime/KnifeModel.hpp"
 #include "Runtime/KnifeGraph.hpp"
@@ -331,6 +332,8 @@ template <typename T>
 bool SafeReadValue(const void* address, T& out);
 bool SafeReadBytes(const void* address, void* destination, const std::size_t size);
 bool SafeReadCString(const char* address, std::string& out, const std::size_t max_length);
+void UpdateCurrentDemoFilePath(std::wstring path);
+std::wstring SnapshotCurrentDemoFilePath();
 bool IsReadablePointer(const void* pointer) noexcept;
 
 std::wstring FileNameFromPath(const std::wstring& full_path)
@@ -10313,6 +10316,9 @@ struct RuntimeEntityManager
     std::uint64_t pending_watched_xuid = 0;
     std::uint32_t pending_watched_xuid_confirmations = 0;
     std::wstring last_rebuild_reason;
+    std::string map_lighting_audit_target;
+    std::uint32_t map_lighting_audit_attempts = 0;
+    std::uint64_t map_lighting_audit_not_before_millis = 0;
     RuntimeFeatureAvailability client_entity_factory = RuntimeFeatureAvailability::Unknown;
     RuntimeFeatureAvailability knife_animation_hook = RuntimeFeatureAvailability::Unknown;
     WearableClientClassFactoryBinding wearable_client_factory;
@@ -12239,6 +12245,8 @@ struct HookState
     std::atomic_bool manual_refresh_requested {false};
     std::atomic_bool demo_playing {false};
     std::atomic_bool demo_paused {false};
+    std::atomic_bool demo_skin_rewrite_active {false};
+    std::atomic_bool demo_skin_rewrite_skip_logged {false};
     std::atomic_bool schema_ready {false};
     std::atomic_bool entity_system_ready {false};
     std::atomic_bool client_entity_factory_requested {false};
@@ -12411,6 +12419,7 @@ struct HookState
     std::mutex local_demo_command_mutex;
     std::string local_demo_command;
     std::wstring level_name;
+    std::wstring demo_file_path;
     std::wstring last_runtime_issue;
     std::wstring last_rebuild_reason;
     std::wstring last_knife_runtime_path;
@@ -13279,6 +13288,18 @@ void UpdateRuntimeText(std::wstring level_name, std::wstring issue)
     std::scoped_lock lock(g_hook_state.text_mutex);
     g_hook_state.level_name = std::move(level_name);
     g_hook_state.last_runtime_issue = std::move(issue);
+}
+
+void UpdateCurrentDemoFilePath(std::wstring path)
+{
+    std::scoped_lock lock(g_hook_state.text_mutex);
+    g_hook_state.demo_file_path = std::move(path);
+}
+
+std::wstring SnapshotCurrentDemoFilePath()
+{
+    std::scoped_lock lock(g_hook_state.text_mutex);
+    return g_hook_state.demo_file_path;
 }
 
 void UpdateKnifeRuntimeStatusText(std::wstring path, std::wstring reason)
@@ -14714,9 +14735,9 @@ bool CollectSchemaFieldsUnsafe(
                 type_fields[field.name] = static_cast<std::ptrdiff_t>(field.offset);
 
                 constexpr std::array<std::uint32_t, 12> kMaterialGeneratorOffsets {{
-                    0x608,
-                    0xAA8,
-                    0xAC0,
+                    0x610,
+                    0xAB0,
+                    0xAC8,
                     0x1180,
                     0x1848,
                     0x1860,
@@ -38357,9 +38378,9 @@ bool TryRebindExplicitVanillaKnifeDefaultMaterials(
     {
         *snapshot_out = {};
     }
-    // CCompositeMaterialOwner is the secondary base at entity+0x608 in the
+    // CCompositeMaterialOwner is the secondary base at entity+0x610 in the
     // current C_Knife layout. The native refresh helper exposes the owner's
-    // primary vector at entity+0xAA8; derive the base instead of pinning the
+    // primary vector at entity+0xAB0; derive the base instead of pinning the
     // entity offset, then validate both the adjacent vector layout and the
     // exact current C_Knife material-changed virtual before invoking it.
     constexpr std::uint16_t kOwnerToPrimaryMaterialVectorOffset = 0x4A0;
@@ -51000,7 +51021,7 @@ next_glove_scene_node:
 
 // Defined with the build-specific native glove component helpers below. Keep
 // the ordinary wearable resolver independent from the client-only entity table,
-// but feed the authoritative pawn+0x1518 output into HUD ownership matching.
+// but feed the authoritative pawn+0x15F8 output into HUD ownership matching.
 bool VerifyGloveVisualRefreshEvidence(const ModuleSpan& client);
 bool TryResolveGloveVisualOutputEntity(const ModuleSpan& client,
     std::uint32_t handle, void*& entity, std::uint32_t& identity_handle);
@@ -51040,8 +51061,8 @@ nskinzcs2::runtime::ResolvedGloveRenderBinding ResolveGloveRenderBinding(
         binding.has_world_render = true;
     }
 
-    // The viewmodel does not consume m_hMyWearables directly. Build 2000908
-    // resolves the native pawn glove component output at pawn+0x1518 through a
+    // The viewmodel does not consume m_hMyWearables directly. Build 2000918
+    // resolves the native pawn glove component output at pawn+0x15F8 through a
     // separate client-only identity table. A runtime CEconWearable can have a
     // perfect model/finish readback while remaining invisible unless this exact
     // output owns the HUD glove child.
@@ -51308,9 +51329,13 @@ bool DoesAppliedPawnGloveBaseFieldsMatchRequest(
         return false;
     }
 
+    const auto expected_item_identity =
+        nskinzcs2::runtime::BuildSyntheticGloveEconItemIdentity(
+            xuid,
+            expected_definition_index);
     std::uint32_t actual_item_id_high = 0;
     if (!SafeReadField(glove_item_view, offsets.item_view_item_id_high, actual_item_id_high) ||
-        actual_item_id_high != 0xFFFFFFFFu)
+        actual_item_id_high != expected_item_identity.high)
     {
         return false;
     }
@@ -51319,7 +51344,7 @@ bool DoesAppliedPawnGloveBaseFieldsMatchRequest(
     {
         std::uint32_t actual_item_id_low = 0;
         if (!SafeReadField(glove_item_view, offsets.item_view_item_id_low, actual_item_id_low) ||
-            actual_item_id_low != 0xFFFFFFFFu)
+            actual_item_id_low != expected_item_identity.low)
         {
             return false;
         }
@@ -51417,8 +51442,15 @@ bool ApplyGloveFinishToPawnEconGloves(
     }
 
     const auto quality = static_cast<std::uint8_t>(std::clamp(request.quality, 0, 255));
-    const auto item_id_high = static_cast<std::uint32_t>(0xFFFFFFFFu);
-    const auto item_id_low = static_cast<std::uint32_t>(0xFFFFFFFFu);
+    const auto item_identity =
+        nskinzcs2::runtime::BuildSyntheticGloveEconItemIdentity(xuid, final_definition_index);
+    if (!item_identity.IsValid())
+    {
+        if (failure_issue != nullptr) *failure_issue = L"synthetic glove item identity is invalid";
+        return false;
+    }
+    const auto item_id_high = item_identity.high;
+    const auto item_id_low = item_identity.low;
     const auto account_id = AccountIdFromXuid(xuid);
     const auto desired_attributes = BuildGloveFinishAttributes(request);
 
@@ -51560,6 +51592,14 @@ std::wstring BuildGloveFinishVerifyLine(
     std::uint32_t account_id = 0;
     SafeReadField(glove_item_view, offsets.item_view_account_id, account_id);
 
+    std::uint32_t item_id_high = 0;
+    std::uint32_t item_id_low = 0;
+    SafeReadField(glove_item_view, offsets.item_view_item_id_high, item_id_high);
+    if (offsets.item_view_item_id_low != 0)
+    {
+        SafeReadField(glove_item_view, offsets.item_view_item_id_low, item_id_low);
+    }
+
     std::uint8_t quality = 0;
     if (offsets.item_view_entity_quality != 0)
     {
@@ -51573,6 +51613,8 @@ std::wstring BuildGloveFinishVerifyLine(
         << L", attr_paint=" << ReadAttributeValueOrDefault(glove_item_view, offsets, kAttributePaintKit, -1.0f)
         << L", attr_seed=" << ReadAttributeValueOrDefault(glove_item_view, offsets, kAttributeSeed, -1.0f)
         << L", attr_wear=" << ReadAttributeValueOrDefault(glove_item_view, offsets, kAttributeWear, -1.0f)
+        << L", item_id=0x" << std::hex << std::uppercase << item_id_high
+        << L":" << item_id_low << std::dec
         << L", account_id=" << account_id
         << L", quality=" << static_cast<int>(quality)
         << L", need_reapply=" << (refresh_snapshot.need_reapply_resolved && refresh_snapshot.need_reapply ? 1 : 0)
@@ -51983,9 +52025,13 @@ bool DoesAppliedGloveCarrierMatchProfile(
         return false;
     }
 
+    const auto expected_item_identity =
+        nskinzcs2::runtime::BuildSyntheticGloveEconItemIdentity(
+            xuid,
+            expected_definition_index);
     std::uint32_t actual_item_id_high = 0;
     if (!SafeReadField(item_view, offsets.item_view_item_id_high, actual_item_id_high) ||
-        actual_item_id_high != 0xFFFFFFFFu)
+        actual_item_id_high != expected_item_identity.high)
     {
         return false;
     }
@@ -51994,7 +52040,7 @@ bool DoesAppliedGloveCarrierMatchProfile(
     {
         std::uint32_t actual_item_id_low = 0;
         if (!SafeReadField(item_view, offsets.item_view_item_id_low, actual_item_id_low) ||
-            actual_item_id_low != 0xFFFFFFFFu)
+            actual_item_id_low != expected_item_identity.low)
         {
             return false;
         }
@@ -52155,8 +52201,14 @@ bool ApplyGloveProfileToWearable(
     const auto final_definition_index = static_cast<std::uint16_t>(
         ResolveRequestedGloveDefinitionIndex(request, current_definition_index));
     const auto quality = static_cast<std::uint8_t>(std::clamp(request.quality, 0, 255));
-    const auto item_id_high = static_cast<std::uint32_t>(0xFFFFFFFFu);
-    const auto item_id_low = static_cast<std::uint32_t>(0xFFFFFFFFu);
+    const auto item_identity =
+        nskinzcs2::runtime::BuildSyntheticGloveEconItemIdentity(xuid, final_definition_index);
+    if (!item_identity.IsValid())
+    {
+        return false;
+    }
+    const auto item_id_high = item_identity.high;
+    const auto item_id_low = item_identity.low;
     const auto account_id = AccountIdFromXuid(xuid);
     const auto xuid_parts = SplitXuid(xuid);
 
@@ -55368,8 +55420,15 @@ bool DoesAppliedEconItemMatchProfile(
     if (should_validate_extended_item_view)
     {
         std::uint32_t actual_item_id_high = 0;
-        if (!SafeReadField(item_view, offsets.item_view_item_id_high, actual_item_id_high) ||
-            actual_item_id_high != 0xFFFFFFFFu)
+        const auto item_id_high_read =
+            SafeReadField(item_view, offsets.item_view_item_id_high, actual_item_id_high);
+        const auto knife_identity_compatible =
+            IsKnifeProfile(profile) &&
+            nskinzcs2::runtime::IsKnifeEconItemHighCompatible(
+                actual_item_id_high,
+                expected_definition_index);
+        if (!item_id_high_read ||
+            (actual_item_id_high != 0xFFFFFFFFu && !knife_identity_compatible))
         {
             return false;
         }
@@ -55614,7 +55673,17 @@ bool ApplyProfileToEconItem(
     const auto final_definition_index = static_cast<std::uint16_t>(
         should_write_definition_override ? profile.override_item : current_definition_index);
     const auto quality = static_cast<std::uint8_t>(std::clamp(profile.quality, 0, 255));
-    const auto item_id_high = static_cast<std::uint32_t>(0xFFFFFFFFu);
+    std::uint32_t source_item_id_high = 0xFFFFFFFFu;
+    if (IsKnifeOverrideRequest(profile))
+    {
+        SafeReadField(item_view, offsets.item_view_item_id_high, source_item_id_high);
+    }
+    const auto item_id_high =
+        IsKnifeOverrideRequest(profile)
+            ? nskinzcs2::runtime::ResolveKnifeEconItemHigh(
+                  source_item_id_high,
+                  final_definition_index)
+            : static_cast<std::uint32_t>(0xFFFFFFFFu);
     const auto item_id_low =
         (IsStandardWeaponProfile(profile) ||
          (IsKnifeProfile(profile) && ProfileHasExplicitPaintIntent(profile)))
@@ -60119,8 +60188,8 @@ bool TryCaptureWeaponSkinRefreshInstructionWindow(
         issue = L"Weapon refresh helper patch window is outside client.dll.";
         return false;
     }
-    // Build 2000908's native helper gates its material cleanup on the two
-    // adjacent composite-material vector counts at entity+0xAA8/0xAC0:
+    // Build 2000918's native helper gates its material cleanup on the two
+    // adjacent composite-material vector counts at entity+0xAB0/0xAC8:
     //
     //   cmp dword ptr [rbx+primary], 0
     //   jg  cleanup
@@ -60418,7 +60487,21 @@ bool TryResolveEngineState(bool& demo_playing, bool& demo_paused, int& demo_tick
 
     if (!demo_playing)
     {
+        UpdateCurrentDemoFilePath({});
         return true;
+    }
+
+    const char* raw_demo_file_path = nullptr;
+    std::string safe_demo_file_path;
+    if (SafeInvokeMethod0(
+            g_hook_state.engine_to_client,
+            nskinzcs2::compatibility::kEngineGetDemoFilePathVtableIndex,
+            raw_demo_file_path) &&
+        raw_demo_file_path != nullptr &&
+        SafeReadCString(raw_demo_file_path, safe_demo_file_path, 32768) &&
+        !safe_demo_file_path.empty())
+    {
+        UpdateCurrentDemoFilePath(NarrowToWide(safe_demo_file_path));
     }
 
     void* demo_file = nullptr;
@@ -79117,7 +79200,7 @@ void* FindIndependentKnifeHudWeapon(
 bool VerifyKnifeGraphNativeLayout(const ClientSchemaOffsets& offsets)
 {
     using namespace nskinzcs2::runtime;
-    if (offsets.knife_graph_weapon_type != 0xE8 || offsets.knife_graph_instance != 0x448 ||
+    if (offsets.knife_graph_weapon_type != 0x120 || offsets.knife_graph_instance != 0x448 ||
         offsets.knife_secondary_slots != 0x20 || offsets.knife_secondary_skeletons != 0x38 ||
         offsets.knife_secondary_master_count != 0x50) { return false; }
     const auto client = GetModuleSpan(GetModuleHandleW(L"client.dll"));
@@ -79669,8 +79752,8 @@ bool VerifyGloveVisualRefreshEvidence(const ModuleSpan& client)
 }
 
 // The pawn glove component does not publish its visual through the networked
-// client entity system. Mirror the exact build-2000908 native lookup rooted at
-// client+0x21F7760. Client-only entries preserve the output generation while
+// client entity system. Mirror the exact build-2000918 native lookup rooted at
+// client+0x236A460. Client-only entries preserve the output generation while
 // storing the invalid-index sentinel in their identity handle.
 bool TryResolveGloveVisualOutputEntity(const ModuleSpan& client,
     const std::uint32_t handle, void*& entity, std::uint32_t& identity_handle)
@@ -79714,9 +79797,9 @@ bool TryResolvePawnGloveVisualRefreshContext(
     const auto& offsets = g_hook_state.schema_offsets;
     auto* entity_list = g_hook_state.runtime_entities.last_entity_list;
     if (!IsHlaeOfflineRenderPassAuthorized() || !entity_list || !player.pawn_entity ||
-        player.xuid != request.xuid || offsets.pawn_econ_gloves != 0x1690 ||
-        offsets.pawn_need_reapply_gloves != 0x168D ||
-        offsets.pawn_econ_gloves_changed != 0x1B00 || offsets.item_view_initialized != 0x1E8)
+        player.xuid != request.xuid || offsets.pawn_econ_gloves != 0x1770 ||
+        offsets.pawn_need_reapply_gloves != 0x176D ||
+        offsets.pawn_econ_gloves_changed != 0x1D20 || offsets.item_view_initialized != 0x1E8)
         return false;
 
     StandardWeaponEntityEpoch pawn;
@@ -79973,7 +80056,7 @@ bool DispatchPawnGloveVisualRefreshInsideHudConsumer(void* consumer)
     }
 
     // Run the validated stock updater immediately before the HUD function
-    // consumes Pawn+0x1518. Calling the trampoline avoids recursive detouring
+    // consumes Pawn+0x15F8. Calling the trampoline avoids recursive detouring
     // while preserving the rest of the stock HUD assembly function.
     original_native(static_cast<std::uint8_t*>(pawn) + kGloveVisualComponentOffset);
     ObservePawnGloveNativeHookResult(dispatch);
@@ -80163,7 +80246,7 @@ bool EnsurePawnGloveVisualRefreshHookInstalled()
 
     g_hook_state.pawn_glove_visual_refresh_hook_installed.store(true);
     nskinzcs2::Logger::Info(
-        L"Pawn glove native callback hook installed at client+0xC13450; demo state is patched inside the original HUD update chain.");
+        L"Pawn glove native callback hook installed at client+0xC659D0; demo state is patched inside the original HUD update chain.");
     return true;
 }
 
@@ -80220,7 +80303,7 @@ bool EnsurePawnGloveHudConsumerHookInstalled()
 
     g_hook_state.pawn_glove_hud_consumer_hook_installed.store(true);
     nskinzcs2::Logger::Info(
-        L"Pawn glove HUD consumer hook installed at client+0x1053530; native output will be created immediately before HUD ownership.");
+        L"Pawn glove HUD consumer hook installed at client+0x10CCD50; native output will be created immediately before HUD ownership.");
     return true;
 }
 
@@ -80338,7 +80421,7 @@ PawnGloveVisualRefreshStatus SnapshotPawnGloveVisualRefreshStatus(
     return PawnGloveVisualRefreshStatus::Idle;
 }
 
-// The current native pipeline owns its glove model at pawn+0x1518. Updating
+// The current native pipeline owns its glove model at pawn+0x15F8. Updating
 // m_EconGloves alone (especially an initially empty slot) is not visual proof.
 // The detour patches m_EconGloves only when CS2 itself enters the native glove
 // updater. Demo state has already been decoded at that point, and the original
@@ -80352,9 +80435,9 @@ bool PollPawnGloveVisualRefresh(const RuntimePlayerBinding& player, void* entity
     using namespace nskinzcs2::runtime;
     const auto& offsets = g_hook_state.schema_offsets;
     if (!IsHlaeOfflineRenderPassAuthorized() || !entity_list || !player.pawn_entity ||
-        player.xuid != request.xuid || offsets.pawn_econ_gloves != 0x1690 ||
-        offsets.pawn_need_reapply_gloves != 0x168D ||
-        offsets.pawn_econ_gloves_changed != 0x1B00 || offsets.item_view_initialized != 0x1E8)
+        player.xuid != request.xuid || offsets.pawn_econ_gloves != 0x1770 ||
+        offsets.pawn_need_reapply_gloves != 0x176D ||
+        offsets.pawn_econ_gloves_changed != 0x1D20 || offsets.item_view_initialized != 0x1E8)
         return false;
     GloveVisualRefreshKey key;
     void* resolved_pawn = nullptr;
@@ -80809,6 +80892,18 @@ IndependentKnifePrearmResult TryPrearmHolsteredIndependentKnife(
         lease.animation_context_armed = true;
     }
 
+    const auto expected_target_item_id_high =
+        nskinzcs2::runtime::ResolveKnifeEconItemHigh(
+            lease.snapshot.item_id_high,
+            request.model_definition);
+    const auto target_item_identity_matches = [&]()
+    {
+        std::uint32_t actual_item_id_high = 0;
+        return offsets.item_view_item_id_high != 0 &&
+            SafeReadField(item, offsets.item_view_item_id_high, actual_item_id_high) &&
+            actual_item_id_high == expected_target_item_id_high;
+    };
+
     if (knife_is_active)
     {
         // Definition, subclass/VData and model publication are committed by
@@ -80823,6 +80918,7 @@ IndependentKnifePrearmResult TryPrearmHolsteredIndependentKnife(
     if (current_definition == request.model_definition &&
         current_model_definition == request.model_definition &&
         live_subclass_token == expected_holstered_subclass_token &&
+        target_item_identity_matches() &&
         VerifyKnifeFinishRefreshAttributeValues(item, offsets, effective, nullptr))
     {
         // Steady holstered state is read-only. In particular, do not rescan
@@ -80861,6 +80957,12 @@ IndependentKnifePrearmResult TryPrearmHolsteredIndependentKnife(
             false,
             false,
             true);
+    const auto item_identity_synchronized = profile_applied &&
+        offsets.item_view_item_id_high != 0 &&
+        SafeWriteField(
+            item,
+            offsets.item_view_item_id_high,
+            expected_target_item_id_high);
 
     // Do not invoke OnSubclassIDChanged while another weapon is active. That
     // callback rebuilds the current HUD/arms graph; doing it while this knife is
@@ -80871,6 +80973,8 @@ IndependentKnifePrearmResult TryPrearmHolsteredIndependentKnife(
 
     int verified_definition = 0;
     const auto appearance_verified = subclass_synchronized &&
+        item_identity_synchronized &&
+        target_item_identity_matches() &&
         TryReadItemDefinitionIndex(item, offsets, verified_definition) &&
         verified_definition == request.model_definition &&
         VerifyKnifeFinishRefreshAttributeValues(item, offsets, effective, nullptr);
@@ -80920,6 +81024,7 @@ IndependentKnifePrearmResult TryPrearmHolsteredIndependentKnife(
             if (!definition_written) *failure_issue = L"target item definition write failed";
             else if (!finish_synchronized) *failure_issue = L"knife finish attribute construction/synchronization failed";
             else if (!profile_applied) *failure_issue = L"knife econ profile field writes failed";
+            else if (!item_identity_synchronized) *failure_issue = L"target knife econ identity write failed";
             else if (!appearance_verified) *failure_issue = L"knife definition/finish readback verification failed";
             else if (prearmed_model == nullptr) *failure_issue = L"knife model path became unreadable during holstered prearm";
             else *failure_issue = L"unknown prearm transaction failure";
@@ -80958,6 +81063,8 @@ IndependentKnifePrearmResult TryPrearmHolsteredIndependentKnife(
         << L", paint=" << effective.paint_kit
         << L", vanilla=" << (effective.explicit_vanilla_finish ? 1 : 0)
         << L", hud_definition_source=target_item_definition"
+        << L", item_id_high=0x" << std::hex << std::uppercase
+        << expected_target_item_id_high << std::dec << std::nouppercase
         << L", subclass_token=0x" << std::hex << std::uppercase
         << lease.target_subclass_token << std::dec << std::nouppercase
         << L", vdata=" << FormatPointer(live_vdata)
@@ -81331,15 +81438,25 @@ bool PrepareIndependentKnifeFinishAttributes(const nskinzcs2::runtime::KnifeNati
     auto* world = reinterpret_cast<void*>(context.binding.world.address);
     auto* item = ResolveWeaponItemView(world, offsets);
     int definition = 0;
-    if (!item || !TryReadItemDefinitionIndex(item, offsets, definition) || definition != context.target_definition ||
+    std::uint32_t source_item_id_high = 0xFFFFFFFFu;
+    if (!item ||
+        offsets.item_view_item_id_high == 0 ||
+        !SafeReadField(item, offsets.item_view_item_id_high, source_item_id_high) ||
+        !TryReadItemDefinitionIndex(item, offsets, definition) || definition != context.target_definition ||
         !SynchronizeIndependentKnifeFinishAttributes(world, item, offsets, profile) ||
         !ApplyProfileToEconItem(world, item, offsets, profile, context.binding.xuid, context.target_definition, false, false) ||
         !VerifyStandardWeaponAttributes(item, offsets, BuildWeaponRefreshAttributesImpl(profile))) return false;
     const auto cache_key = nskinzcs2::runtime::BuildStandardWeaponMaterialCacheKey(
         profile, context.binding.xuid, context.target_definition);
+    const auto item_id_high = nskinzcs2::runtime::ResolveKnifeEconItemHigh(
+        source_item_id_high,
+        context.target_definition);
     // The model transaction already owns the TARGET item definition. Finish
-    // setup changes only paint attributes and the target material-cache key.
+    // setup changes only paint attributes and the target material-cache key;
+    // reassert the real/synthetic identity that the generic finish path does
+    // not own.
     return offsets.item_view_item_id_low != 0 &&
+        SafeWriteField(item, offsets.item_view_item_id_high, item_id_high) &&
         SafeWriteField(item, offsets.item_view_item_id_low, cache_key) &&
         TryReadItemDefinitionIndex(item, offsets, definition) && definition == context.target_definition;
 }
@@ -81382,10 +81499,10 @@ IndependentKnifeFinishResult RefreshIndependentKnifeFinish(const nskinzcs2::runt
         g_hook_state.weapon_skin_refresh_ready.store(true);
     }
     const auto& binding = g_hook_state.weapon_skin_refresh;
-    if (binding.offset_patched || binding.standard_material_owner_offset != 0x608 ||
-        binding.original_offset != 0xAA8 || binding.original_companion_offset != 0xAC0 ||
-        reinterpret_cast<std::uintptr_t>(binding.standard_clear_materials) != context.client + 0x143F020 ||
-        reinterpret_cast<std::uintptr_t>(binding.standard_generate_materials) != context.client + 0x7DE490)
+    if (binding.offset_patched || binding.standard_material_owner_offset != 0x610 ||
+        binding.original_offset != 0xAB0 || binding.original_companion_offset != 0xAC8 ||
+        reinterpret_cast<std::uintptr_t>(binding.standard_clear_materials) != context.client + 0x14E3C60 ||
+        reinterpret_cast<std::uintptr_t>(binding.standard_generate_materials) != context.client + 0x803ED0)
         return fail(L"Native knife material clear/generate binding does not match the verified client.");
     auto* world = reinterpret_cast<void*>(context.binding.world.address);
     auto* hud = reinterpret_cast<void*>(context.binding.hud_weapon.address);
@@ -81470,7 +81587,7 @@ IndependentKnifeFinishResult RefreshIndependentKnifeFinish(const nskinzcs2::runt
     }
     if (hud_primary == 0)
     {
-        // Same function used by native HUD construction (client+104F339).
+        // Same function used by native HUD construction (client+10CDCB4).
         // It acquires engine references and notifies the HUD owner.
         if (!SafeInvokeVoidFunctionPointer(reinterpret_cast<void*>(context.client + kKnifeCopyMaterialsRva),
                 static_cast<std::uint8_t*>(world) + binding.standard_material_owner_offset,
@@ -81742,13 +81859,32 @@ IndependentKnifePrearmCallbackStage TryStageIndependentKnifePrearmHandoff(
         lease.force_target_subclass_refresh = false;
 
         int committed_definition = 0;
+        std::uint32_t committed_item_id_high = 0;
+        const auto expected_item_id_high =
+            nskinzcs2::runtime::ResolveKnifeEconItemHigh(
+                lease.snapshot.item_id_high,
+                lease.target_definition);
         if (!TryReadItemDefinitionIndex(lease.item_view, offsets, committed_definition) ||
-            committed_definition != lease.target_definition)
+            committed_definition != lease.target_definition ||
+            offsets.item_view_item_id_high == 0 ||
+            !SafeWriteField(
+                lease.item_view,
+                offsets.item_view_item_id_high,
+                expected_item_id_high) ||
+            !SafeReadField(
+                lease.item_view,
+                offsets.item_view_item_id_high,
+                committed_item_id_high) ||
+            committed_item_id_high != expected_item_id_high)
         {
             SafeWriteField(
                 lease.item_view,
                 offsets.item_view_definition_index,
                 static_cast<std::uint16_t>(lease.source_definition));
+            SafeWriteField(
+                lease.item_view,
+                offsets.item_view_item_id_high,
+                lease.snapshot.item_id_high);
             bool rollback_changed = false;
             void* rollback_vdata = nullptr;
             std::wstring rollback_issue;
@@ -81765,7 +81901,7 @@ IndependentKnifePrearmCallbackStage TryStageIndependentKnifePrearmHandoff(
                 rollback_issue);
             LogProfileDiagnosticOnce(
                 lease.appearance_signature ^ 0x4143544445465242ull,
-                L"Active knife BeforeWeapon transaction rolled back because the target definition readback failed.");
+                L"Active knife BeforeWeapon transaction rolled back because the target definition/econ identity readback failed.");
             return IndependentKnifePrearmCallbackStage::Rejected;
         }
 
@@ -81790,6 +81926,8 @@ IndependentKnifePrearmCallbackStage TryStageIndependentKnifePrearmHandoff(
                 << L", forced_subclass_refresh=" << (forced_subclass_refresh ? 1 : 0)
                 << L", target_token=0x" << std::hex << std::uppercase
                 << lease.target_subclass_token << std::dec << std::nouppercase
+                << L", item_id_high=0x" << std::hex << std::uppercase
+                << committed_item_id_high << std::dec << std::nouppercase
                 << L", target_vdata=" << FormatPointer(target_vdata)
                 << L", callback_stage=before_weapon"
                 << L", controller=" << FormatPointer(reinterpret_cast<void*>(event.controller))
@@ -82418,7 +82556,15 @@ void PollIndependentKnifeModel(
             << L", call1=" << timing.call1 << L", call2=" << timing.call2
             << L", game_thread=" << timing.same_thread << L", source_verified=" << timing.source_verified
             << L", rejected=" << timing.rejected << L", boundaries=" << timing.boundaries
-            << L", nested_updates=" << timing.nested_updates;
+            << L", nested_updates=" << timing.nested_updates
+            << L", unfiltered_boundaries=" << timing.unfiltered_boundaries
+            << L", unfiltered_weapon_updates=" << timing.unfiltered_weapon_updates
+            << L", last_unfiltered_arms="
+            << FormatPointer(reinterpret_cast<void*>(timing.last_unfiltered_arms))
+            << L", last_unfiltered_controller="
+            << FormatPointer(reinterpret_cast<void*>(timing.last_unfiltered_controller))
+            << L", last_unfiltered_world="
+            << FormatPointer(reinterpret_cast<void*>(timing.last_unfiltered_world));
         nskinzcs2::Logger::Info(log.str());
         g_hook_state.knife_update_last_timing = timing;
         g_hook_state.knife_update_next_log_millis = now + 5000;
@@ -82553,6 +82699,28 @@ void PollGameThreadStateModern()
     {
         config = g_hook_state.app_state->SnapshotConfig();
         config_revision = g_hook_state.app_state->ConfigRevision();
+    }
+
+    const auto generated_demo_skin =
+        nskinzcs2::runtime::IsGeneratedDemoSkinPath(SnapshotCurrentDemoFilePath());
+    g_hook_state.demo_skin_rewrite_active.store(generated_demo_skin, std::memory_order_release);
+    if (generated_demo_skin)
+    {
+        // The rewritten stream already contains one coherent definition,
+        // subclass/VData, model and animation transaction. Leave standard gun
+        // profiles on the existing runtime path, but never apply the late live
+        // knife/glove path on top of the complete serialized state.
+        for (auto& profile : config.knife_profiles) profile.enabled = false;
+        for (auto& profile : config.glove_profiles) profile.enabled = false;
+        if (!g_hook_state.demo_skin_rewrite_skip_logged.exchange(true))
+        {
+            nskinzcs2::Logger::Info(
+                L"Generated temporary skin demo detected; live knife/glove mutation is disabled for this playback while standard weapon skins remain enabled.");
+        }
+    }
+    else
+    {
+        g_hook_state.demo_skin_rewrite_skip_logged.store(false);
     }
 
     // A panel Update may take an early material-reset/paused path below. Keep
@@ -83045,6 +83213,96 @@ void PollGameThreadStateModern()
     UpdateKnifeRuntimeStatusText({}, {});
 
     trace.Step(L"Entity cache populated during the single-pass live-ceiling scan.");
+
+    const auto map_lighting_status = nskinzcs2::runtime::SnapshotMapRemapStatus();
+    if (map_lighting_status.target_map_name != runtime_entities.map_lighting_audit_target)
+    {
+        runtime_entities.map_lighting_audit_target = map_lighting_status.target_map_name;
+        runtime_entities.map_lighting_audit_attempts = 0;
+        runtime_entities.map_lighting_audit_not_before_millis = 0;
+    }
+    const auto lighting_audit_now = GetTickCount64();
+    if (map_lighting_status.enabled &&
+        map_lighting_status.replacement_count > 0 &&
+        !map_lighting_status.target_map_name.empty() &&
+        runtime_entities.map_lighting_audit_attempts < 4 &&
+        lighting_audit_now >= runtime_entities.map_lighting_audit_not_before_millis)
+    {
+        int combined_probe_volumes = 0;
+        int light_probe_volumes = 0;
+        int lighting_like_entities = 0;
+        int cubemap_entities = 0;
+        std::vector<std::wstring> lighting_samples;
+        lighting_samples.reserve(8);
+        for (auto* entity : entity_cache)
+        {
+            if (entity == nullptr)
+            {
+                continue;
+            }
+            const auto class_name = DescribeObservedPawnClassName(entity);
+            if (class_name.empty())
+            {
+                continue;
+            }
+            const bool combined_probe =
+                class_name.find(L"EnvCombinedLightProbeVolume") != std::wstring::npos;
+            const bool light_probe =
+                !combined_probe && class_name.find(L"EnvLightProbeVolume") != std::wstring::npos;
+            const bool cubemap = class_name.find(L"Cubemap") != std::wstring::npos;
+            const bool lighting_like =
+                combined_probe || light_probe || cubemap ||
+                class_name.find(L"Light") != std::wstring::npos ||
+                class_name.find(L"PostProcess") != std::wstring::npos ||
+                class_name.find(L"Tonemap") != std::wstring::npos;
+            combined_probe_volumes += combined_probe ? 1 : 0;
+            light_probe_volumes += light_probe ? 1 : 0;
+            cubemap_entities += cubemap ? 1 : 0;
+            lighting_like_entities += lighting_like ? 1 : 0;
+            if (lighting_like && lighting_samples.size() < 8 &&
+                std::find(lighting_samples.begin(), lighting_samples.end(), class_name) ==
+                    lighting_samples.end())
+            {
+                lighting_samples.push_back(class_name);
+            }
+        }
+
+        ++runtime_entities.map_lighting_audit_attempts;
+        runtime_entities.map_lighting_audit_not_before_millis = lighting_audit_now + 1500;
+        std::wstringstream lighting_audit;
+        lighting_audit << L"[MapRemap/LightingAudit] target="
+            << NarrowToWide(map_lighting_status.target_map_name)
+            << L", attempt=" << runtime_entities.map_lighting_audit_attempts
+            << L", env_combined_probe_volumes=" << combined_probe_volumes
+            << L", env_light_probe_volumes=" << light_probe_volumes
+            << L", lighting_like_entities=" << lighting_like_entities
+            << L", cubemap_entities=" << cubemap_entities
+            << L", samples=";
+        if (lighting_samples.empty())
+        {
+            lighting_audit << L"<none>";
+        }
+        else
+        {
+            for (std::size_t index = 0; index < lighting_samples.size(); ++index)
+            {
+                if (index != 0)
+                {
+                    lighting_audit << L'|';
+                }
+                lighting_audit << lighting_samples[index];
+            }
+        }
+        if (combined_probe_volumes == 0 && light_probe_volumes == 0)
+        {
+            nskinzcs2::Logger::Warn(lighting_audit.str());
+        }
+        else
+        {
+            nskinzcs2::Logger::Info(lighting_audit.str());
+            runtime_entities.map_lighting_audit_attempts = 4;
+        }
+    }
 
     for (int entity_index = 0; entity_index <= highest_live_entity_index; ++entity_index)
     {
@@ -85294,7 +85552,7 @@ void PollGameThreadStateModern()
 
             // Use the Pawn-owned m_EconGloves item view for the default demo
             // hands as well as an existing glove. For model-and-finish this is
-            // only the input carrier: the native pawn+0x1518 component must
+            // only the input carrier: the native pawn+0x15F8 component must
             // rebuild and its world/HUD output is verified below.
             void* direct_pawn_glove_item_view =
                 ResolveGloveItemView(player_binding.pawn_entity, g_hook_state.schema_offsets);
@@ -88609,7 +88867,7 @@ void __fastcall StockProbeGenerate(void* entity, bool)
     const auto& offsets = g_hook_state.schema_offsets;
     auto* item = static_cast<std::uint8_t*>(entity) + offsets.econ_entity_attribute_manager + offsets.attribute_container_item;
     if (g_stock_probe_generate_material && TryReadAttributeValue(item, offsets, kAttributePaintKit, paint) && paint > 0)
-        SafeWriteField(entity, 0xAA8, 1);
+        SafeWriteField(entity, 0xAB0, 1);
 }
 }
 
@@ -88673,8 +88931,8 @@ bool nskinzcs2::runtime::ProbeStandardWeaponStockFinishForTests()
         g_stock_probe_generate_material = true;
         SafeWriteField(item, 0x48, NetworkVectorView {});
         SafeWriteField(item, 0x70, NetworkVectorView {});
-        SafeWriteField(entity.data(), 0xAA8, 0);
-        SafeWriteField(entity.data(), 0xAC0, 0);
+        SafeWriteField(entity.data(), 0xAB0, 0);
+        SafeWriteField(entity.data(), 0xAC8, 0);
         g_hook_state.standard_weapon_appearance_epochs.clear();
         return TryTrackStandardWeaponAppearanceEpoch(100, entity.data(), entity.data(), nullptr, offsets);
     };
@@ -88696,9 +88954,9 @@ bool nskinzcs2::runtime::ProbeStandardWeaponStockFinishForTests()
     binding.function = reinterpret_cast<void*>(StockProbeGenerate); // Must not execute this global entry in a gun-only batch.
     binding.standard_clear_materials = reinterpret_cast<void*>(StockProbeClear);
     binding.standard_generate_materials = reinterpret_cast<void*>(StockProbeGenerate);
-    binding.standard_material_owner_offset = 0x608;
-    binding.original_offset = 0xAA8;
-    binding.original_companion_offset = 0xAC0;
+    binding.standard_material_owner_offset = 0x610;
+    binding.original_offset = 0xAB0;
+    binding.original_companion_offset = 0xAC8;
     model::CosmeticProfile profile;
     profile.base_item = 9;
     profile.paint_kit = 174;
@@ -88902,7 +89160,7 @@ bool nskinzcs2::runtime::ProbeStandardWeaponMaterialCallsForTests(const std::fil
         entity_bindings.direct_chunk_layout_verified &&
         TryResolveWeaponSkinRefreshBinding(module, offsets, binding, issue) &&
         binding.standard_clear_materials != nullptr && binding.standard_generate_materials != nullptr &&
-        binding.standard_material_owner_offset == 0x608;
+        binding.standard_material_owner_offset == 0x610;
     FreeLibrary(module);
     return verified;
 }
@@ -89819,6 +90077,7 @@ void nskinzcs2::RuntimeController::WorkerLoopImpl()
             }
 
             LogStatusIfChanged(status);
+            PublishDemoFilePathSidecar(status.demo_file_path);
             state_.UpdateStatus(status);
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
@@ -90160,7 +90419,7 @@ bool nskinzcs2::RuntimeController::TryInstallRuntimeHook(runtime::Status& status
     if (!hook_attempted_.exchange(true))
     {
         Logger::Info(
-            L"Installing Source2Client002 FrameStageNotify hook for HLAE 2.192.2 using validated vtable index " +
+            L"Installing Source2Client002 FrameStageNotify hook for HLAE 2.192.5 using validated vtable index " +
             std::to_wstring(nskinzcs2::compatibility::kFrameStageNotifyVtableIndex) + L".");
     }
 
@@ -90927,6 +91186,7 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     status.last_frame_stage = g_hook_state.last_frame_stage.load();
     status.demo_playing = g_hook_state.demo_playing.load();
     status.demo_paused = g_hook_state.demo_paused.load();
+    status.demo_skin_rewrite_active = g_hook_state.demo_skin_rewrite_active.load();
     status.demo_tick = g_hook_state.demo_tick.load();
     status.schema_bound = g_hook_state.schema_ready.load();
     status.entity_system_bound = g_hook_state.entity_system_ready.load();
@@ -90981,6 +91241,7 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     status.map_remap_issue = map_status.issue;
     status.weapon_skin_refresh_state = g_hook_state.weapon_skin_refresh_state.load();
     status.level_name = SnapshotLevelName();
+    status.demo_file_path = SnapshotCurrentDemoFilePath();
     status.rebuild_reason = g_hook_state.last_rebuild_reason;
     status.demo_keychain_profile_name = NarrowToWide(demo_keychain_state.matched_profile_name);
     status.demo_keychain_issue = demo_keychain_state.last_issue;
@@ -91272,6 +91533,40 @@ void nskinzcs2::RuntimeController::AppendHookTelemetry(runtime::Status& status) 
     }
     status.detail = detail.str();
     status.last_error.clear();
+}
+
+void nskinzcs2::RuntimeController::PublishDemoFilePathSidecar(
+    const std::wstring& demo_file_path)
+{
+    if (demo_file_path_sidecar_published_ &&
+        _wcsicmp(last_published_demo_file_path_.c_str(), demo_file_path.c_str()) == 0)
+    {
+        return;
+    }
+
+    std::wstring module_path(32768, L'\0');
+    const auto length = GetModuleFileNameW(
+        module_instance_, module_path.data(), static_cast<DWORD>(module_path.size()));
+    if (length == 0 || length >= module_path.size())
+    {
+        return;
+    }
+    module_path.resize(length);
+    std::wstring issue;
+    if (!runtime::PublishCurrentDemoPathSidecar(
+            std::filesystem::path(module_path).parent_path(),
+            std::filesystem::path(demo_file_path),
+            issue))
+    {
+        if (!issue.empty()) Logger::Warn(L"Current demo path sidecar was not published: " + issue);
+        return;
+    }
+    last_published_demo_file_path_ = demo_file_path;
+    demo_file_path_sidecar_published_ = true;
+    if (!demo_file_path.empty())
+    {
+        Logger::Info(L"Captured current demo path for the temporary rewrite UI: " + demo_file_path + L".");
+    }
 }
 
 void nskinzcs2::RuntimeController::LogStatusIfChanged(const runtime::Status& status)

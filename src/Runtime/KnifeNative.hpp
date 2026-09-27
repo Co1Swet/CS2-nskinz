@@ -5,9 +5,9 @@
 
 namespace nskinzcs2::runtime
 {
-inline constexpr std::uintptr_t kKnifeSetModelRva = 0x939940;
-inline constexpr std::uintptr_t kKnifeRecollectRva = 0x908D60;
-inline constexpr std::uintptr_t kKnifeWorldModelNotifyRva = 0x7FB710;
+inline constexpr std::uintptr_t kKnifeSetModelRva = 0x964D70;
+inline constexpr std::uintptr_t kKnifeRecollectRva = 0x933A80;
+inline constexpr std::uintptr_t kKnifeWorldModelNotifyRva = 0x822570;
 const std::array<KnifeResourceEvidenceWindow, 7>& KnifeNativeEvidenceWindows() noexcept;
 bool VerifyKnifeNativeEvidence(std::uintptr_t client, std::size_t size, KnifeGraphReader&) noexcept;
 

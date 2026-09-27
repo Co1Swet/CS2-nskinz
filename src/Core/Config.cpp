@@ -396,6 +396,9 @@ static void to_json(json& j, const MapRemapProfile& value)
     j = json {
         {"enabled", value.enabled},
         {"use_source_radar", value.use_source_radar},
+        {"radar_black_tolerance", value.radar_black_tolerance},
+        {"radar_dark_detail_radius", value.radar_dark_detail_radius},
+        {"radar_background_alpha_percent", value.radar_background_alpha_percent},
         {"source_map_name", value.source_map_name},
         {"workshop_id", value.workshop_id},
         {"workshop_title", value.workshop_title},
@@ -412,6 +415,10 @@ static void from_json(const json& j, MapRemapProfile& value)
 {
     value.enabled = j.value("enabled", false);
     value.use_source_radar = j.value("use_source_radar", true);
+    value.radar_black_tolerance = std::clamp(j.value("radar_black_tolerance", 24), 0, 96);
+    value.radar_dark_detail_radius = std::clamp(j.value("radar_dark_detail_radius", 4), 0, 6);
+    value.radar_background_alpha_percent =
+        std::clamp(j.value("radar_background_alpha_percent", 0), 0, 100);
     value.source_map_name = j.value("source_map_name", std::string {});
     value.workshop_id = j.value("workshop_id", std::string {});
     value.workshop_title = j.value("workshop_title", std::string {});

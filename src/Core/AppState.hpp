@@ -125,6 +125,12 @@ struct MapRemapProfile
     // Keep the demo's original GameSession map name for Panorama/POV radar
     // while the world-loading messages are redirected to the workshop map.
     bool use_source_radar = true;
+    // Radar textures shipped by Workshop authors do not use one universal
+    // black level. Keep these user-adjustable so dark Nuke floors can be
+    // retained without forcing the opaque editor grid back into the HUD.
+    int radar_black_tolerance = 24;
+    int radar_dark_detail_radius = 4;
+    int radar_background_alpha_percent = 0;
     // Blank means: capture the currently loaded demo map when Update is pressed.
     std::string source_map_name;
     std::string workshop_id;
@@ -260,6 +266,7 @@ struct Status
     bool demo_guard_passed = false;
     bool demo_playing = false;
     bool demo_paused = false;
+    bool demo_skin_rewrite_active = false;
     bool runtime_catalog_populated = false;
     bool hook_installed = false;
     bool frame_callbacks_active = false;
@@ -316,6 +323,7 @@ struct Status
     std::wstring map_remap_issue;
     std::wstring process_path;
     std::wstring level_name;
+    std::wstring demo_file_path;
     std::wstring last_error;
     std::wstring detail;
     std::wstring rebuild_reason;

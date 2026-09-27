@@ -1,0 +1,3 @@
+#include "ResourceIds.h"
+
+IDR_NSKINZ_DEMO_REWRITER RCDATA "../../assets/tools/nskinz-demo-rewriter.exe"

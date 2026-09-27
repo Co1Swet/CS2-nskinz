@@ -399,6 +399,45 @@ int ResolveKnifeRuntimeOverrideDefinition(
         : 0;
 }
 
+std::uint32_t BuildSyntheticKnifeEconItemHigh(const int target_definition_index) noexcept
+{
+    constexpr std::uint32_t synthetic_namespace = 0xC5210000u;
+    return synthetic_namespace |
+        (static_cast<std::uint32_t>(target_definition_index > 0 ? target_definition_index : 0) &
+         0xFFFFu);
+}
+
+std::uint32_t ResolveKnifeEconItemHigh(
+    const std::uint32_t source_item_id_high,
+    const int target_definition_index) noexcept
+{
+    if (source_item_id_high != 0 && source_item_id_high != 0xFFFFFFFFu)
+    {
+        return source_item_id_high;
+    }
+    return BuildSyntheticKnifeEconItemHigh(target_definition_index);
+}
+
+bool IsKnifeEconItemHighCompatible(
+    const std::uint32_t item_id_high,
+    const int target_definition_index) noexcept
+{
+    if (item_id_high == 0 || item_id_high == 0xFFFFFFFFu)
+    {
+        return false;
+    }
+
+    constexpr std::uint32_t namespace_mask = 0xFFFF0000u;
+    constexpr std::uint32_t synthetic_namespace = 0xC5210000u;
+    if ((item_id_high & namespace_mask) != synthetic_namespace)
+    {
+        // A real demo inventory identity is authoritative and must survive a
+        // model-only replacement just as it does in the reference output.
+        return true;
+    }
+    return item_id_high == BuildSyntheticKnifeEconItemHigh(target_definition_index);
+}
+
 std::uint64_t BuildKnifeProfileApplySignature(
     const KnifeAppearanceRequest& request,
     const std::uint64_t xuid,

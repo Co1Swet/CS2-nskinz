@@ -1,4 +1,5 @@
 #include "Runtime/KnifeUpdateProbe.hpp"
+#include "Runtime/KnifeGraph.hpp"
 #include "MinHook.h"
 
 #include <algorithm>
@@ -15,7 +16,7 @@ bool MatchesKnifeArmsUpdateEvidence(std::span<const std::uint8_t> entry, std::sp
 {
     constexpr std::array<std::uint8_t, 12> expected_entry {
         0x48,0x8B,0xC4,0x48,0x89,0x68,0x20,0x56,0x48,0x83,0xEC,0x70 };
-    constexpr std::array<std::uint8_t, 5> expected_call {0xE8,0x89,0,0,0};
+    constexpr std::array<std::uint8_t, 5> expected_call {0xE8,0x95,0,0,0};
     return std::ranges::equal(entry, expected_entry) && std::ranges::equal(call, expected_call);
 }
 
@@ -26,10 +27,10 @@ bool MatchesKnifeUpdateCallEvidence(std::span<const std::uint8_t> entry,
     constexpr std::array<std::uint8_t, 19> e {
         0x40,0x55,0x53,0x56,0x57,0x41,0x57,0x48,0x8D,0x6C,0x24,0xC9,0x48,0x81,0xEC,0xA0,0,0,0 };
     constexpr std::array<std::uint8_t, 11> c1 {
-        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0xE7,0x6B,0x89,0xFF };
+        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0x07,0x5F,0x84,0xFF };
     constexpr std::array<std::uint8_t, 11> c2 {
-        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0xC3,0x6B,0x89,0xFF };
-    constexpr std::array<std::uint8_t, 5> eval {0xE8,0x5C,0x7B,0x32,0xFF};
+        0x48,0x8B,0xD7,0x49,0x8B,0xCE,0xE8,0xE3,0x5E,0x84,0xFF };
+    constexpr std::array<std::uint8_t, 5> eval {0xE8,0xBC,0xCC,0x2B,0xFF};
     return std::ranges::equal(entry, e) && std::ranges::equal(call1, c1) &&
         std::ranges::equal(call2, c2) && std::ranges::equal(evaluation, eval);
 }
@@ -77,12 +78,12 @@ bool ImageEvidence(std::uintptr_t client) noexcept
 
 bool ReadSource(std::uintptr_t controller, std::uintptr_t graph, std::uintptr_t source) noexcept
 {
-    if (!controller || !graph || !source || controller > std::numeric_limits<std::uintptr_t>::max() - 0x100 ||
+    if (!controller || !graph || !source || controller > std::numeric_limits<std::uintptr_t>::max() - 0x138 ||
         graph > std::numeric_limits<std::uintptr_t>::max() - 0x20) { return false; }
     __try
     {
-        if (*reinterpret_cast<const std::uintptr_t*>(controller + 0xF0) != graph) { return false; }
-        const auto index = *reinterpret_cast<const std::int16_t*>(controller + 0xF8);
+        if (*reinterpret_cast<const std::uintptr_t*>(controller + kKnifeWeaponTypeGraphOffset) != graph) { return false; }
+        const auto index = *reinterpret_cast<const std::int16_t*>(controller + kKnifeWeaponTypeIndexOffset);
         const auto count = *reinterpret_cast<const std::int32_t*>(graph + 8);
         if (index < 0 || count < 1 || count > 32768 || index >= count) { return false; }
         const auto table = *reinterpret_cast<const std::uintptr_t*>(graph + 16);
@@ -90,7 +91,7 @@ bool ReadSource(std::uintptr_t controller, std::uintptr_t graph, std::uintptr_t 
         const auto node = *reinterpret_cast<const std::uintptr_t*>(table + static_cast<std::uintptr_t>(index) * 8);
         return node && node <= std::numeric_limits<std::uintptr_t>::max() - 0x20 &&
             *reinterpret_cast<const std::uintptr_t*>(node + 24) == source &&
-            *reinterpret_cast<const std::uintptr_t*>(controller + 0xF0) == graph;
+            *reinterpret_cast<const std::uintptr_t*>(controller + kKnifeWeaponTypeGraphOffset) == graph;
     }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
@@ -178,10 +179,24 @@ void __fastcall KnifeUpdateProbe::Hook(void* controller, void* world)
     const auto expected_controller = self->controller_.load(std::memory_order_acquire);
     const auto expected_world = self->world_.load(std::memory_order_acquire);
     const auto listener_world = self->listener_world_filter_.load(std::memory_order_acquire);
-    const bool dispatch = self->Installed() && boundary_arms_ && listener &&
+    const bool native_scope = self->Installed() && boundary_arms_ && listener &&
         self->listener_thread_.load() == GetCurrentThreadId() &&
         (caller == self->client_ + kKnifeNativeUpdateCall1Rva + 11 ||
-         caller == self->client_ + kKnifeNativeUpdateCall2Rva + 11) &&
+         caller == self->client_ + kKnifeNativeUpdateCall2Rva + 11);
+    const bool has_target_filter =
+        (expected_controller && expected_world) || listener_world;
+    if (native_scope && !has_target_filter)
+    {
+        ++self->unfiltered_weapon_updates_;
+        self->last_unfiltered_arms_.store(boundary_arms_, std::memory_order_relaxed);
+        self->last_unfiltered_controller_.store(
+            reinterpret_cast<std::uintptr_t>(controller),
+            std::memory_order_relaxed);
+        self->last_unfiltered_world_.store(
+            reinterpret_cast<std::uintptr_t>(world),
+            std::memory_order_relaxed);
+    }
+    const bool dispatch = native_scope &&
         ShouldDispatchKnifeWeaponListener(expected_controller, expected_world, listener_world,
             reinterpret_cast<std::uintptr_t>(controller), reinterpret_cast<std::uintptr_t>(world));
     // The pre-armed world definition/model is already the target before this
@@ -218,9 +233,9 @@ void __fastcall KnifeUpdateProbe::ArmsHook(void* arms, bool force)
     const auto listener_world = self->listener_world_filter_.load(std::memory_order_acquire);
     const bool has_listener_target =
         (active_controller && active_world) || listener_world;
-    const bool scoped = boundary_depth_ == 0 && self->Installed() && listener && arms &&
-        has_listener_target &&
+    const bool native_scope = boundary_depth_ == 0 && self->Installed() && listener && arms &&
         self->listener_thread_.load() == GetCurrentThreadId() && caller == self->client_ + kKnifeArmsUpdateCallRva + 5;
+    const bool scoped = native_scope && has_listener_target;
     const auto listener_arms = self->listener_arms_filter_.load(std::memory_order_acquire);
     // A holstered pre-arm lease does not know the future arms identity yet.
     // Let the outer BeforeArms boundary reach the listener when an exact world
@@ -230,9 +245,16 @@ void __fastcall KnifeUpdateProbe::ArmsHook(void* arms, bool force)
     const bool dispatch_arms = scoped &&
         (ShouldDispatchKnifeArmsListener(listener_arms, reinterpret_cast<std::uintptr_t>(arms)) ||
          (!listener_arms && listener_world));
-    boundary_arms_ = scoped ? reinterpret_cast<std::uintptr_t>(arms) : 0;
+    boundary_arms_ = native_scope ? reinterpret_cast<std::uintptr_t>(arms) : 0;
     ++boundary_depth_;
     if (scoped) ++self->boundaries_;
+    if (native_scope && !has_listener_target)
+    {
+        ++self->unfiltered_boundaries_;
+        self->last_unfiltered_arms_.store(
+            reinterpret_cast<std::uintptr_t>(arms),
+            std::memory_order_relaxed);
+    }
     if (dispatch_arms) listener({KnifeUpdatePhase::BeforeArms, boundary_arms_});
     original(arms, force);
     if (dispatch_arms && self->Installed()) listener({KnifeUpdatePhase::AfterArms, boundary_arms_});
@@ -267,6 +289,8 @@ void KnifeUpdateProbe::Sample(void* controller, void* world, std::uintptr_t call
 KnifeUpdateTiming KnifeUpdateProbe::Snapshot() const noexcept
 {
     return {matched_.load(), call1_.load(), call2_.load(), same_thread_.load(), source_verified_.load(), rejected_.load(),
-        boundaries_.load(), nested_updates_.load()};
+        boundaries_.load(), nested_updates_.load(),
+        unfiltered_boundaries_.load(), unfiltered_weapon_updates_.load(),
+        last_unfiltered_arms_.load(), last_unfiltered_controller_.load(), last_unfiltered_world_.load()};
 }
 }

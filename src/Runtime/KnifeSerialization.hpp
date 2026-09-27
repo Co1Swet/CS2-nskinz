@@ -7,11 +7,11 @@ namespace nskinzcs2::runtime
 // AnimAssetData describes the ORIGINAL demo's animation assets. Loading a new
 // vmdl/vnmskel does not add a row to that table. Build 2000905 dereferences a
 // null cache result when such a skeleton reaches the networked context builder.
-// Addresses below are verified against ClientVersion 2000908.
-inline constexpr std::uintptr_t kKnifeCachedSerializationRva = 0x34F9A0;
-inline constexpr std::uintptr_t kKnifeLocalSerializationRva = 0x126B6A0;
-inline constexpr std::uintptr_t kKnifeSerializationCallerRva = 0x903102;
-inline constexpr std::uintptr_t kKnifeAnimAssetDataPointerRva = 0x223FC18;
+// Addresses below are verified against ClientVersion 2000918 (1.41.8.5).
+inline constexpr std::uintptr_t kKnifeCachedSerializationRva = 0x35DE70;
+inline constexpr std::uintptr_t kKnifeLocalSerializationRva = 0x12E6110;
+inline constexpr std::uintptr_t kKnifeSerializationCallerRva = 0x92D806;
+inline constexpr std::uintptr_t kKnifeAnimAssetDataPointerRva = 0x23B59D8;
 
 const std::array<KnifeResourceEvidenceWindow, 5>& KnifeSerializationEvidenceWindows() noexcept;
 bool VerifyKnifeSerializationEvidence(std::uintptr_t client, std::size_t size, KnifeGraphReader&) noexcept;

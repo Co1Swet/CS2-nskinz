@@ -1,0 +1,60 @@
+use source2_demo::prelude::*;
+use std::io::BufReader;
+
+#[derive(Default)]
+struct DeathEvents;
+
+#[observer]
+#[uses_entities]
+#[uses_game_events]
+#[uses_string_tables]
+impl DeathEvents {
+    fn get_hero_name(
+        &self,
+        ctx: &Context,
+        handle: usize,
+    ) -> Result<String, source2_demo::error::ParserError> {
+        Ok(ctx
+            .string_tables()
+            .get_by_name("EntityNames")?
+            .get_row(property!(
+                ctx.entities().get_by_handle(handle)?,
+                "m_pEntity.m_nameStringableIndex"
+            ))?
+            .key()
+            .to_string())
+    }
+
+    #[on_game_event("player_death")]
+    fn x(&mut self, ctx: &Context, msg: &GameEvent) -> ObserverResult {
+        let victim: i32 = msg.get_value("userid_pawn")?.try_into()?;
+        let attacker: i32 = msg.get_value("attacker_pawn")?.try_into()?;
+        println!(
+            "{:06}: {} killed {}",
+            ctx.tick(),
+            self.get_hero_name(ctx, attacker as usize)
+                .unwrap_or("unknown".to_string()),
+            self.get_hero_name(ctx, victim as usize)?
+        );
+        Ok(())
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = std::env::args().collect::<Vec<_>>();
+    let Some(filepath) = args.get(1) else {
+        eprintln!("Usage: {} <demofile>", args[0]);
+        return Ok(());
+    };
+
+    let input = BufReader::new(std::fs::File::open(filepath)?);
+    let mut parser = Parser::from_reader(input)?;
+
+    parser.register_observer::<DeathEvents>();
+
+    let start = std::time::Instant::now();
+    parser.run_to_end()?;
+    println!("Elapsed: {:?}", start.elapsed());
+
+    Ok(())
+}

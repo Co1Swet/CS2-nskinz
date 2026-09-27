@@ -221,6 +221,16 @@ bool KnifeRuntimeContextHasAuthoritativeWatchedKnife(const KnifeRuntimeContext& 
 int ResolveKnifeRuntimeOverrideDefinition(
     const KnifeAppearanceRequest& request,
     int live_definition_index) noexcept;
+// Empty/default demo knife views use an invalid econ identity.  A model swap
+// needs a stable target identity before Source 2 builds the target subclass.
+// Existing real inventory identities are preserved.
+std::uint32_t BuildSyntheticKnifeEconItemHigh(int target_definition_index) noexcept;
+std::uint32_t ResolveKnifeEconItemHigh(
+    std::uint32_t source_item_id_high,
+    int target_definition_index) noexcept;
+bool IsKnifeEconItemHighCompatible(
+    std::uint32_t item_id_high,
+    int target_definition_index) noexcept;
 std::uint64_t BuildKnifeProfileApplySignature(
     const KnifeAppearanceRequest& request,
     std::uint64_t xuid,

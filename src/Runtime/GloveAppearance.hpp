@@ -199,13 +199,34 @@ struct GloveApplyResult
     std::wstring issue;
 };
 
+struct SyntheticEconItemIdentity
+{
+    std::uint32_t high = 0;
+    std::uint32_t low = 0;
+
+    [[nodiscard]] bool IsValid() const noexcept
+    {
+        return high != 0 && high != 0xFFFFFFFFu &&
+            low != 0 && low != 0xFFFFFFFFu;
+    }
+};
+
+// Demo stock slots can contain an empty C_EconItemView. Source 2 will not
+// materialise a non-stock glove from the invalid FFFFFFFF:FFFFFFFF sentinel.
+// Give the runtime-owned view a stable, process-independent identity instead.
+// The high-word namespace mirrors the observable demo state produced by the
+// reference application; the low word is an independent nSkinz FNV-1a hash.
+SyntheticEconItemIdentity BuildSyntheticGloveEconItemIdentity(
+    std::uint64_t xuid,
+    int definition_index) noexcept;
+
 GloveSlotMode ResolveGloveSlotMode(const nskinzcs2::model::GloveProfile& profile) noexcept;
 bool GloveProfileRequiresModelDefinition(GloveSlotMode mode) noexcept;
 GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     GloveSlotMode mode,
     bool stable_wearable_available,
     bool pawn_glove_available) noexcept;
-// Build 2000908 materialises model-and-finish visuals from Pawn m_EconGloves.
+// Build 2000918 materialises model-and-finish visuals from Pawn m_EconGloves.
 // A published CEconWearable is only a fallback when that embedded view cannot
 // be read; installing both carriers for one Pawn creates conflicting lifetimes.
 bool CanUsePawnEconGlovesCarrier(

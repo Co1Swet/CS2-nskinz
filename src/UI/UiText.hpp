@@ -196,7 +196,6 @@ enum class UiTextId : std::size_t
     DemoRewriteInProgress,
     DemoRewriteResult,
     DemoRewriteLoadAgain,
-    DemoRewriteDependency,
     Count,
 };
 
@@ -384,15 +383,14 @@ inline constexpr UiTextTable kEnglishTexts {
     "0%% is fully transparent. This affects only pixels classified as the baked background, not the map roads or player markers.",
     "Reset radar mask defaults",
     "Temporary Demo",
-    "Generates a second demo containing complete knife/glove economy, model and animation state, then loads it with playdemo. The original demo is never modified; standard gun skins keep using the existing runtime path.",
+    "Generates a second demo with a complete knife transaction and reconstructs finish fields only for default-texture firearms/gloves. Already-painted firearms/gloves stay on the existing runtime path. The original demo is never modified.",
     "Original demo file",
     "Load the original demo and press Update once so nSkinzCS2 can capture its path.",
-    "Rewrite passes: %d, knife records: %d, glove records: %d",
+    "Rewrite passes: %d, firearm records: %d, knife records: %d, glove records: %d",
     "Generate and load temporary demo",
     "Rewriting the demo in the isolated UI process... This can take several minutes.",
     "Result: %s",
     "Load generated demo again",
-    "Independent nSkinz rewrite: the embedded helper reads the original demo twice and requires no Insight client, Python, hook or extra installation.",
 };
 
 inline constexpr UiTextTable kChineseTexts {
@@ -575,15 +573,14 @@ inline constexpr UiTextTable kChineseTexts {
     "0%% 为完全透明。它只影响被识别为黑底的像素，不改变地图道路和玩家圆点。",
     "恢复雷达遮罩默认值",
     "临时换肤 Demo",
-    "生成包含完整刀／手套经济物品、模型与动作状态的第二个 Demo，然后自动用 playdemo 加载。原 Demo 不会被修改；枪皮继续使用原有运行时路径。",
+    "生成包含完整刀事务的第二个 Demo；只有默认贴图枪械／手套会在 Demo 内重建涂装字段，原本已有涂装的枪械／手套继续使用现有运行时路径。原 Demo 不会被修改。",
     "原始 Demo 文件",
     "请先加载原 Demo 并点击一次 Update，让 nSkinzCS2 自动捕获文件路径。",
-    "重写批次：%d，刀记录：%d，手套记录：%d",
+    "重写批次：%d，枪械记录：%d，刀记录：%d，手套记录：%d",
     "生成并加载临时 Demo",
     "正在外置 UI 进程中重写 Demo……可能需要数分钟。",
     "结果：%s",
     "再次加载已生成 Demo",
-    "nSkinz 独立重写：内嵌工具会两遍读取原 Demo，不调用 Insight 客户端，也不需要 Python、额外 Hook 或其它安装。",
 };
 }
 

@@ -1,6 +1,6 @@
 use crate::reader::{BitsReader, SliceReader};
-use crate::writer::BitsWriter;
 use crate::stream::field_path::{FieldOp, FIELD_OPS};
+use crate::writer::BitsWriter;
 use bitter::BitReader;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

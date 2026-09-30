@@ -1,7 +1,7 @@
 # Workshop map-remap checkpoint (2026-09-21)
 
 This checkpoint freezes the accepted map-remap implementation before work
-returns to the Insight cosmetics clean-room port. The runtime remains
+returns to the independent cosmetics rewrite. The runtime remains
 HLAE / `-insecure` / offline-demo only and never rewrites the input demo.
 
 ## Accepted live behavior
@@ -50,6 +50,6 @@ HLAE / `-insecure` / offline-demo only and never rewrites the input demo.
 
 Do not change the accepted radar path while continuing cosmetics work unless a
 new live regression specifically implicates it. The next work item is the
-Insight-style two-load cosmetics transaction: first load observes/stages;
+two-load cosmetics transaction: first load observes/stages;
 second load publishes complete knife model/animation and default-glove econ
 state before the engine consumes those entities.

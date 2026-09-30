@@ -334,9 +334,7 @@ where
             }
             for (name, value) in extra_fields {
                 let fp = entity.class.serializer.get_path(&name).map_err(|error| {
-                    ParserError::IoError(format!(
-                        "cannot materialize entity field {name}: {error}"
-                    ))
+                    ParserError::IoError(format!("cannot materialize entity field {name}: {error}"))
                 })?;
                 entity.state.set(&fp, value.clone());
                 if let Some(existing) = values.iter_mut().find(|(path, _)| *path == fp) {

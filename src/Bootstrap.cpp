@@ -34,6 +34,7 @@ struct ResolvedCatalogText
 {
     std::string items_game_text;
     std::string localization_text;
+    std::string inventory_icon_paths_text;
     std::wstring source_description;
 };
 
@@ -466,6 +467,7 @@ std::optional<ResolvedCatalogText> TryResolveGameDataText()
     while (!probe.empty())
     {
         const auto content_root = probe / L"csgo";
+        const auto directory_vpk_path = content_root / L"pak01_dir.vpk";
         const auto items_game_path = content_root / L"scripts" / L"items" / L"items_game.txt";
         const auto localization_path =
             content_root / L"resource" / nskinzcs2::build::kCatalogLocalizationFileName;
@@ -475,15 +477,17 @@ std::optional<ResolvedCatalogText> TryResolveGameDataText()
             const auto localization_text = ReadFileText(localization_path);
             if (items_game_text.has_value() && localization_text.has_value())
             {
+                const auto inventory_icon_paths =
+                    nskinzcs2::CatalogBuilder::ReadInventoryIconPathsFromVpk(directory_vpk_path);
                 return ResolvedCatalogText {
                     std::move(*items_game_text),
                     std::move(*localization_text),
+                    inventory_icon_paths.value_or(std::string {}),
                     L"loose files: " + items_game_path.wstring()
                 };
             }
         }
 
-        const auto directory_vpk_path = content_root / L"pak01_dir.vpk";
         if (std::filesystem::exists(directory_vpk_path))
         {
             const auto items_game_text = ReadTextFromVpk(directory_vpk_path, "scripts/items/items_game.txt");
@@ -493,9 +497,12 @@ std::optional<ResolvedCatalogText> TryResolveGameDataText()
                     std::string(nskinzcs2::build::kCatalogLocalizationVpkPath));
             if (items_game_text.has_value() && localization_text.has_value())
             {
+                const auto inventory_icon_paths =
+                    nskinzcs2::CatalogBuilder::ReadInventoryIconPathsFromVpk(directory_vpk_path);
                 return ResolvedCatalogText {
                     std::move(*items_game_text),
                     std::move(*localization_text),
+                    inventory_icon_paths.value_or(std::string {}),
                     L"VPK: " + directory_vpk_path.wstring()
                 };
             }
@@ -544,7 +551,8 @@ DWORD BootstrapThreadImpl(void* instance)
             if (const auto parsed_catalog =
                     nskinzcs2::CatalogBuilder::BuildCatalogFromGameText(
                         game_data->items_game_text,
-                        game_data->localization_text);
+                        game_data->localization_text,
+                        game_data->inventory_icon_paths_text);
                 parsed_catalog.has_value())
             {
                 catalog = std::move(*parsed_catalog);

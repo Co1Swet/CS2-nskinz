@@ -1,21 +1,62 @@
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use source2_demo::prelude::*;
-use source2_demo::proto::{c_demo_string_tables::ItemsT, CDemoStringTables, CSvcMsgCreateStringTable};
+use source2_demo::proto::{
+    c_demo_string_tables::ItemsT, CDemoStringTables, CSvcMsgCreateStringTable,
+};
 use source2_demo::writer::{
-    insert_create_string_table_entry, DemoRewriter, DemoWriter, MessageRewrite,
-    RewriteInterests, StringTableEntryUpdate,
+    insert_create_string_table_entry, DemoRewriter, DemoWriter, MessageRewrite, RewriteInterests,
+    StringTableEntryUpdate,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::time::Instant;
+
+const IO_BUFFER_CAPACITY: usize = 8 * 1024 * 1024;
+const IN_MEMORY_DEMO_LIMIT: u64 = 768 * 1024 * 1024;
+const WEAPON_SLOT_COUNT: usize = 64;
+const PAINT_ATTRIBUTE_SLOT_COUNT: usize = 16;
+
+static WEAPON_FIELDS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    (0..WEAPON_SLOT_COUNT)
+        .map(|slot| format!("m_pWeaponServices.m_hMyWeapons.{slot:04}"))
+        .collect()
+});
+
+struct PaintAttributeFields {
+    definition: String,
+    raw: String,
+    initial: String,
+}
+
+fn paint_attribute_fields(prefix: &str) -> Vec<PaintAttributeFields> {
+    (0..PAINT_ATTRIBUTE_SLOT_COUNT)
+        .map(|slot| {
+            let base = format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes.{slot:04}");
+            PaintAttributeFields {
+                definition: format!("{base}.m_iAttributeDefinitionIndex"),
+                raw: format!("{base}.m_iRawValue32"),
+                initial: format!("{base}.m_flInitialValue"),
+            }
+        })
+        .collect()
+}
+
+static WEAPON_PAINT_FIELDS: LazyLock<Vec<PaintAttributeFields>> =
+    LazyLock::new(|| paint_attribute_fields("m_AttributeManager.m_Item"));
+static GLOVE_PAINT_FIELDS: LazyLock<Vec<PaintAttributeFields>> =
+    LazyLock::new(|| paint_attribute_fields("m_EconGloves"));
 
 #[derive(Debug, Deserialize)]
 struct Request {
     schema_version: u32,
     input_dem: PathBuf,
     output_dem: PathBuf,
+    #[serde(default)]
+    cs2_game_dir: Option<PathBuf>,
     passes: Vec<RequestPass>,
 }
 
@@ -29,9 +70,17 @@ struct RequestPass {
 struct RequestItem {
     definition_index: u16,
     replacement_definition_index: Option<u16>,
+    #[serde(default)]
+    preserve_source_definition: bool,
     paint_kit: i32,
+    #[serde(default)]
+    quality: i32,
     pattern_seed: f32,
     wear: f32,
+    #[serde(default)]
+    mesh_group_mask: Option<u64>,
+    #[serde(default)]
+    custom_name: String,
     team: String,
 }
 
@@ -42,13 +91,23 @@ struct Response {
     pawn_count: usize,
     knife_count: usize,
     glove_count: usize,
+    weapon_count: usize,
+    painted_glove_passthrough_count: usize,
+    painted_weapon_passthrough_count: usize,
     animation_resource_count: usize,
+    animation_resource_source: String,
+    input_mode: String,
+    input_read_ms: u64,
+    discovery_ms: u64,
+    rewrite_ms: u64,
+    total_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Team {
     T,
     Ct,
+    Any,
 }
 
 impl Team {
@@ -56,14 +115,16 @@ impl Team {
         match value.to_ascii_uppercase().as_str() {
             "T" => Ok(Self::T),
             "CT" => Ok(Self::Ct),
+            "ANY" => Ok(Self::Any),
             _ => bail!("unsupported team {value:?}"),
         }
     }
 
-    fn number(self) -> u8 {
+    fn number(self) -> Option<u8> {
         match self {
-            Self::T => 2,
-            Self::Ct => 3,
+            Self::T => Some(2),
+            Self::Ct => Some(3),
+            Self::Any => None,
         }
     }
 }
@@ -71,15 +132,20 @@ impl Team {
 #[derive(Clone, Debug)]
 struct Cosmetic {
     definition: u16,
+    preserve_source_definition: bool,
     paint_kit: i32,
+    quality: i32,
     seed: f32,
     wear: f32,
+    mesh_group_mask: Option<u64>,
+    custom_name: String,
 }
 
 #[derive(Default)]
 struct TeamPlan {
     knife: Option<Cosmetic>,
     glove: Option<Cosmetic>,
+    weapons: HashMap<u16, Cosmetic>,
 }
 
 #[derive(Default)]
@@ -87,17 +153,145 @@ struct PlayerPlan {
     by_team: HashMap<Team, TeamPlan>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct KnifeVariant {
     model: u64,
     subclass: u32,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KnifeAsset {
+    definition: u16,
+    model: &'static str,
+    skeleton: &'static str,
+}
+
+const KNIFE_ASSETS: &[KnifeAsset] = &[
+    KnifeAsset {
+        definition: 42,
+        model: "weapons/models/knife/knife_default_ct/weapon_knife_default_ct.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_default_ct.vnmskel",
+    },
+    KnifeAsset {
+        definition: 59,
+        model: "weapons/models/knife/knife_default_t/weapon_knife_default_t.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_default_t.vnmskel",
+    },
+    KnifeAsset {
+        definition: 500,
+        model: "weapons/models/knife/knife_bayonet/weapon_knife_bayonet.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_bayonet.vnmskel",
+    },
+    KnifeAsset {
+        definition: 503,
+        model: "weapons/models/knife/knife_css/weapon_knife_css.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_css.vnmskel",
+    },
+    KnifeAsset {
+        definition: 505,
+        model: "weapons/models/knife/knife_flip/weapon_knife_flip.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_flip.vnmskel",
+    },
+    KnifeAsset {
+        definition: 506,
+        model: "weapons/models/knife/knife_gut/weapon_knife_gut.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_gut.vnmskel",
+    },
+    KnifeAsset {
+        definition: 507,
+        model: "weapons/models/knife/knife_karambit/weapon_knife_karambit.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_karambit.vnmskel",
+    },
+    KnifeAsset {
+        definition: 508,
+        model: "weapons/models/knife/knife_m9/weapon_knife_m9.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_m9.vnmskel",
+    },
+    KnifeAsset {
+        definition: 509,
+        model: "weapons/models/knife/knife_tactical/weapon_knife_tactical.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_tactical.vnmskel",
+    },
+    KnifeAsset {
+        definition: 512,
+        model: "weapons/models/knife/knife_falchion/weapon_knife_falchion.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_falchion.vnmskel",
+    },
+    KnifeAsset {
+        definition: 514,
+        model: "weapons/models/knife/knife_bowie/weapon_knife_bowie.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_bowie.vnmskel",
+    },
+    KnifeAsset {
+        definition: 515,
+        model: "weapons/models/knife/knife_butterfly/weapon_knife_butterfly.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_butterfly.vnmskel",
+    },
+    KnifeAsset {
+        definition: 516,
+        model: "weapons/models/knife/knife_push/weapon_knife_push.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_push.vnmskel",
+    },
+    KnifeAsset {
+        definition: 517,
+        model: "weapons/models/knife/knife_cord/weapon_knife_cord.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_cord.vnmskel",
+    },
+    KnifeAsset {
+        definition: 518,
+        model: "weapons/models/knife/knife_canis/weapon_knife_canis.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_canis.vnmskel",
+    },
+    KnifeAsset {
+        definition: 519,
+        model: "weapons/models/knife/knife_ursus/weapon_knife_ursus.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_ursus.vnmskel",
+    },
+    KnifeAsset {
+        definition: 520,
+        model: "weapons/models/knife/knife_navaja/weapon_knife_navaja.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_navaja.vnmskel",
+    },
+    KnifeAsset {
+        definition: 521,
+        model: "weapons/models/knife/knife_outdoor/weapon_knife_outdoor.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_outdoor.vnmskel",
+    },
+    KnifeAsset {
+        definition: 522,
+        model: "weapons/models/knife/knife_stiletto/weapon_knife_stiletto.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_stiletto.vnmskel",
+    },
+    KnifeAsset {
+        definition: 523,
+        model: "weapons/models/knife/knife_talon/weapon_knife_talon.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_talon.vnmskel",
+    },
+    KnifeAsset {
+        definition: 525,
+        model: "weapons/models/knife/knife_skeleton/weapon_knife_skeleton.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_skeleton.vnmskel",
+    },
+    KnifeAsset {
+        definition: 526,
+        model: "weapons/models/knife/knife_kukri/weapon_knife_kukri.vmdl",
+        skeleton: "animation/skeletons/weapons/knife_kukri.vnmskel",
+    },
+];
 
 #[derive(Default)]
 struct PawnDiscovery {
     controllers: HashSet<u32>,
     weapons: HashSet<u32>,
     teams: HashSet<u8>,
+    painted_gloves_by_team: HashSet<u8>,
+    glove_definitions_by_team: HashMap<u8, u16>,
+}
+
+#[derive(Default)]
+struct WeaponDiscovery {
+    definition: u16,
+    painted: bool,
 }
 
 #[derive(Default)]
@@ -105,9 +299,11 @@ struct Discovery {
     controller_steam: HashMap<u32, u64>,
     controller_pawns: HashMap<u32, HashSet<u32>>,
     pawns: HashMap<u32, PawnDiscovery>,
+    weapons: HashMap<u32, WeaponDiscovery>,
     knives: HashSet<u32>,
-    variants: HashMap<u16, KnifeVariant>,
-    anim_assets: HashMap<String, Vec<u8>>,
+    anim_asset_table_present: bool,
+    anim_asset_initial_count: Option<i32>,
+    anim_asset_initial_keys: HashSet<String>,
 }
 
 fn integer(value: &FieldValue) -> Option<u64> {
@@ -115,7 +311,63 @@ fn integer(value: &FieldValue) -> Option<u64> {
 }
 
 fn field_integer(entity: &Entity, name: &str) -> Option<u64> {
-    entity.get_property(name).ok().and_then(integer)
+    entity.try_get_property(name).and_then(integer)
+}
+
+fn positive_number(value: &FieldValue) -> bool {
+    match value {
+        FieldValue::Float(value) => value.is_finite() && *value > 0.0,
+        FieldValue::Signed8(value) => *value > 0,
+        FieldValue::Signed16(value) => *value > 0,
+        FieldValue::Signed32(value) => *value > 0,
+        FieldValue::Signed64(value) => *value > 0,
+        FieldValue::Unsigned8(value) => *value > 0,
+        FieldValue::Unsigned16(value) => *value > 0,
+        FieldValue::Unsigned32(value) => *value > 0,
+        FieldValue::Unsigned64(value) => *value > 0,
+        _ => false,
+    }
+}
+
+fn has_networked_paint(
+    entity: &Entity,
+    count_field: &str,
+    fields: &[PaintAttributeFields],
+) -> bool {
+    // Source 2 can retain decoded child values after the replicated vector was
+    // resized to zero.  Those slots are inactive and must not make a stock
+    // weapon/glove look painted.  Only inspect entries inside the authoritative
+    // vector length.
+    let active_count = field_integer(entity, count_field).unwrap_or_default() as usize;
+    fields
+        .iter()
+        .take(active_count.min(fields.len()))
+        .any(|field| {
+            field_integer(entity, &field.definition) == Some(6)
+                && [field.raw.as_str(), field.initial.as_str()]
+                    .iter()
+                    .filter_map(|name| entity.try_get_property(name))
+                    .any(positive_number)
+        })
+}
+
+fn has_weapon_paint(entity: &Entity) -> bool {
+    entity
+        .try_get_property("m_nFallbackPaintKit")
+        .is_some_and(positive_number)
+        || has_networked_paint(
+            entity,
+            "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes",
+            &WEAPON_PAINT_FIELDS,
+        )
+}
+
+fn has_glove_paint(entity: &Entity) -> bool {
+    has_networked_paint(
+        entity,
+        "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes",
+        &GLOVE_PAINT_FIELDS,
+    )
 }
 
 impl Observer for Discovery {
@@ -127,7 +379,12 @@ impl Observer for Discovery {
             | Interests::REPLAY_END
     }
 
-    fn on_entity(&mut self, _ctx: &Context, event: EntityEvents, entity: &Entity) -> ObserverResult {
+    fn on_entity(
+        &mut self,
+        _ctx: &Context,
+        event: EntityEvents,
+        entity: &Entity,
+    ) -> ObserverResult {
         if event == EntityEvents::Deleted {
             return Ok(());
         }
@@ -139,33 +396,41 @@ impl Observer for Discovery {
                     self.controller_steam.insert(handle, steam);
                 }
             }
-            for field in entity.fields() {
-                let name = field.name.to_ascii_lowercase();
-                if !(name.ends_with("m_hplayerpawn") || name.ends_with("m_hpawn")) {
-                    continue;
-                }
-                if let Some(pawn) = field.value.and_then(integer).map(|value| value as u32) {
+            for name in ["m_hPlayerPawn", "m_hPawn"] {
+                if let Some(pawn) = field_integer(entity, name).map(|value| value as u32) {
                     if pawn != u32::MAX && pawn != 0xFFFF_FFFE {
-                        self.controller_pawns.entry(handle).or_default().insert(pawn);
+                        self.controller_pawns
+                            .entry(handle)
+                            .or_default()
+                            .insert(pawn);
                     }
                 }
             }
         } else if class == "CCSPlayerPawn" {
             let pawn = self.pawns.entry(handle).or_default();
-            for field in entity.fields() {
-                let name = field.name.to_ascii_lowercase();
-                let Some(value) = field.value.and_then(integer) else {
-                    continue;
-                };
-                if name == "m_iteamnum" {
-                    pawn.teams.insert(value as u8);
-                } else if name.contains("controller") && name.contains("m_h") {
-                    let controller = value as u32;
+            if let Some(team) = field_integer(entity, "m_iTeamNum") {
+                let team = team as u8;
+                pawn.teams.insert(team);
+                if let Some(definition) =
+                    field_integer(entity, "m_EconGloves.m_iItemDefinitionIndex")
+                        .map(|value| value as u16)
+                        .filter(|value| *value != 0)
+                {
+                    pawn.glove_definitions_by_team.insert(team, definition);
+                }
+                if has_glove_paint(entity) {
+                    pawn.painted_gloves_by_team.insert(team);
+                }
+            }
+            for name in ["m_hController", "m_hOriginalController"] {
+                if let Some(controller) = field_integer(entity, name).map(|value| value as u32) {
                     if controller != u32::MAX && controller != 0xFFFF_FFFE {
                         pawn.controllers.insert(controller);
                     }
-                } else if name.starts_with("m_pweaponservices.m_hmyweapons.") {
-                    let weapon = value as u32;
+                }
+            }
+            for name in WEAPON_FIELDS.iter() {
+                if let Some(weapon) = field_integer(entity, name).map(|value| value as u32) {
                     if weapon != u32::MAX && weapon != 0xFFFF_FFFE {
                         pawn.weapons.insert(weapon);
                     }
@@ -173,31 +438,47 @@ impl Observer for Discovery {
             }
         } else if class == "CKnife" {
             self.knives.insert(handle);
-            let definition = field_integer(entity, "m_AttributeManager.m_Item.m_iItemDefinitionIndex")
-                .map(|value| value as u16);
-            let model = field_integer(
-                entity,
-                "CBodyComponent.m_skeletonInstance.m_modelState.m_hModel",
-            );
-            let subclass = field_integer(entity, "m_nSubclassID").map(|value| value as u32);
-            if let (Some(definition), Some(model), Some(subclass)) = (definition, model, subclass) {
-                if definition != 0 && model != 0 && subclass != 0 {
-                    self.variants.insert(definition, KnifeVariant { model, subclass });
-                }
+        }
+        if let Some(definition) =
+            field_integer(entity, "m_AttributeManager.m_Item.m_iItemDefinitionIndex")
+                .map(|value| value as u16)
+                .filter(|value| *value != 0)
+        {
+            let painted = has_weapon_paint(entity);
+            let weapon = self.weapons.entry(handle).or_default();
+            weapon.definition = definition;
+            weapon.painted |= painted;
+        }
+        Ok(())
+    }
+
+    fn on_string_table(
+        &mut self,
+        _ctx: &Context,
+        table: &StringTable,
+        _modified: &[i32],
+    ) -> ObserverResult {
+        if !table.name().eq_ignore_ascii_case("AnimAssetData") {
+            return Ok(());
+        }
+        self.anim_asset_table_present = true;
+        if self.anim_asset_initial_count.is_none() {
+            let mut next_index = 0;
+            for row in table.iter() {
+                next_index = next_index.max(row.index().saturating_add(1));
+                self.anim_asset_initial_keys
+                    .insert(row.key().to_ascii_lowercase());
             }
+            self.anim_asset_initial_count = Some(next_index);
         }
         Ok(())
     }
 
     fn on_stop(&mut self, ctx: &Context) -> ObserverResult {
         for table in ctx.string_tables().iter() {
-            if !table.name().eq_ignore_ascii_case("AnimAssetData") {
-                continue;
-            }
-            for row in table.iter() {
-                if let Some(value) = row.value() {
-                    self.anim_assets.insert(row.key().to_string(), value.to_vec());
-                }
+            if table.name().eq_ignore_ascii_case("AnimAssetData") {
+                self.anim_asset_table_present = true;
+                break;
             }
         }
         Ok(())
@@ -216,20 +497,44 @@ fn parse_plans(request: &Request) -> Result<HashMap<u64, PlayerPlan>> {
         }
         let plan = result.entry(steam).or_default();
         for item in &pass.items {
+            if item
+                .mesh_group_mask
+                .is_some_and(|mask| mask != 1 && mask != 2)
+            {
+                bail!(
+                    "unsupported weapon mesh group mask {:?} for source definition {}",
+                    item.mesh_group_mask,
+                    item.definition_index
+                );
+            }
             let team = Team::parse(&item.team)?;
             let target = item
                 .replacement_definition_index
                 .unwrap_or(item.definition_index);
             let cosmetic = Cosmetic {
                 definition: target,
+                preserve_source_definition: item.preserve_source_definition,
                 paint_kit: item.paint_kit,
-                seed: item.pattern_seed,
-                wear: item.wear.clamp(0.000001, 1.0),
+                quality: item.quality,
+                seed: item.pattern_seed.clamp(0.0, 1000.0),
+                wear: item.wear.clamp(0.0000001, 1.0),
+                mesh_group_mask: item.mesh_group_mask,
+                custom_name: {
+                    let requested = item.custom_name.trim();
+                    if requested.is_empty() {
+                        "nSkinz CS2".to_owned()
+                    } else {
+                        requested.chars().take(127).collect()
+                    }
+                },
             };
             let team_plan = plan.by_team.entry(team).or_default();
             match item.definition_index {
                 42 | 59 => team_plan.knife = Some(cosmetic),
                 5028 | 5029 => team_plan.glove = Some(cosmetic),
+                other if (1..500).contains(&other) => {
+                    team_plan.weapons.insert(other, cosmetic);
+                }
                 other => bail!("unsupported demo cosmetic source definition {other}"),
             }
         }
@@ -240,46 +545,315 @@ fn parse_plans(request: &Request) -> Result<HashMap<u64, PlayerPlan>> {
     Ok(result)
 }
 
-fn fallback_variant(definition: u16) -> Option<KnifeVariant> {
-    let (model, subclass) = match definition {
-        42 => (10_602_312_940_084_141_493, 294_910_436),
-        59 => (7_398_392_065_482_137_260, 1_058_568_214),
-        503 => (15_069_788_437_838_760_928, 3_787_235_507),
-        507 => (1_494_623_824_775_979_189, 1_731_408_398),
-        508 => (13_525_979_948_781_164_116, 1_638_561_588),
-        515 => (13_478_092_056_631_755_737, 1_353_709_123),
-        521 => (8_686_738_646_252_871_270, 3_206_681_373),
-        _ => return None,
-    };
-    Some(KnifeVariant { model, subclass })
+fn knife_asset(definition: u16) -> Option<&'static KnifeAsset> {
+    KNIFE_ASSETS
+        .iter()
+        .find(|asset| asset.definition == definition)
 }
 
-fn skeleton_for(definition: u16) -> Option<&'static str> {
-    Some(match definition {
-        42 => "animation/skeletons/weapons/knife_default_ct.vnmskel",
-        59 => "animation/skeletons/weapons/knife_default_t.vnmskel",
-        500 => "animation/skeletons/weapons/knife_bayonet.vnmskel",
-        503 => "animation/skeletons/weapons/knife_css.vnmskel",
-        505 => "animation/skeletons/weapons/knife_flip.vnmskel",
-        506 => "animation/skeletons/weapons/knife_gut.vnmskel",
-        507 => "animation/skeletons/weapons/knife_karambit.vnmskel",
-        508 => "animation/skeletons/weapons/knife_m9.vnmskel",
-        509 => "animation/skeletons/weapons/knife_tactical.vnmskel",
-        512 => "animation/skeletons/weapons/knife_falchion.vnmskel",
-        514 => "animation/skeletons/weapons/knife_bowie.vnmskel",
-        515 => "animation/skeletons/weapons/knife_butterfly.vnmskel",
-        516 => "animation/skeletons/weapons/knife_push.vnmskel",
-        517 => "animation/skeletons/weapons/knife_cord.vnmskel",
-        518 => "animation/skeletons/weapons/knife_canis.vnmskel",
-        519 => "animation/skeletons/weapons/knife_ursus.vnmskel",
-        520 => "animation/skeletons/weapons/knife_navaja.vnmskel",
-        521 => "animation/skeletons/weapons/knife_outdoor.vnmskel",
-        522 => "animation/skeletons/weapons/knife_stiletto.vnmskel",
-        523 => "animation/skeletons/weapons/knife_talon.vnmskel",
-        525 => "animation/skeletons/weapons/knife_skeleton.vnmskel",
-        526 => "animation/skeletons/weapons/knife_kukri.vnmskel",
-        _ => return None,
+fn murmur_hash2_ascii_ci(input: &str, seed: u32) -> u32 {
+    const MULTIPLIER: u32 = 0x5BD1_E995;
+    const SHIFT: u32 = 24;
+    let bytes: Vec<u8> = input
+        .bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect();
+    let mut hash = seed ^ bytes.len() as u32;
+    let mut chunks = bytes.chunks_exact(4);
+    for chunk in &mut chunks {
+        let mut value = u32::from_le_bytes(chunk.try_into().unwrap());
+        value = value.wrapping_mul(MULTIPLIER);
+        value ^= value >> SHIFT;
+        value = value.wrapping_mul(MULTIPLIER);
+        hash = hash.wrapping_mul(MULTIPLIER) ^ value;
+    }
+    let tail = chunks.remainder();
+    match tail.len() {
+        3 => {
+            hash ^= (tail[2] as u32) << 16;
+            hash ^= (tail[1] as u32) << 8;
+            hash ^= tail[0] as u32;
+            hash = hash.wrapping_mul(MULTIPLIER);
+        }
+        2 => {
+            hash ^= (tail[1] as u32) << 8;
+            hash ^= tail[0] as u32;
+            hash = hash.wrapping_mul(MULTIPLIER);
+        }
+        1 => {
+            hash ^= tail[0] as u32;
+            hash = hash.wrapping_mul(MULTIPLIER);
+        }
+        _ => {}
+    }
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(MULTIPLIER);
+    hash ^ (hash >> 15)
+}
+
+fn murmur_hash64b_ascii_ci(input: &str, seed: u64) -> u64 {
+    const MULTIPLIER: u32 = 0x5BD1_E995;
+    const SHIFT: u32 = 24;
+    let bytes: Vec<u8> = input
+        .bytes()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect();
+    let mut high = seed as u32 ^ bytes.len() as u32;
+    let mut low = (seed >> 32) as u32;
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let mut first = u32::from_le_bytes(chunk[0..4].try_into().unwrap());
+        first = first.wrapping_mul(MULTIPLIER);
+        first ^= first >> SHIFT;
+        first = first.wrapping_mul(MULTIPLIER);
+        high = high.wrapping_mul(MULTIPLIER) ^ first;
+
+        let mut second = u32::from_le_bytes(chunk[4..8].try_into().unwrap());
+        second = second.wrapping_mul(MULTIPLIER);
+        second ^= second >> SHIFT;
+        second = second.wrapping_mul(MULTIPLIER);
+        low = low.wrapping_mul(MULTIPLIER) ^ second;
+    }
+    let tail = chunks.remainder();
+    let (low_tail, high_tail) = if tail.len() >= 4 {
+        (&tail[4..], Some(&tail[..4]))
+    } else {
+        (tail, None)
+    };
+    if let Some(high_tail) = high_tail {
+        let mut value = u32::from_le_bytes(high_tail.try_into().unwrap());
+        value = value.wrapping_mul(MULTIPLIER);
+        value ^= value >> SHIFT;
+        value = value.wrapping_mul(MULTIPLIER);
+        high = high.wrapping_mul(MULTIPLIER) ^ value;
+    }
+    match low_tail.len() {
+        3 => {
+            low ^= (low_tail[2] as u32) << 16;
+            low ^= (low_tail[1] as u32) << 8;
+            low ^= low_tail[0] as u32;
+            low = low.wrapping_mul(MULTIPLIER);
+        }
+        2 => {
+            low ^= (low_tail[1] as u32) << 8;
+            low ^= low_tail[0] as u32;
+            low = low.wrapping_mul(MULTIPLIER);
+        }
+        1 => {
+            low ^= low_tail[0] as u32;
+            low = low.wrapping_mul(MULTIPLIER);
+        }
+        _ => {}
+    }
+    high ^= low >> 18;
+    high = high.wrapping_mul(MULTIPLIER);
+    low ^= high >> 22;
+    low = low.wrapping_mul(MULTIPLIER);
+    high ^= low >> 17;
+    high = high.wrapping_mul(MULTIPLIER);
+    low ^= high >> 19;
+    low = low.wrapping_mul(MULTIPLIER);
+    ((high as u64) << 32) | low as u64
+}
+
+fn installed_variant(definition: u16) -> Option<KnifeVariant> {
+    const RESOURCE_ID_SEED: u64 = 0xEDAB_CDEF;
+    const STRING_TOKEN_SEED: u32 = 0x3141_5926;
+    let asset = knife_asset(definition)?;
+    Some(KnifeVariant {
+        model: murmur_hash64b_ascii_ci(asset.model, RESOURCE_ID_SEED),
+        subclass: murmur_hash2_ascii_ci(&definition.to_string(), STRING_TOKEN_SEED),
     })
+}
+
+// AnimAssetData does not contain the compiled skeleton payload. Its value is
+// the shared weapon animation classification block; the row key is the path
+// that makes Source 2 load the actual compiled resource from the installed
+// game content. This byte sequence is identical for the stock and replacement
+// knife skeleton rows observed in CS2 demos.
+const WEAPON_ANIM_ASSET_METADATA: &[u8] =
+    b"\x01\x00\x00\x00\x03\x00\x00\x00weapon\x00weapon_offset\x00econ\x00\x00\x00\x00\x00";
+const VPK_SIGNATURE: u32 = 0x55AA_1234;
+
+struct VpkTarget {
+    compiled: String,
+    extension: Vec<u8>,
+    directory: Vec<u8>,
+    filename: Vec<u8>,
+}
+
+fn vpk_target(compiled: &str) -> Result<VpkTarget> {
+    let compiled = compiled.replace('\\', "/").to_ascii_lowercase();
+    let (directory, leaf) = compiled
+        .rsplit_once('/')
+        .map_or(("", compiled.as_str()), |(directory, leaf)| {
+            (directory, leaf)
+        });
+    let (filename, extension) = leaf
+        .rsplit_once('.')
+        .ok_or_else(|| anyhow!("installed CS2 resource path has no extension: {compiled}"))?;
+    Ok(VpkTarget {
+        compiled: compiled.clone(),
+        extension: extension.as_bytes().to_vec(),
+        directory: directory.as_bytes().to_vec(),
+        filename: filename.as_bytes().to_vec(),
+    })
+}
+
+fn read_vpk_tree_cstring<'a>(tree: &'a [u8], offset: &mut usize) -> Result<&'a [u8]> {
+    let remaining = tree
+        .get(*offset..)
+        .ok_or_else(|| anyhow!("installed CS2 VPK directory tree is truncated"))?;
+    let length = remaining
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| anyhow!("installed CS2 VPK directory string is unterminated"))?;
+    if length >= 64 * 1024 {
+        bail!("VPK directory string exceeded the safety limit");
+    }
+    let value = &remaining[..length];
+    *offset = offset
+        .checked_add(length + 1)
+        .ok_or_else(|| anyhow!("installed CS2 VPK directory offset overflow"))?;
+    Ok(value)
+}
+
+fn vpk_find_paths(directory_vpk: &Path, targets: &[String]) -> Result<HashSet<String>> {
+    if targets.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let targets = targets
+        .iter()
+        .map(|target| vpk_target(target))
+        .collect::<Result<Vec<_>>>()?;
+    let file = File::open(directory_vpk)
+        .with_context(|| format!("open installed CS2 VPK {}", directory_vpk.display()))?;
+    let mut reader = BufReader::with_capacity(IO_BUFFER_CAPACITY, file);
+    let mut header = [0u8; 12];
+    reader.read_exact(&mut header)?;
+    let signature = u32::from_le_bytes(header[0..4].try_into().unwrap());
+    let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let tree_size = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+    if signature != VPK_SIGNATURE {
+        bail!("installed CS2 VPK has unexpected signature 0x{signature:08X}");
+    }
+    match version {
+        1 => {}
+        2 => {
+            let mut extended_header = [0u8; 16];
+            reader.read_exact(&mut extended_header)?;
+        }
+        other => bail!("installed CS2 VPK uses unsupported version {other}"),
+    }
+    let mut tree = vec![0u8; tree_size];
+    reader
+        .read_exact(&mut tree)
+        .context("read installed CS2 VPK directory tree")?;
+    let mut offset = 0usize;
+    let mut found = HashSet::new();
+
+    loop {
+        let extension = read_vpk_tree_cstring(&tree, &mut offset)?;
+        if extension.is_empty() {
+            break;
+        }
+        loop {
+            let directory = read_vpk_tree_cstring(&tree, &mut offset)?;
+            if directory.is_empty() {
+                break;
+            }
+            loop {
+                let filename = read_vpk_tree_cstring(&tree, &mut offset)?;
+                if filename.is_empty() {
+                    break;
+                }
+                let entry = tree
+                    .get(offset..offset + 18)
+                    .ok_or_else(|| anyhow!("installed CS2 VPK entry header is truncated"))?;
+                offset += 18;
+                let preload_size = u16::from_le_bytes(entry[4..6].try_into().unwrap()) as u64;
+                let payload_size = u32::from_le_bytes(entry[12..16].try_into().unwrap()) as u64;
+                let terminator = u16::from_le_bytes(entry[16..18].try_into().unwrap());
+                if terminator != 0xFFFF {
+                    bail!("installed CS2 VPK entry has invalid terminator 0x{terminator:04X}");
+                }
+                let directory = if directory == b" " {
+                    &b""[..]
+                } else {
+                    directory
+                };
+                let extension = if extension == b" " {
+                    &b""[..]
+                } else {
+                    extension
+                };
+                if preload_size + payload_size > 0 {
+                    for target in &targets {
+                        if extension.eq_ignore_ascii_case(&target.extension)
+                            && directory.eq_ignore_ascii_case(&target.directory)
+                            && filename.eq_ignore_ascii_case(&target.filename)
+                        {
+                            found.insert(target.compiled.clone());
+                        }
+                    }
+                    if found.len() == targets.len() {
+                        return Ok(found);
+                    }
+                }
+                offset = offset
+                    .checked_add(preload_size as usize)
+                    .filter(|offset| *offset <= tree.len())
+                    .ok_or_else(|| anyhow!("installed CS2 VPK preload data is truncated"))?;
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn vpk_contains_path(directory_vpk: &Path, target: &str) -> Result<bool> {
+    let target = target.replace('\\', "/").to_ascii_lowercase();
+    Ok(vpk_find_paths(directory_vpk, std::slice::from_ref(&target))?.contains(&target))
+}
+
+fn require_installed_resources(cs2_game_dir: &Path, keys: &BTreeSet<String>) -> Result<()> {
+    let mut unresolved = Vec::new();
+    for key in keys {
+        let compiled = format!("{key}_c").replace('\\', "/").to_ascii_lowercase();
+        let loose = cs2_game_dir.join(Path::new(&compiled));
+        if !std::fs::metadata(&loose).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
+            unresolved.push(compiled);
+        }
+    }
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    let directory_vpk = cs2_game_dir.join("pak01_dir.vpk");
+    if !directory_vpk.is_file() {
+        bail!(
+            "installed CS2 resource index is missing: {}",
+            directory_vpk.display()
+        );
+    }
+    let found = vpk_find_paths(&directory_vpk, &unresolved)?;
+    let missing = unresolved
+        .iter()
+        .filter(|resource| !found.contains(resource.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!(
+            "resources are not present in the installed CS2 files: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn require_installed_resource(cs2_game_dir: &Path, key: &str) -> Result<()> {
+    let mut keys = BTreeSet::new();
+    keys.insert(key.to_string());
+    require_installed_resources(cs2_game_dir, &keys)
 }
 
 fn fnv_identity(xuid: u64, definition: u16, salt: u64) -> (u32, u32) {
@@ -314,7 +888,14 @@ struct GloveRule {
 }
 
 #[derive(Clone)]
+struct WeaponRule {
+    steam: u64,
+    cosmetic: Cosmetic,
+}
+
+#[derive(Clone)]
 struct AnimAsset {
+    index: i32,
     key: String,
     value: Vec<u8>,
 }
@@ -322,6 +903,9 @@ struct AnimAsset {
 struct RewritePlan {
     knives: HashMap<u32, KnifeRule>,
     gloves: HashMap<u32, GloveRule>,
+    weapons: HashMap<u32, WeaponRule>,
+    painted_glove_passthroughs: HashSet<(u32, u8)>,
+    painted_weapon_passthroughs: HashSet<u32>,
     resources: Vec<AnimAsset>,
     selected_pawns: HashSet<u32>,
 }
@@ -339,7 +923,11 @@ fn player_pawns(discovery: &Discovery, steam: u64) -> HashSet<u32> {
         }
     }
     for (pawn_handle, pawn) in &discovery.pawns {
-        if pawn.controllers.iter().any(|controller| controllers.contains(controller)) {
+        if pawn
+            .controllers
+            .iter()
+            .any(|controller| controllers.contains(controller))
+        {
             pawns.insert(*pawn_handle);
         }
     }
@@ -348,12 +936,22 @@ fn player_pawns(discovery: &Discovery, steam: u64) -> HashSet<u32> {
 
 fn choose_team(pawn: &PawnDiscovery, plan: &PlayerPlan) -> Option<Team> {
     for team in [Team::T, Team::Ct] {
-        if pawn.teams.contains(&team.number()) && plan.by_team.contains_key(&team) {
+        if team
+            .number()
+            .is_some_and(|number| pawn.teams.contains(&number))
+            && plan.by_team.contains_key(&team)
+        {
             return Some(team);
         }
     }
-    if plan.by_team.len() == 1 {
-        plan.by_team.keys().next().copied()
+    let mut specific = plan
+        .by_team
+        .keys()
+        .copied()
+        .filter(|team| *team != Team::Any);
+    let only = specific.next();
+    if only.is_some() && specific.next().is_none() {
+        only
     } else {
         None
     }
@@ -362,82 +960,181 @@ fn choose_team(pawn: &PawnDiscovery, plan: &PlayerPlan) -> Option<Team> {
 fn build_rewrite_plan(
     plans: &HashMap<u64, PlayerPlan>,
     discovery: &Discovery,
+    cs2_game_dir: Option<&Path>,
 ) -> Result<RewritePlan> {
     let mut knives = HashMap::new();
     let mut gloves = HashMap::new();
+    let mut weapons = HashMap::new();
+    let mut painted_glove_passthroughs = HashSet::new();
+    let mut painted_weapon_passthroughs = HashSet::new();
     let mut selected_pawns = HashSet::new();
     let mut target_definitions = BTreeSet::new();
 
     for (steam, player_plan) in plans {
         let pawns = player_pawns(discovery, *steam);
         if pawns.is_empty() {
-            bail!("SteamID {steam} was not linked to any CCSPlayerPawn in the demo");
+            bail!("当前 ID 不属于该 Demo：{steam}");
         }
         for pawn_handle in pawns {
             let Some(pawn) = discovery.pawns.get(&pawn_handle) else {
                 continue;
             };
-            let Some(team) = choose_team(pawn, player_plan) else {
+            let team = choose_team(pawn, player_plan);
+            let team_plan = team.and_then(|team| player_plan.by_team.get(&team));
+            let any_plan = player_plan.by_team.get(&Team::Any);
+            if team_plan.is_none() && any_plan.is_none() {
                 continue;
-            };
-            let Some(team_plan) = player_plan.by_team.get(&team) else {
-                continue;
-            };
-            selected_pawns.insert(pawn_handle);
-            if let Some(cosmetic) = &team_plan.glove {
-                gloves.insert(
-                    pawn_handle,
-                    GloveRule { steam: *steam, cosmetic: cosmetic.clone() },
-                );
             }
-            if let Some(cosmetic) = &team_plan.knife {
-                let variant = discovery
-                    .variants
-                    .get(&cosmetic.definition)
-                    .copied()
-                    .or_else(|| fallback_variant(cosmetic.definition))
-                    .ok_or_else(|| anyhow!(
-                        "knife definition {} has no model/subclass calibration in this demo",
-                        cosmetic.definition
-                    ))?;
-                target_definitions.insert(cosmetic.definition);
-                for weapon in &pawn.weapons {
-                    if discovery.knives.contains(weapon) {
-                        knives.insert(
-                            *weapon,
-                            KnifeRule {
+            selected_pawns.insert(pawn_handle);
+            if let Some(team_plan) = team_plan {
+                if let Some(cosmetic) = &team_plan.glove {
+                    let team_number = team.and_then(Team::number).unwrap_or_default();
+                    if pawn.painted_gloves_by_team.contains(&team_number) {
+                        painted_glove_passthroughs.insert((pawn_handle, team_number));
+                    } else {
+                        let mut cosmetic = cosmetic.clone();
+                        if cosmetic.preserve_source_definition {
+                            cosmetic.definition = pawn
+                                .glove_definitions_by_team
+                                .get(&team_number)
+                                .copied()
+                                .unwrap_or(cosmetic.definition);
+                        }
+                        gloves.insert(
+                            pawn_handle,
+                            GloveRule {
                                 steam: *steam,
-                                cosmetic: cosmetic.clone(),
-                                variant,
+                                cosmetic,
                             },
                         );
+                    }
+                }
+                if let Some(cosmetic) = &team_plan.knife {
+                    let variant = installed_variant(cosmetic.definition).ok_or_else(|| {
+                        anyhow!(
+                            "knife definition {} has no installed CS2 model/subclass mapping",
+                            cosmetic.definition
+                        )
+                    })?;
+                    target_definitions.insert(cosmetic.definition);
+                    for weapon in &pawn.weapons {
+                        if discovery.knives.contains(weapon) {
+                            knives.insert(
+                                *weapon,
+                                KnifeRule {
+                                    steam: *steam,
+                                    cosmetic: cosmetic.clone(),
+                                    variant,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            for weapon_plan in [any_plan, team_plan].into_iter().flatten() {
+                for (source_definition, cosmetic) in &weapon_plan.weapons {
+                    for weapon_handle in &pawn.weapons {
+                        if discovery.knives.contains(weapon_handle) {
+                            continue;
+                        }
+                        let Some(discovered) = discovery.weapons.get(weapon_handle) else {
+                            continue;
+                        };
+                        if discovered.definition != *source_definition {
+                            continue;
+                        }
+                        if discovered.painted {
+                            painted_weapon_passthroughs.insert(*weapon_handle);
+                        } else {
+                            weapons.insert(
+                                *weapon_handle,
+                                WeaponRule {
+                                    steam: *steam,
+                                    cosmetic: cosmetic.clone(),
+                                },
+                            );
+                        }
                     }
                 }
             }
         }
     }
-    if knives.is_empty() && gloves.is_empty() {
-        bail!("no owned knife or pawn glove targets were resolved from the demo");
+    if knives.is_empty()
+        && gloves.is_empty()
+        && weapons.is_empty()
+        && painted_glove_passthroughs.is_empty()
+        && painted_weapon_passthroughs.is_empty()
+    {
+        bail!("no owned knife, glove or weapon targets were resolved from the demo");
     }
 
-    let mut resources = Vec::new();
-    for definition in target_definitions {
-        let key = skeleton_for(definition)
-            .ok_or_else(|| anyhow!("knife definition {definition} has no skeleton mapping"))?;
-        let value = discovery.anim_assets.get(key).cloned().ok_or_else(|| {
-            anyhow!("animation resource {key} is not present in the source demo")
-        })?;
-        resources.push(AnimAsset { key: key.to_string(), value });
+    if !target_definitions.is_empty() && !discovery.anim_asset_table_present {
+        bail!("source demo does not contain the AnimAssetData string table required for knife replacement");
     }
-    Ok(RewritePlan { knives, gloves, resources, selected_pawns })
+    if !target_definitions.is_empty() && discovery.anim_asset_initial_count.is_none() {
+        bail!("source demo did not expose the initial AnimAssetData table required for safe row insertion");
+    }
+    let mut resources = Vec::new();
+    let mut required_resources = BTreeSet::new();
+    for definition in &target_definitions {
+        let asset = knife_asset(*definition).ok_or_else(|| {
+            anyhow!("knife definition {definition} has no installed CS2 asset mapping")
+        })?;
+        required_resources.insert(asset.model.to_string());
+        required_resources.insert(asset.skeleton.to_string());
+    }
+    let insert_at = discovery.anim_asset_initial_count.unwrap_or_default();
+    let mut installed_initial_rows = discovery.anim_asset_initial_keys.clone();
+    for definition in &target_definitions {
+        let target_asset = knife_asset(*definition).ok_or_else(|| {
+            anyhow!("knife definition {definition} has no installed CS2 asset mapping")
+        })?;
+        let normalized_target = target_asset.skeleton.to_ascii_lowercase();
+        if installed_initial_rows.contains(&normalized_target) {
+            continue;
+        }
+        resources.push(AnimAsset {
+            index: insert_at + resources.len() as i32,
+            key: target_asset.skeleton.to_string(),
+            value: WEAPON_ANIM_ASSET_METADATA.to_vec(),
+        });
+        installed_initial_rows.insert(normalized_target);
+    }
+    if !required_resources.is_empty() {
+        let cs2_game_dir = cs2_game_dir.ok_or_else(|| {
+            anyhow!("request is missing cs2_game_dir required for installed knife resources")
+        })?;
+        require_installed_resources(cs2_game_dir, &required_resources)?;
+    }
+    Ok(RewritePlan {
+        knives,
+        gloves,
+        weapons,
+        painted_glove_passthroughs,
+        painted_weapon_passthroughs,
+        resources,
+        selected_pawns,
+    })
 }
 
-fn push_attribute(fields: &mut Vec<(String, FieldValue)>, prefix: &str, slot: usize, definition: u16, value: f32) {
+fn push_attribute(
+    fields: &mut Vec<(String, FieldValue)>,
+    prefix: &str,
+    slot: usize,
+    definition: u16,
+    value: f32,
+) {
     let base = format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes.{slot:04}");
-    fields.push((format!("{base}.m_iAttributeDefinitionIndex"), FieldValue::Unsigned16(definition)));
+    fields.push((
+        format!("{base}.m_iAttributeDefinitionIndex"),
+        FieldValue::Unsigned16(definition),
+    ));
     fields.push((format!("{base}.m_iRawValue32"), FieldValue::Float(value)));
     fields.push((format!("{base}.m_flInitialValue"), FieldValue::Float(value)));
-    fields.push((format!("{base}.m_nRefundableCurrency"), FieldValue::Signed32(0)));
+    fields.push((
+        format!("{base}.m_nRefundableCurrency"),
+        FieldValue::Signed32(0),
+    ));
     fields.push((format!("{base}.m_bSetBonus"), FieldValue::Boolean(false)));
 }
 
@@ -447,19 +1144,108 @@ fn knife_fields(rule: &KnifeRule) -> Vec<(String, FieldValue)> {
     let (high, low) = fnv_identity(rule.steam, c.definition, 0x4B4E_4946_455F_4944);
     let prefix = "m_AttributeManager.m_Item";
     let mut fields = vec![
-        ("CBodyComponent.m_skeletonInstance.m_modelState.m_hModel".into(), FieldValue::Unsigned64(rule.variant.model)),
-        ("m_nSubclassID".into(), FieldValue::Unsigned32(rule.variant.subclass)),
-        (format!("{prefix}.m_iItemDefinitionIndex"), FieldValue::Unsigned16(c.definition)),
-        (format!("{prefix}.m_iEntityQuality"), FieldValue::Signed32(3)),
-        (format!("{prefix}.m_iItemIDHigh"), FieldValue::Unsigned32(high)),
-        (format!("{prefix}.m_iItemIDLow"), FieldValue::Unsigned32(low)),
-        (format!("{prefix}.m_iAccountID"), FieldValue::Unsigned32(account)),
-        (format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes"), FieldValue::Unsigned32(3)),
-        (format!("{prefix}.m_szCustomName"), FieldValue::String("nSkinzCS2".into())),
-        ("m_nFallbackPaintKit".into(), FieldValue::Signed32(c.paint_kit)),
-        ("m_nFallbackSeed".into(), FieldValue::Signed32(c.seed as i32)),
+        (
+            "CBodyComponent.m_skeletonInstance.m_modelState.m_hModel".into(),
+            FieldValue::Unsigned64(rule.variant.model),
+        ),
+        (
+            "m_nSubclassID".into(),
+            FieldValue::Unsigned32(rule.variant.subclass),
+        ),
+        (
+            format!("{prefix}.m_iItemDefinitionIndex"),
+            FieldValue::Unsigned16(c.definition),
+        ),
+        (
+            format!("{prefix}.m_iEntityQuality"),
+            FieldValue::Signed32(3),
+        ),
+        (
+            format!("{prefix}.m_iItemIDHigh"),
+            FieldValue::Unsigned32(high),
+        ),
+        (
+            format!("{prefix}.m_iItemIDLow"),
+            FieldValue::Unsigned32(low),
+        ),
+        (
+            format!("{prefix}.m_iAccountID"),
+            FieldValue::Unsigned32(account),
+        ),
+        (
+            format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes"),
+            FieldValue::Unsigned32(3),
+        ),
+        (
+            format!("{prefix}.m_szCustomName"),
+            FieldValue::String(c.custom_name.clone()),
+        ),
+        (
+            "m_nFallbackPaintKit".into(),
+            FieldValue::Signed32(c.paint_kit),
+        ),
+        (
+            "m_nFallbackSeed".into(),
+            FieldValue::Signed32(c.seed as i32),
+        ),
         ("m_flFallbackWear".into(), FieldValue::Float(c.wear)),
     ];
+    push_attribute(&mut fields, prefix, 0, 6, c.paint_kit as f32);
+    push_attribute(&mut fields, prefix, 1, 7, c.seed);
+    push_attribute(&mut fields, prefix, 2, 8, c.wear);
+    fields
+}
+
+fn weapon_fields(rule: &WeaponRule) -> Vec<(String, FieldValue)> {
+    let c = &rule.cosmetic;
+    let account = rule.steam as u32;
+    let (high, low) = fnv_identity(rule.steam, c.definition, 0x5745_4150_4F4E_4944);
+    let prefix = "m_AttributeManager.m_Item";
+    let mut fields = vec![
+        (
+            format!("{prefix}.m_iItemDefinitionIndex"),
+            FieldValue::Unsigned16(c.definition),
+        ),
+        (
+            format!("{prefix}.m_iEntityQuality"),
+            FieldValue::Signed32(c.quality),
+        ),
+        (
+            format!("{prefix}.m_iItemIDHigh"),
+            FieldValue::Unsigned32(high),
+        ),
+        (
+            format!("{prefix}.m_iItemIDLow"),
+            FieldValue::Unsigned32(low),
+        ),
+        (
+            format!("{prefix}.m_iAccountID"),
+            FieldValue::Unsigned32(account),
+        ),
+        (
+            format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes"),
+            FieldValue::Unsigned32(3),
+        ),
+        (
+            format!("{prefix}.m_szCustomName"),
+            FieldValue::String(c.custom_name.clone()),
+        ),
+        (
+            "m_nFallbackPaintKit".into(),
+            FieldValue::Signed32(c.paint_kit),
+        ),
+        (
+            "m_nFallbackSeed".into(),
+            FieldValue::Signed32(c.seed as i32),
+        ),
+        ("m_flFallbackWear".into(), FieldValue::Float(c.wear)),
+    ];
+    if let Some(mask) = c.mesh_group_mask {
+        fields.push((
+            "CBodyComponent.m_skeletonInstance.m_modelState.m_MeshGroupMask".into(),
+            FieldValue::Unsigned64(mask),
+        ));
+    }
     push_attribute(&mut fields, prefix, 0, 6, c.paint_kit as f32);
     push_attribute(&mut fields, prefix, 1, 7, c.seed);
     push_attribute(&mut fields, prefix, 2, 8, c.wear);
@@ -472,16 +1258,54 @@ fn glove_fields(rule: &GloveRule) -> Vec<(String, FieldValue)> {
     let (high, low) = fnv_identity(rule.steam, c.definition, 0x474C_4F56_455F_4944);
     let prefix = "m_EconGloves";
     let mut fields = vec![
-        (format!("{prefix}.m_iItemDefinitionIndex"), FieldValue::Unsigned16(c.definition)),
-        (format!("{prefix}.m_iEntityQuality"), FieldValue::Signed32(3)),
-        (format!("{prefix}.m_iEntityLevel"), FieldValue::Unsigned32(1)),
-        (format!("{prefix}.m_iItemIDHigh"), FieldValue::Unsigned32(high)),
-        (format!("{prefix}.m_iItemIDLow"), FieldValue::Unsigned32(low)),
-        (format!("{prefix}.m_iAccountID"), FieldValue::Unsigned32(account)),
-        (format!("{prefix}.m_iInventoryPosition"), FieldValue::Unsigned32(48)),
-        (format!("{prefix}.m_bInitialized"), FieldValue::Boolean(true)),
-        (format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes"), FieldValue::Unsigned32(3)),
-        (format!("{prefix}.m_szCustomName"), FieldValue::String("nSkinzCS2".into())),
+        (
+            format!("{prefix}.m_iItemDefinitionIndex"),
+            FieldValue::Unsigned16(c.definition),
+        ),
+        (
+            format!("{prefix}.m_iEntityQuality"),
+            FieldValue::Signed32(c.quality),
+        ),
+        (
+            format!("{prefix}.m_iEntityLevel"),
+            FieldValue::Unsigned32(1),
+        ),
+        (
+            format!("{prefix}.m_iItemIDHigh"),
+            FieldValue::Unsigned32(high),
+        ),
+        (
+            format!("{prefix}.m_iItemIDLow"),
+            FieldValue::Unsigned32(low),
+        ),
+        (
+            format!("{prefix}.m_iAccountID"),
+            FieldValue::Unsigned32(account),
+        ),
+        (
+            format!("{prefix}.m_iInventoryPosition"),
+            FieldValue::Unsigned32(48),
+        ),
+        (
+            format!("{prefix}.m_bInitialized"),
+            FieldValue::Boolean(true),
+        ),
+        (
+            format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes"),
+            FieldValue::Unsigned32(3),
+        ),
+        (
+            format!("{prefix}.m_szCustomName"),
+            FieldValue::String(c.custom_name.clone()),
+        ),
+        (
+            format!("{prefix}.m_szCustomName"),
+            FieldValue::String("nSkinzCS2".into()),
+        ),
+        (
+            "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0000".into(),
+            FieldValue::Signed32(1),
+        ),
         ("m_nEconGlovesChanged".into(), FieldValue::Unsigned8(1)),
     ];
     push_attribute(&mut fields, prefix, 0, 6, c.paint_kit as f32);
@@ -494,6 +1318,15 @@ struct CosmeticRewriter {
     plan: RewritePlan,
 }
 
+fn replacement_from_fields(
+    fields: Vec<(String, FieldValue)>,
+    field_name: &str,
+) -> Option<FieldValue> {
+    fields
+        .into_iter()
+        .find_map(|(name, value)| (name == field_name).then_some(value))
+}
+
 impl DemoRewriter for CosmeticRewriter {
     fn interests(&self) -> RewriteInterests {
         RewriteInterests::ENTITY_FIELDS
@@ -502,12 +1335,35 @@ impl DemoRewriter for CosmeticRewriter {
             | RewriteInterests::SVC_CREATE_STRING_TABLE
     }
 
-    fn should_track_entity(&mut self, _ctx: &Context, _event: EntityEvents, entity: &Entity) -> bool {
-        self.plan.knives.contains_key(&entity.handle()) || self.plan.gloves.contains_key(&entity.handle())
+    fn should_rewrite_entity(
+        &mut self,
+        _ctx: &Context,
+        _event: EntityEvents,
+        entity: &Entity,
+    ) -> bool {
+        self.plan.knives.contains_key(&entity.handle())
+            || self.plan.gloves.contains_key(&entity.handle())
+            || self.plan.weapons.contains_key(&entity.handle())
     }
 
-    fn should_rewrite_entity(&mut self, _ctx: &Context, _event: EntityEvents, entity: &Entity) -> bool {
-        self.plan.knives.contains_key(&entity.handle()) || self.plan.gloves.contains_key(&entity.handle())
+    fn replace_entity_field(
+        &mut self,
+        _ctx: &Context,
+        _event: EntityEvents,
+        entity: &Entity,
+        field_name: &str,
+        _value: &FieldValue,
+    ) -> Option<FieldValue> {
+        if let Some(rule) = self.plan.knives.get(&entity.handle()) {
+            return replacement_from_fields(knife_fields(rule), field_name);
+        }
+        if let Some(rule) = self.plan.weapons.get(&entity.handle()) {
+            return replacement_from_fields(weapon_fields(rule), field_name);
+        }
+        if let Some(rule) = self.plan.gloves.get(&entity.handle()) {
+            return replacement_from_fields(glove_fields(rule), field_name);
+        }
+        None
     }
 
     fn additional_entity_fields(
@@ -522,6 +1378,9 @@ impl DemoRewriter for CosmeticRewriter {
         if let Some(rule) = self.plan.knives.get(&entity.handle()) {
             return Ok(knife_fields(rule));
         }
+        if let Some(rule) = self.plan.weapons.get(&entity.handle()) {
+            return Ok(weapon_fields(rule));
+        }
         if let Some(rule) = self.plan.gloves.get(&entity.handle()) {
             return Ok(glove_fields(rule));
         }
@@ -535,7 +1394,10 @@ impl DemoRewriter for CosmeticRewriter {
         table_name: &str,
         entry: &mut StringTableEntryUpdate,
     ) -> Result<(), source2_demo::error::ParserError> {
-        if table_name.eq_ignore_ascii_case("AnimAssetData") && entry.index() >= 2 {
+        let Some(first) = self.plan.resources.first() else {
+            return Ok(());
+        };
+        if table_name.eq_ignore_ascii_case("AnimAssetData") && entry.index() >= first.index {
             entry.set_index(entry.index() + self.plan.resources.len() as i32);
         }
         Ok(())
@@ -550,10 +1412,10 @@ impl DemoRewriter for CosmeticRewriter {
         if !message.name().eq_ignore_ascii_case("AnimAssetData") || self.plan.resources.is_empty() {
             return Ok(MessageRewrite::Keep);
         }
-        for (offset, resource) in self.plan.resources.iter().enumerate() {
+        for resource in &self.plan.resources {
             insert_create_string_table_entry(
                 message,
-                2 + offset as i32,
+                resource.index,
                 resource.key.clone(),
                 resource.value.clone(),
             )?;
@@ -572,28 +1434,57 @@ impl DemoRewriter for CosmeticRewriter {
             if !table.table_name().eq_ignore_ascii_case("AnimAssetData") {
                 continue;
             }
-            for (offset, resource) in self.plan.resources.iter().enumerate() {
+            for resource in &self.plan.resources {
+                let index = resource.index.max(0) as usize;
+                if index > table.items.len() {
+                    return Err(source2_demo::error::ParserError::IoError(format!(
+                        "AnimAssetData insertion index {} exceeds snapshot size {}",
+                        resource.index,
+                        table.items.len()
+                    )));
+                }
                 table.items.insert(
-                    2 + offset,
-                    ItemsT { str: Some(resource.key.clone()), data: Some(resource.value.clone()) },
+                    index,
+                    ItemsT {
+                        str: Some(resource.key.clone()),
+                        data: Some(resource.value.clone()),
+                    },
                 );
+                changed = true;
             }
-            changed |= !self.plan.resources.is_empty();
         }
-        Ok(if changed { MessageRewrite::Rewrite } else { MessageRewrite::Keep })
+        Ok(if changed {
+            MessageRewrite::Rewrite
+        } else {
+            MessageRewrite::Keep
+        })
     }
 }
 
 fn discover(input: &Path) -> Result<Discovery> {
-    let file = File::open(input).with_context(|| format!("open source demo {}", input.display()))?;
-    let mut parser = Parser::from_reader(BufReader::new(file))?;
+    let file =
+        File::open(input).with_context(|| format!("open source demo {}", input.display()))?;
+    let mut parser = Parser::from_reader(BufReader::with_capacity(IO_BUFFER_CAPACITY, file))?;
     let state = parser.register_observer::<Discovery>();
     parser.run_to_end()?;
     let mut state = state.borrow_mut();
     Ok(std::mem::take(&mut *state))
 }
 
+fn discover_from_slice(input: &[u8]) -> Result<Discovery> {
+    let mut parser = Parser::from_slice(input)?;
+    let state = parser.register_observer::<Discovery>();
+    parser.run_to_end()?;
+    let mut state = state.borrow_mut();
+    Ok(std::mem::take(&mut *state))
+}
+
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
 fn rewrite(request: &Request) -> Result<Response> {
+    let total_started = Instant::now();
     if request.schema_version != 1 {
         bail!("unsupported request schema {}", request.schema_version);
     }
@@ -601,29 +1492,80 @@ fn rewrite(request: &Request) -> Result<Response> {
         bail!("input and output demo paths must differ");
     }
     let plans = parse_plans(request)?;
-    let discovery = discover(&request.input_dem)?;
-    let plan = build_rewrite_plan(&plans, &discovery)?;
+    let input_size = std::fs::metadata(&request.input_dem)
+        .with_context(|| format!("inspect source demo {}", request.input_dem.display()))?
+        .len();
+    let mut input_read_ms = 0;
+    let mut input_mode = "buffered_stream".to_string();
+    let in_memory = if input_size <= IN_MEMORY_DEMO_LIMIT {
+        let read_started = Instant::now();
+        let bytes = std::fs::read(&request.input_dem)
+            .with_context(|| format!("read source demo {}", request.input_dem.display()))?;
+        input_read_ms = elapsed_ms(read_started);
+        input_mode = "single_read_memory".to_string();
+        Some(bytes)
+    } else {
+        None
+    };
+
+    let discovery_started = Instant::now();
+    let discovery = match in_memory.as_deref() {
+        Some(bytes) => discover_from_slice(bytes)?,
+        None => discover(&request.input_dem)?,
+    };
+    let discovery_ms = elapsed_ms(discovery_started);
+    let plan = build_rewrite_plan(&plans, &discovery, request.cs2_game_dir.as_deref())?;
+    let rewritten_knives = plan.knives.len();
     let counts = (
         plan.selected_pawns.len(),
-        plan.knives.len(),
+        rewritten_knives,
         plan.gloves.len(),
+        plan.weapons.len(),
+        plan.painted_glove_passthroughs.len(),
+        plan.painted_weapon_passthroughs.len(),
         plan.resources.len(),
     );
     if let Some(parent) = request.output_dem.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let input = File::open(&request.input_dem)?;
+    let rewrite_started = Instant::now();
     let output = File::create(&request.output_dem)?;
-    let mut writer = DemoWriter::from_reader(BufReader::new(input), BufWriter::new(output))?;
-    writer.add_rewriter(CosmeticRewriter { plan });
-    writer.run()?;
+    let output = BufWriter::with_capacity(IO_BUFFER_CAPACITY, output);
+    match in_memory.as_deref() {
+        Some(bytes) => {
+            let mut writer = DemoWriter::from_slice(bytes, output)?;
+            writer.add_rewriter(CosmeticRewriter { plan });
+            writer.run()?;
+        }
+        None => {
+            let input = File::open(&request.input_dem)?;
+            let input = BufReader::with_capacity(IO_BUFFER_CAPACITY, input);
+            let mut writer = DemoWriter::from_reader(input, output)?;
+            writer.add_rewriter(CosmeticRewriter { plan });
+            writer.run()?;
+        }
+    }
+    let rewrite_ms = elapsed_ms(rewrite_started);
     Ok(Response {
         ok: true,
         error: None,
         pawn_count: counts.0,
         knife_count: counts.1,
         glove_count: counts.2,
-        animation_resource_count: counts.3,
+        weapon_count: counts.3,
+        painted_glove_passthrough_count: counts.4,
+        painted_weapon_passthrough_count: counts.5,
+        animation_resource_count: counts.6,
+        animation_resource_source: if counts.6 == 0 {
+            "none".to_string()
+        } else {
+            "installed_cs2".to_string()
+        },
+        input_mode,
+        input_read_ms,
+        discovery_ms,
+        rewrite_ms,
+        total_ms: elapsed_ms(total_started),
     })
 }
 
@@ -638,7 +1580,10 @@ fn arguments() -> Result<(PathBuf, PathBuf)> {
             other => bail!("unknown argument {other:?}"),
         }
     }
-    Ok((request.context("missing --request")?, response.context("missing --response")?))
+    Ok((
+        request.context("missing --request")?,
+        response.context("missing --response")?,
+    ))
 }
 
 fn write_response(path: &Path, response: &Response) -> Result<()> {
@@ -664,7 +1609,16 @@ fn run_main() -> Result<()> {
                 pawn_count: 0,
                 knife_count: 0,
                 glove_count: 0,
+                weapon_count: 0,
+                painted_glove_passthrough_count: 0,
+                painted_weapon_passthrough_count: 0,
                 animation_resource_count: 0,
+                animation_resource_source: String::new(),
+                input_mode: String::new(),
+                input_read_ms: 0,
+                discovery_ms: 0,
+                rewrite_ms: 0,
+                total_ms: 0,
             };
             let _ = write_response(&response_path, &response);
             Err(error)
@@ -680,4 +1634,317 @@ fn main() -> Result<()> {
         .context("start demo rewrite worker")?
         .join()
         .map_err(|_| anyhow!("demo rewrite worker panicked"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temporary_directory(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "nskinz-demo-rewriter-{name}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    fn has_field(fields: &[(String, FieldValue)], name: &str, expected: FieldValue) -> bool {
+        fields
+            .iter()
+            .any(|(field_name, value)| field_name == name && *value == expected)
+    }
+
+    #[test]
+    fn request_cosmetic_ranges_match_cs2_fields() {
+        let request = Request {
+            schema_version: 1,
+            input_dem: PathBuf::from("input.dem"),
+            output_dem: PathBuf::from("output.dem"),
+            cs2_game_dir: None,
+            passes: vec![RequestPass {
+                steam_id64: "76561199840349579".into(),
+                items: vec![
+                    RequestItem {
+                        definition_index: 7,
+                        replacement_definition_index: None,
+                        preserve_source_definition: false,
+                        paint_kit: 801,
+                        quality: 0,
+                        pattern_seed: -1.0,
+                        wear: 0.0000001,
+                        mesh_group_mask: Some(2),
+                        custom_name: String::new(),
+                        team: "ANY".into(),
+                    },
+                    RequestItem {
+                        definition_index: 16,
+                        replacement_definition_index: None,
+                        preserve_source_definition: false,
+                        paint_kit: 844,
+                        quality: 0,
+                        pattern_seed: 1001.0,
+                        wear: 2.0,
+                        mesh_group_mask: None,
+                        custom_name: "M4 test".into(),
+                        team: "ANY".into(),
+                    },
+                ],
+            }],
+        };
+        let plans = parse_plans(&request).expect("parse cosmetic range request");
+        let any = plans
+            .get(&76_561_199_840_349_579)
+            .and_then(|plan| plan.by_team.get(&Team::Any))
+            .expect("ANY team plan");
+        let ak = any.weapons.get(&7).expect("AK plan");
+        assert_eq!(ak.seed, 0.0);
+        assert_eq!(ak.wear.to_bits(), 0.0000001f32.to_bits());
+        assert_eq!(ak.mesh_group_mask, Some(2));
+        assert_eq!(ak.custom_name, "nSkinz CS2");
+        let m4 = any.weapons.get(&16).expect("M4 plan");
+        assert_eq!(m4.seed, 1000.0);
+        assert_eq!(m4.wear, 1.0);
+        assert_eq!(m4.custom_name, "M4 test");
+    }
+
+    fn make_vpk_with_entry(path: &Path, resource: &str) {
+        let (directory_and_name, extension) = resource
+            .rsplit_once('.')
+            .expect("fixture resource must have an extension");
+        let (directory, filename) = directory_and_name
+            .rsplit_once('/')
+            .expect("fixture resource must have a directory");
+
+        let mut tree = Vec::new();
+        tree.extend_from_slice(extension.as_bytes());
+        tree.push(0);
+        tree.extend_from_slice(directory.as_bytes());
+        tree.push(0);
+        tree.extend_from_slice(filename.as_bytes());
+        tree.push(0);
+        tree.extend_from_slice(&0u32.to_le_bytes()); // CRC32 is irrelevant to the directory lookup.
+        tree.extend_from_slice(&0u16.to_le_bytes()); // No preload bytes.
+        tree.extend_from_slice(&0u16.to_le_bytes()); // Archive index.
+        tree.extend_from_slice(&0u32.to_le_bytes()); // Archive offset.
+        tree.extend_from_slice(&1u32.to_le_bytes()); // A non-empty compiled resource.
+        tree.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        tree.extend_from_slice(&[0, 0, 0]); // End filename, directory and extension lists.
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&VPK_SIGNATURE.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(tree.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&tree);
+        std::fs::write(path, bytes).expect("write VPK fixture");
+    }
+
+    #[test]
+    fn weapon_animation_metadata_matches_cs2_string_table_layout() {
+        assert_eq!(
+            WEAPON_ANIM_ASSET_METADATA,
+            &[
+                1, 0, 0, 0, 3, 0, 0, 0, b'w', b'e', b'a', b'p', b'o', b'n', 0, b'w', b'e', b'a',
+                b'p', b'o', b'n', b'_', b'o', b'f', b'f', b's', b'e', b't', 0, b'e', b'c', b'o',
+                b'n', 0, 0, 0, 0, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_animation_resource_is_resolved_from_cs2_vpk() {
+        let root = temporary_directory("vpk-resource");
+        std::fs::create_dir_all(&root).expect("create VPK fixture directory");
+        let vpk = root.join("pak01_dir.vpk");
+        make_vpk_with_entry(&vpk, "animation/skeletons/weapons/knife_m9.vnmskel_c");
+
+        assert!(
+            vpk_contains_path(&vpk, "animation/skeletons/weapons/knife_m9.vnmskel_c")
+                .expect("read VPK fixture")
+        );
+        assert!(
+            !vpk_contains_path(&vpk, "animation/skeletons/weapons/knife_karambit.vnmskel_c")
+                .expect("read VPK fixture")
+        );
+        require_installed_resource(&root, "animation/skeletons/weapons/knife_m9.vnmskel")
+            .expect("resolve installed animation resource from VPK");
+
+        std::fs::remove_dir_all(&root).expect("remove VPK fixture directory");
+    }
+
+    #[test]
+    fn installed_animation_resource_accepts_loose_compiled_file() {
+        let root = temporary_directory("loose-resource");
+        let resource = root.join("animation/skeletons/weapons/knife_default_t.vnmskel_c");
+        std::fs::create_dir_all(resource.parent().expect("resource parent"))
+            .expect("create loose resource directory");
+        std::fs::write(&resource, [1u8]).expect("write loose resource fixture");
+
+        require_installed_resource(&root, "animation/skeletons/weapons/knife_default_t.vnmskel")
+            .expect("resolve loose installed animation resource");
+
+        std::fs::remove_dir_all(&root).expect("remove loose resource fixture directory");
+    }
+
+    #[test]
+    fn installed_knife_variants_cover_every_supported_definition() {
+        let expected_models = [
+            (42, 0x9322_FB72_0F3E_1DB5),
+            (59, 0x66AC_5E62_9C8C_6E6C),
+            (500, 0xD3FF_68A1_E5D0_94B8),
+            (503, 0xD122_A4BD_B5AB_0BE0),
+            (505, 0x4BD0_0438_B87D_B94F),
+            (506, 0x67B9_19D8_9B78_02B0),
+            (507, 0x14BD_F873_249B_A0B5),
+            (508, 0xBBB5_EF19_8628_5654),
+            (509, 0x5810_71FC_7EE2_D9FF),
+            (512, 0x4D2E_C28F_4D17_3446),
+            (514, 0x66F6_6989_F99F_7220),
+            (515, 0xBB0B_CD50_C58C_C3D9),
+            (516, 0xF81C_0236_F8DF_3E9D),
+            (517, 0x26A1_2D7F_5921_DC1E),
+            (518, 0xC14F_A104_1260_7942),
+            (519, 0xBA79_58CF_5F07_96EC),
+            (520, 0xDFFD_0BB1_935D_FEB1),
+            (521, 0x788D_7EC6_428F_5E66),
+            (522, 0x75EC_08DC_90C3_5EB4),
+            (523, 0x1760_BBE9_8C91_7B4A),
+            (525, 0x6402_A1DF_A760_7197),
+            (526, 0xBB68_2220_DF9D_8D89),
+        ];
+        assert_eq!(KNIFE_ASSETS.len(), expected_models.len());
+        for (definition, model) in expected_models {
+            let variant = installed_variant(definition).expect("supported knife variant");
+            assert_eq!(variant.model, model, "definition {definition} model hash");
+            assert_eq!(
+                variant.subclass,
+                murmur_hash2_ascii_ci(&definition.to_string(), 0x3141_5926),
+                "definition {definition} subclass token"
+            );
+            assert_ne!(variant.model, 0);
+            assert_ne!(variant.subclass, 0);
+        }
+        assert_eq!(installed_variant(500).unwrap().subclass, 3_933_374_535);
+        assert!(installed_variant(524).is_none());
+    }
+
+    #[test]
+    fn installed_knife_variant_matches_native_demo_samples() {
+        let samples = [
+            (42, 10_602_312_940_084_141_493, 294_910_436),
+            (59, 7_398_392_065_489_137_260, 1_058_568_214),
+            (503, 15_069_788_437_838_760_928, 3_787_235_507),
+            (507, 1_494_623_824_775_979_189, 1_731_408_398),
+            (508, 13_525_979_948_781_164_116, 1_638_561_588),
+            (515, 13_478_092_056_631_755_737, 1_353_709_123),
+            (521, 8_686_738_646_252_871_270, 3_206_681_373),
+        ];
+        for (definition, model, subclass) in samples {
+            assert_eq!(
+                installed_variant(definition),
+                Some(KnifeVariant { model, subclass }),
+                "definition {definition}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_cosmetic_rebuilds_materialize_complete_paint_attributes() {
+        let cosmetic = Cosmetic {
+            definition: 5034,
+            preserve_source_definition: false,
+            paint_kit: 10033,
+            quality: 3,
+            seed: 950.0,
+            wear: 0.226326,
+            mesh_group_mask: None,
+            custom_name: "nSkinz CS2".into(),
+        };
+        let glove = glove_fields(&GloveRule {
+            steam: 76_561_199_674_674_473,
+            cosmetic: cosmetic.clone(),
+        });
+        assert!(has_field(
+            &glove,
+            "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes",
+            FieldValue::Unsigned32(3)
+        ));
+        assert!(has_field(
+            &glove,
+            "m_EconGloves.m_szCustomName",
+            FieldValue::String("nSkinz CS2".into())
+        ));
+        assert!(has_field(
+            &glove,
+            "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes.0000.m_iAttributeDefinitionIndex",
+            FieldValue::Unsigned16(6)
+        ));
+        assert!(has_field(
+            &glove,
+            "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes.0000.m_iRawValue32",
+            FieldValue::Float(10033.0)
+        ));
+        assert!(has_field(
+            &glove,
+            "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes.0001.m_iAttributeDefinitionIndex",
+            FieldValue::Unsigned16(7)
+        ));
+        assert!(has_field(
+            &glove,
+            "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes.0002.m_iAttributeDefinitionIndex",
+            FieldValue::Unsigned16(8)
+        ));
+        assert!(has_field(
+            &glove,
+            "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0000",
+            FieldValue::Signed32(1)
+        ));
+        assert!(has_field(
+            &glove,
+            "m_nEconGlovesChanged",
+            FieldValue::Unsigned8(1)
+        ));
+
+        let weapon = weapon_fields(&WeaponRule {
+            steam: 76_561_199_674_674_473,
+            cosmetic: Cosmetic {
+                definition: 44,
+                preserve_source_definition: false,
+                paint_kit: 1,
+                quality: 0,
+                seed: 3.0,
+                wear: 0.2,
+                mesh_group_mask: Some(2),
+                custom_name: "AK custom".into(),
+            },
+        });
+        assert!(has_field(
+            &weapon,
+            "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes",
+            FieldValue::Unsigned32(3)
+        ));
+        assert!(has_field(
+            &weapon,
+            "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes.0000.m_iRawValue32",
+            FieldValue::Float(1.0)
+        ));
+        assert!(has_field(
+            &weapon,
+            "m_nFallbackPaintKit",
+            FieldValue::Signed32(1)
+        ));
+        assert!(has_field(
+            &weapon,
+            "m_AttributeManager.m_Item.m_szCustomName",
+            FieldValue::String("AK custom".into())
+        ));
+        assert!(has_field(
+            &weapon,
+            "CBodyComponent.m_skeletonInstance.m_modelState.m_MeshGroupMask",
+            FieldValue::Unsigned64(2)
+        ));
+    }
 }

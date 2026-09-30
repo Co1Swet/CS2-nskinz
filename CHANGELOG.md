@@ -1,5 +1,20 @@
 # Changelog / 更新记录
 
+## v0.5.4 — 2026-09-30
+
+- The temporary-demo knife path no longer copies or requires the target animation skeleton row from the source demo. It validates the compiled target skeleton in the installed CS2 `game/csgo` loose content or `pak01_dir.vpk`, then writes the standard `AnimAssetData` loader metadata.
+- 临时 Demo 换刀不再从源 Demo 复制或要求目标动画骨骼记录；现在从已安装 CS2 的 `game/csgo` 松散文件或 `pak01_dir.vpk` 验证目标编译骨骼，再写入标准 `AnimAssetData` 加载元数据。
+- Retained hybrid cosmetic routing: already-painted firearms and gloves stay on the established live path, while stock/default firearms, T/CT gloves (`5028`/`5029`) and T/CT knives (`59`/`42`) are materialized in the generated demo before its second playback.
+- 保留混合换肤路由：已有涂装的枪械和手套继续走原实时路径；原皮枪械、T/CT 默认手套（`5028`/`5029`）与 T/CT 默认匕首（`59`/`42`）在生成的 Demo 中补齐后再二次回放。
+- Fixed stock AK-47 finish activation on CS2 2000919 by verifying the updated native material-generator entry and running material initialization once per entity generation with a stable cache instead of per-frame refreshes.
+- 修复 CS2 2000919 下原皮 AK-47 涂装不显示的问题：验证新版原生材质生成入口，每个实体代际仅初始化一次并复用稳定缓存，不再逐帧刷新。
+- Added default/custom name-tag serialization for firearms, knives and gloves. An empty custom value uses `nSkinz CS2`.
+- 为枪械、刀和手套加入默认／自定义名称标签序列化；未填写自定义名称时使用 `nSkinz CS2`。
+- Added offline Rust regression coverage for installed loose/VPK animation-resource lookup and the exact weapon animation metadata layout. Targeted weapon-material, cosmetic-rewrite and isolated x64 loader/render checks pass on the CS2 2000919 / HLAE 2.192.6 baseline.
+- 新增已安装松散文件／VPK 动画资源查找及标准武器动画元数据的离线 Rust 回归；CS2 2000919 / HLAE 2.192.6 基线下武器材质、饰品重写和独立 x64 加载／渲染门禁通过。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.4.md).
+
 ## v0.5.3-beta — 2026-09-27
 
 - Updated the verified HLAE baseline to `2.192.6` / AfxHookSource2 `0.41.6` (`0E1378B81B5B82974EA8DD5C3E701E924D63C452927B50D64C1580F746D01F8B`).

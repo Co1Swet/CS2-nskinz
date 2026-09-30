@@ -150,8 +150,8 @@ nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppea
     payload.fallback_stat_trak = profile.stat_trak;
     payload.quality = std::clamp(profile.quality, 0, 255);
     payload.account_id = account_id;
-    payload.writes_custom_name = !profile.custom_name.empty();
-    payload.custom_name = profile.custom_name;
+    payload.writes_custom_name = true;
+    payload.custom_name = nskinzcs2::model::ResolveCosmeticCustomName(profile.custom_name);
     payload.temporary_attributes.reserve(32);
     const auto writes_finish =
         profile.paint_kit != 0 || profile.explicit_vanilla_finish;

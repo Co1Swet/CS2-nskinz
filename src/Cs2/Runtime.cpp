@@ -15779,10 +15779,19 @@ bool TryTrackStandardWeaponAppearanceEpoch(
     const bool consumer_changed =
         (render != nullptr && previous.render != current.render) ||
         (hud != nullptr && previous.hud != current.hud);
-    if (carrier_changed || consumer_changed)
+    if (carrier_changed)
     {
         g_hook_state.applied_weapon_signatures.erase(carrier_index);
         g_hook_state.refreshed_weapon_signatures.erase(carrier_index);
+        previous.failed_material_signature = 0;
+    }
+    else if (consumer_changed)
+    {
+        // A new world/HUD consumer needs its binding and mesh fields written,
+        // but the native composite material belongs to the unchanged carrier.
+        // Keep the completed material signature so a view switch cannot turn
+        // into another expensive clear/generate cycle for the same AK entity.
+        g_hook_state.applied_weapon_signatures.erase(carrier_index);
         previous.failed_material_signature = 0;
     }
     if (carrier_changed) { previous = {}; }
@@ -17117,6 +17126,10 @@ std::uint64_t BuildGloveProfileApplySignature(
         static_cast<std::uint64_t>(
             FloatBits(nskinzcs2::model::NormalizeCosmeticWear(profile.wear))));
     HashCombine(signature, static_cast<std::uint64_t>(std::hash<std::string> {}(profile.name)));
+    HashCombine(
+        signature,
+        static_cast<std::uint64_t>(
+            std::hash<std::string> {}(nskinzcs2::model::ResolveCosmeticCustomName(profile.custom_name))));
     return signature;
 }
 
@@ -51308,6 +51321,55 @@ std::vector<std::pair<std::uint16_t, float>> BuildGloveFinishAttributes(
     };
 }
 
+bool DoesGloveCustomNameMatch(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::runtime::GloveAppearanceRequest& request)
+{
+    std::string actual_custom_name;
+    if (item_view == nullptr || offsets.item_view_custom_name == 0 ||
+        !SafeReadFixedString(item_view, offsets.item_view_custom_name, 161, actual_custom_name) ||
+        actual_custom_name != request.custom_name)
+    {
+        return false;
+    }
+
+    if (offsets.item_view_custom_name_override != 0)
+    {
+        std::string actual_custom_name_override;
+        if (!SafeReadFixedString(
+                item_view,
+                offsets.item_view_custom_name_override,
+                161,
+                actual_custom_name_override) ||
+            actual_custom_name_override != request.custom_name)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool WriteGloveCustomNameFields(
+    void* item_view,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::runtime::GloveAppearanceRequest& request)
+{
+    if (item_view == nullptr || offsets.item_view_custom_name == 0 ||
+        !SafeWriteFixedString(item_view, offsets.item_view_custom_name, 161, request.custom_name))
+    {
+        return false;
+    }
+
+    return offsets.item_view_custom_name_override == 0 ||
+        SafeWriteFixedString(
+            item_view,
+            offsets.item_view_custom_name_override,
+            161,
+            request.custom_name);
+}
+
 bool DoesAppliedPawnGloveBaseFieldsMatchRequest(
     void* glove_item_view,
     const ClientSchemaOffsets& offsets,
@@ -51387,6 +51449,11 @@ bool DoesAppliedPawnGloveBaseFieldsMatchRequest(
         }
     }
 
+    if (!DoesGloveCustomNameMatch(glove_item_view, offsets, request))
+    {
+        return false;
+    }
+
     return true;
 }
 
@@ -51416,6 +51483,55 @@ bool DoesAppliedPawnGloveFinishMatchRequest(
                xuid,
                current_definition_index) &&
         VerifyAttributeValues(glove_item_view, offsets, BuildGloveFinishAttributes(request));
+}
+
+bool DoesGeneratedDemoPawnGloveMatchRequest(
+    void* glove_item_view,
+    const ClientSchemaOffsets& offsets,
+    const nskinzcs2::runtime::GloveAppearanceRequest& request,
+    const std::uint64_t xuid,
+    const int current_definition_index)
+{
+    if (glove_item_view == nullptr)
+    {
+        return false;
+    }
+
+    const auto expected_definition_index =
+        ResolveRequestedGloveDefinitionIndex(request, current_definition_index);
+    int actual_definition_index = 0;
+    if (!TryReadItemDefinitionIndex(glove_item_view, offsets, actual_definition_index) ||
+        actual_definition_index != expected_definition_index)
+    {
+        return false;
+    }
+
+    const auto expected_item_identity =
+        nskinzcs2::runtime::BuildSyntheticGloveEconItemIdentity(
+            xuid,
+            expected_definition_index);
+    std::uint32_t actual_item_id_high = 0;
+    std::uint32_t actual_item_id_low = 0;
+    std::uint32_t actual_account_id = 0;
+    if (!SafeReadField(glove_item_view, offsets.item_view_item_id_high, actual_item_id_high) ||
+        actual_item_id_high != expected_item_identity.high ||
+        (offsets.item_view_item_id_low != 0 &&
+            (!SafeReadField(glove_item_view, offsets.item_view_item_id_low, actual_item_id_low) ||
+             actual_item_id_low != expected_item_identity.low)) ||
+        !SafeReadField(glove_item_view, offsets.item_view_account_id, actual_account_id) ||
+        actual_account_id != AccountIdFromXuid(xuid))
+    {
+        return false;
+    }
+
+    // The generated stream owns this carrier.  Read only the stable identity
+    // and finish attributes here; quality/SOC presentation fields are not a
+    // reason to start the live mutation/refresh pipeline again.
+    return DoesGloveCustomNameMatch(glove_item_view, offsets, request) &&
+        VerifyAttributeValues(
+            glove_item_view,
+            offsets,
+            BuildGloveFinishAttributes(request));
 }
 
 bool ApplyGloveFinishToPawnEconGloves(
@@ -51466,6 +51582,8 @@ bool ApplyGloveFinishToPawnEconGloves(
     std::uint8_t original_quality = 0;
     bool original_disallow_soc = false;
     bool original_initialized = false;
+    std::string original_custom_name;
+    std::string original_custom_name_override;
     const auto base_snapshot_ready =
         SafeReadField(glove_item_view, offsets.item_view_definition_index, original_definition) &&
         SafeReadField(glove_item_view, offsets.item_view_item_id_high, original_item_id_high) &&
@@ -51477,7 +51595,18 @@ bool ApplyGloveFinishToPawnEconGloves(
         (offsets.item_view_entity_quality == 0 ||
             SafeReadField(glove_item_view, offsets.item_view_entity_quality, original_quality)) &&
         (offsets.item_view_initialized == 0 ||
-            SafeReadField(glove_item_view, offsets.item_view_initialized, original_initialized));
+            SafeReadField(glove_item_view, offsets.item_view_initialized, original_initialized)) &&
+        SafeReadFixedString(
+            glove_item_view,
+            offsets.item_view_custom_name,
+            161,
+            original_custom_name) &&
+        (offsets.item_view_custom_name_override == 0 ||
+            SafeReadFixedString(
+                glove_item_view,
+                offsets.item_view_custom_name_override,
+                161,
+                original_custom_name_override));
     if (!base_snapshot_ready)
     {
         if (failure_issue != nullptr) *failure_issue = L"pawn glove base-field snapshot failed";
@@ -51504,6 +51633,14 @@ bool ApplyGloveFinishToPawnEconGloves(
         if (offsets.item_view_initialized != 0)
             restored = SafeWriteField(
                 glove_item_view, offsets.item_view_initialized, original_initialized) && restored;
+        restored = SafeWriteFixedString(
+            glove_item_view, offsets.item_view_custom_name, 161, original_custom_name) && restored;
+        if (offsets.item_view_custom_name_override != 0)
+            restored = SafeWriteFixedString(
+                glove_item_view,
+                offsets.item_view_custom_name_override,
+                161,
+                original_custom_name_override) && restored;
         return restored;
     };
 
@@ -51557,6 +51694,8 @@ bool ApplyGloveFinishToPawnEconGloves(
     if (offsets.item_view_initialized != 0)
         base_committed = SafeWriteField(
             glove_item_view, offsets.item_view_initialized, true) && base_committed;
+    base_committed = WriteGloveCustomNameFields(
+        glove_item_view, offsets, request) && base_committed;
     if (!base_committed)
     {
         restore_base_fields();
@@ -52083,6 +52222,11 @@ bool DoesAppliedGloveCarrierMatchProfile(
         }
     }
 
+    if (!DoesGloveCustomNameMatch(item_view, offsets, request))
+    {
+        return false;
+    }
+
     if (read_finish_from_item_view)
     {
         const auto should_verify_item_view_attributes =
@@ -52252,6 +52396,8 @@ bool ApplyGloveProfileToWearable(
     {
         success = success && SafeWriteField(item_view, offsets.item_view_initialized, true);
     }
+
+    success = WriteGloveCustomNameFields(item_view, offsets, request) && success;
 
     return success;
 }
@@ -60292,11 +60438,7 @@ bool TryResolveWeaponSkinRefreshBinding(
     {
         auto* clear = function + 0x50 + 32 + decoded.clear_relative;
         auto* generate = function + 0x50 + 42 + decoded.generate_relative;
-        constexpr std::array<std::uint8_t, 27> generator_entry {
-            0x40,0x55,0x53,0x41,0x57,0x48,0x8D,0xAC,0x24,0,0xFE,0xFF,0xFF,
-            0x48,0x81,0xEC,0,3,0,0,0x44,0x0F,0xB6,0xFA,0x48,0x8B,0xD9
-        };
-        std::array<std::uint8_t, generator_entry.size()> observed {};
+        std::array<std::uint8_t, 34> observed_generator {};
         constexpr std::array<std::uint8_t, 31> clear_entry {
             0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x48,0x89,0x74,0x24,0x20,
             0x57,0x41,0x56,0x41,0x57,0x48,0x83,0xEC,0x20,0x44,0x0F,0xB6,0xF2,0x48,0x8B,0xF9
@@ -60304,13 +60446,22 @@ bool TryResolveWeaponSkinRefreshBinding(
         std::array<std::uint8_t, clear_entry.size()> observed_clear {};
         if (PointerInModule(*module_span, clear) && PointerInModule(*module_span, generate) &&
             IsExecutablePointer(clear) && IsExecutablePointer(generate) &&
-            SafeReadBytes(generate, observed.data(), observed.size()) && observed == generator_entry &&
+            SafeReadBytes(generate, observed_generator.data(), observed_generator.size()) &&
+            nskinzcs2::runtime::IsVerifiedWeaponMaterialGeneratorEntry(observed_generator) &&
             SafeReadBytes(clear, observed_clear.data(), observed_clear.size()) && observed_clear == clear_entry)
         {
             binding.standard_clear_materials = clear;
             binding.standard_generate_materials = generate;
             binding.standard_material_owner_offset = decoded.owner_offset;
         }
+    }
+    if (binding.standard_clear_materials == nullptr ||
+        binding.standard_generate_materials == nullptr ||
+        binding.standard_material_owner_offset == 0)
+    {
+        issue = L"Weapon refresh helper was found, but its native clear/generate material callees do not match a verified client build.";
+        binding = {};
+        return false;
     }
     binding.offset_patch_address = patch_address;
     binding.original_offset = original_offset;
@@ -60388,9 +60539,9 @@ WeaponSkinRefreshCallResult TryCallWeaponSkinRefresh(
     {
         if (!IsStandardWeaponProfile(request.profile)) continue;
         auto epoch = g_hook_state.standard_weapon_appearance_epochs.find(request.entity_index);
-        const auto fail = [&](const wchar_t* message)
+        const auto fail = [&](const std::wstring_view message)
         {
-            issue = message;
+            issue.assign(message);
             if (epoch != g_hook_state.standard_weapon_appearance_epochs.end())
                 epoch->second.failed_material_signature = request.desired_signature;
             return WeaponSkinRefreshCallResult::PatchFailed;
@@ -60401,15 +60552,33 @@ WeaponSkinRefreshCallResult TryCallWeaponSkinRefresh(
         const auto& offsets = g_hook_state.schema_offsets;
         StandardWeaponEntityEpoch current;
         int primary = -1, companion = -1;
-        if (epoch == g_hook_state.standard_weapon_appearance_epochs.end() ||
-            !ReadStandardWeaponCarrierEpoch(request.econ_entity, offsets, current) ||
-            current != epoch->second.carrier || request.item_view !=
-                static_cast<std::uint8_t*>(request.econ_entity) + offsets.econ_entity_attribute_manager + offsets.attribute_container_item ||
-            binding.standard_clear_materials == nullptr || binding.standard_generate_materials == nullptr ||
-            !SafeReadField(request.econ_entity, binding.original_offset, primary) ||
-            !SafeReadField(request.econ_entity, binding.original_companion_offset, companion) ||
-            primary < 0 || primary > 128 || companion < 0 || companion > 128)
-            return fail(L"Standard-weapon material initialization rejected: native binding, carrier epoch or material counts invalid.");
+        const auto epoch_found = epoch != g_hook_state.standard_weapon_appearance_epochs.end();
+        const auto carrier_read = ReadStandardWeaponCarrierEpoch(request.econ_entity, offsets, current);
+        const auto epoch_matches = epoch_found && carrier_read && current == epoch->second.carrier;
+        const auto item_view_matches = request.item_view ==
+            static_cast<std::uint8_t*>(request.econ_entity) +
+                offsets.econ_entity_attribute_manager + offsets.attribute_container_item;
+        const auto native_binding_ready = binding.standard_clear_materials != nullptr &&
+            binding.standard_generate_materials != nullptr && binding.standard_material_owner_offset != 0;
+        const auto primary_read = SafeReadField(request.econ_entity, binding.original_offset, primary);
+        const auto companion_read = SafeReadField(
+            request.econ_entity, binding.original_companion_offset, companion);
+        const auto material_counts_valid = primary_read && companion_read &&
+            primary >= 0 && primary <= 128 && companion >= 0 && companion <= 128;
+        if (!epoch_matches || !item_view_matches || !native_binding_ready || !material_counts_valid)
+        {
+            std::wstringstream stream;
+            stream << L"Standard-weapon material initialization rejected: entity=" << request.entity_index
+                << L", epoch_found=" << (epoch_found ? 1 : 0)
+                << L", carrier_read=" << (carrier_read ? 1 : 0)
+                << L", epoch_matches=" << (epoch_matches ? 1 : 0)
+                << L", item_view_matches=" << (item_view_matches ? 1 : 0)
+                << L", native_binding_ready=" << (native_binding_ready ? 1 : 0)
+                << L", primary=" << (primary_read ? std::to_wstring(primary) : L"<unreadable>")
+                << L", companion=" << (companion_read ? std::to_wstring(companion) : L"<unreadable>")
+                << L".";
+            return fail(stream.str());
+        }
 
         const bool had_materials = nskinzcs2::runtime::StandardWeaponHasCompositeMaterial(primary, companion);
         // A mixed knife/gun batch already used the global helper for existing
@@ -82701,21 +82870,55 @@ void PollGameThreadStateModern()
         config_revision = g_hook_state.app_state->ConfigRevision();
     }
 
+    const auto current_demo_file_path = SnapshotCurrentDemoFilePath();
     const auto generated_demo_skin =
-        nskinzcs2::runtime::IsGeneratedDemoSkinPath(SnapshotCurrentDemoFilePath());
+        nskinzcs2::runtime::IsGeneratedDemoSkinPath(current_demo_file_path);
     g_hook_state.demo_skin_rewrite_active.store(generated_demo_skin, std::memory_order_release);
     if (generated_demo_skin)
     {
         // The rewritten stream already contains one coherent definition,
-        // subclass/VData, model and animation transaction. Leave standard gun
-        // profiles on the existing runtime path, but never apply the late live
-        // knife/glove path on top of the complete serialized state.
+        // subclass/VData, model and animation transaction. Firearms and gloves
+        // are routed per source item: default carriers are materialized in the
+        // generated stream, while already-painted carriers stay on the live
+        // path. Only the knife transaction must remain fully isolated here.
         for (auto& profile : config.knife_profiles) profile.enabled = false;
-        for (auto& profile : config.glove_profiles) profile.enabled = false;
+        int reconstructed_firearm_profiles = 0;
+        int suppressed_glove_profiles = 0;
+        // Reconstructed stock firearms need the established live path once per
+        // newly created entity to turn their serialized EconItemView fields
+        // into a native composite material.  The existing material-signature
+        // cache makes subsequent polls a stable no-refresh fast path.
+        for (const auto& profile : config.profiles)
+        {
+            if (profile.enabled &&
+                nskinzcs2::runtime::IsGeneratedDemoRewrittenWeaponProfile(
+                    current_demo_file_path,
+                    profile.xuid,
+                    profile.base_item))
+            {
+                ++reconstructed_firearm_profiles;
+            }
+        }
+        for (auto& profile : config.glove_profiles)
+        {
+            if (profile.enabled &&
+                nskinzcs2::runtime::ShouldSuppressGeneratedDemoGloveProfile(
+                    current_demo_file_path,
+                    profile.xuid))
+            {
+                profile.enabled = false;
+                ++suppressed_glove_profiles;
+            }
+        }
         if (!g_hook_state.demo_skin_rewrite_skip_logged.exchange(true))
         {
-            nskinzcs2::Logger::Info(
-                L"Generated temporary skin demo detected; live knife/glove mutation is disabled for this playback while standard weapon skins remain enabled.");
+            std::wstringstream stream;
+            stream << L"Generated temporary skin demo detected; live knife mutation is disabled, "
+                << reconstructed_firearm_profiles
+                << L" reconstructed firearm profile(s) remain live for one native material initialization per entity generation, and "
+                << suppressed_glove_profiles
+                << L" reconstructed glove profile(s) are stream-owned. Stable firearm entities reuse the completed material cache.";
+            nskinzcs2::Logger::Info(stream.str());
         }
     }
     else
@@ -84241,6 +84444,8 @@ void PollGameThreadStateModern()
                 if (weapon_profile != nullptr)
                 {
                     effective_profile = *weapon_profile;
+                    effective_profile.custom_name =
+                        nskinzcs2::model::ResolveCosmeticCustomName(effective_profile.custom_name);
                 }
                 else
                 {
@@ -84977,6 +85182,8 @@ void PollGameThreadStateModern()
                     if (weapon_profile != nullptr)
                     {
                         effective_profile = *weapon_profile;
+                        effective_profile.custom_name =
+                            nskinzcs2::model::ResolveCosmeticCustomName(effective_profile.custom_name);
                     }
                     else
                     {
@@ -85639,6 +85846,27 @@ void PollGameThreadStateModern()
                 if (!compatibility.compatible)
                 {
                     WarnOnceForRuntimeSignature(glove_signature ^ 0x16ull, compatibility_stream.str());
+                    continue;
+                }
+
+                if (generated_demo_skin &&
+                    DoesGeneratedDemoPawnGloveMatchRequest(
+                        glove_item_view,
+                        g_hook_state.schema_offsets,
+                        request,
+                        xuid,
+                        current_definition_index))
+                {
+                    // The PBDEMS2 stream already materialized the complete
+                    // stock-glove replacement.  Re-entering the live native
+                    // refresh path here toggles the same Pawn dirty state and
+                    // makes first-person hands intermittently rebuild.
+                    LogProfileDiagnosticOnce(
+                        glove_signature ^ 0x1Dull,
+                        L"Generated demo glove carrier already matches; live glove writes and refresh callbacks are suppressed for XUID " +
+                            std::to_wstring(xuid) + L".");
+                    glove_applied_xuids.insert(xuid);
+                    ++applied_gloves;
                     continue;
                 }
 
@@ -88071,6 +88299,12 @@ bool nskinzcs2::runtime::ProbeStandardWeaponAppearanceEpochForTests()
             !g_hook_state.refreshed_weapon_signatures.contains(index) &&
             HasAppliedSignature(g_hook_state.refreshed_weapon_signatures, 777, 42);
     };
+    const auto consumer_rebind_preserved_material = [&]
+    {
+        return !g_hook_state.applied_weapon_signatures.contains(index) &&
+            HasAppliedSignature(g_hook_state.refreshed_weapon_signatures, index, signature) &&
+            HasAppliedSignature(g_hook_state.refreshed_weapon_signatures, 777, 42);
+    };
     completed();
     if (!track(world.data(), hud.data()) || !invalidated()) { return false; }
     completed();
@@ -88084,7 +88318,7 @@ bool nskinzcs2::runtime::ProbeStandardWeaponAppearanceEpochForTests()
     // Client-only entities may use a sentinel tick. Compare it as an opaque
     // generation component; the verified full handle establishes identity.
     SafeWriteField(hud.data(), 24, -1);
-    if (!track(world.data(), hud.data()) || !invalidated()) { return false; }
+    if (!track(world.data(), hud.data()) || !consumer_rebind_preserved_material()) { return false; }
     completed();
     if (!track(world.data(), hud.data()) || !is_completed()) { return false; }
     // The same pointer/slot with a different serial or creation tick is new.
@@ -88095,9 +88329,9 @@ bool nskinzcs2::runtime::ProbeStandardWeaponAppearanceEpochForTests()
     if (!track(world.data(), hud.data()) || !invalidated()) { return false; }
     completed();
     SafeWriteField(hud.data(), 24, 101);
-    if (!track(world.data(), hud.data()) || !invalidated()) { return false; }
+    if (!track(world.data(), hud.data()) || !consumer_rebind_preserved_material()) { return false; }
     completed();
-    if (!track(render.data(), hud.data()) || !invalidated()) { return false; }
+    if (!track(render.data(), hud.data()) || !consumer_rebind_preserved_material()) { return false; }
     completed();
     if (!track(render.data(), hud.data()) || !is_completed()) { return false; }
     // An incomplete read must not discard success and cause a regeneration loop.
@@ -88108,7 +88342,7 @@ bool nskinzcs2::runtime::ProbeStandardWeaponAppearanceEpochForTests()
     // Moved allocation, even with a reused handle/tick, starts a new generation.
     Object new_hud = hud;
     SafeWriteField(hud_identity.data(), 0, static_cast<void*>(new_hud.data()));
-    if (!track(render.data(), new_hud.data()) || !invalidated()) { return false; }
+    if (!track(render.data(), new_hud.data()) || !consumer_rebind_preserved_material()) { return false; }
     completed();
     if (!track(render.data(), new_hud.data()) || !is_completed()) { return false; }
     SafeWriteField(world_identity.data(), 0x10, std::uint32_t {0x10065});
@@ -89152,15 +89386,14 @@ bool nskinzcs2::runtime::ProbeStandardWeaponMaterialCallsForTests(const std::fil
     offsets.econ_item_attribute_value = 0x34;
     offsets.econ_item_attribute_initial_value = 0x38;
     WeaponSkinRefreshBinding binding;
-    EntitySystemBindings entity_bindings;
     std::wstring issue;
-    const bool verified = TryResolveEconItemAttributeNativeAppend(module, offsets) &&
-        offsets.attribute_list_attributes_native_append != nullptr &&
-        TryResolveEntitySystemBindings(module, entity_bindings) &&
-        entity_bindings.direct_chunk_layout_verified &&
-        TryResolveWeaponSkinRefreshBinding(module, offsets, binding, issue) &&
+    // This probe verifies the native material binding itself. Attribute-node
+    // construction and direct entity traversal are separate capabilities and
+    // may legitimately change independently between client builds.
+    const bool verified = TryResolveWeaponSkinRefreshBinding(module, offsets, binding, issue) &&
         binding.standard_clear_materials != nullptr && binding.standard_generate_materials != nullptr &&
-        binding.standard_material_owner_offset == 0x610;
+        binding.standard_material_owner_offset == 0x610 &&
+        binding.original_offset == 0xAB0 && binding.original_companion_offset == 0xAC8;
     FreeLibrary(module);
     return verified;
 }

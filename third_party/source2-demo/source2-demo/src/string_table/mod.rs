@@ -296,18 +296,68 @@ impl StringTable {
                 value
             });
 
-            if let Some(x) = items.get_mut(index as usize) {
-                if let Some(k) = key {
-                    x.key = k;
-                }
-                x.value = value;
-            } else {
-                items.push(StringTableRow::new(index, key.unwrap_or_default(), value));
+            let slot = index as usize;
+            if items.len() <= slot {
+                let first_missing = items.len();
+                items.extend(
+                    (first_missing..=slot)
+                        .map(|missing| StringTableRow::new(missing as i32, String::new(), None)),
+                );
             }
+            let x = &mut items[slot];
+            x.index = index;
+            if let Some(k) = key {
+                x.key = k;
+            }
+            x.value = value;
 
             modified.push(index);
         }
 
         Ok(modified)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::CSvcMsgCreateStringTable;
+
+    #[test]
+    fn sparse_create_entry_keeps_its_protocol_index_in_table_state() {
+        let mut message = CSvcMsgCreateStringTable {
+            name: Some("AnimAssetData".into()),
+            num_entries: Some(0),
+            string_data: Some(Vec::new()),
+            using_varint_bitcounts: Some(true),
+            ..Default::default()
+        };
+        insert_create_string_table_entry(
+            &mut message,
+            34,
+            "animation/skeletons/weapons/knife_bayonet.vnmskel",
+            vec![1, 2, 3],
+        )
+        .unwrap();
+
+        let mut table = StringTable {
+            name: "AnimAssetData".into(),
+            var_int_bit_counts: true,
+            keys: RefCell::new(vec![String::new(); 32]),
+            ..Default::default()
+        };
+        let mut baselines = BaselineContainer::default();
+        let modified = table
+            .parse(&mut baselines, message.string_data(), message.num_entries())
+            .unwrap();
+
+        assert_eq!(modified, vec![34]);
+        assert_eq!(table.items.len(), 35);
+        assert_eq!(table.items[34].index(), 34);
+        assert_eq!(
+            table.items[34].key(),
+            "animation/skeletons/weapons/knife_bayonet.vnmskel"
+        );
+        assert_eq!(table.items[34].value(), Some(&[1, 2, 3][..]));
     }
 }

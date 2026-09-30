@@ -116,7 +116,7 @@ KnifeAppearanceRequest BuildKnifeAppearanceRequest(const nskinzcs2::model::Knife
     request.seed = profile.seed;
     request.stat_trak = profile.stat_trak;
     request.wear = profile.wear;
-    request.custom_name = profile.custom_name;
+    request.custom_name = nskinzcs2::model::ResolveCosmeticCustomName(profile.custom_name);
     return request;
 }
 

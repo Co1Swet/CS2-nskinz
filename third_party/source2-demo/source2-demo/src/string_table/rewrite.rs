@@ -461,11 +461,22 @@ mod tests {
         let decoded = state.decode_entries(message.string_data(), 4).unwrap();
         let rows = decoded
             .iter()
-            .map(|entry| (entry.index(), entry.key().unwrap(), entry.value().unwrap()[0]))
+            .map(|entry| {
+                (
+                    entry.index(),
+                    entry.key().unwrap(),
+                    entry.value().unwrap()[0],
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             rows,
-            vec![(0, "zero", 0), (1, "one", 1), (2, "two", 2), (3, "three", 3)]
+            vec![
+                (0, "zero", 0),
+                (1, "one", 1),
+                (2, "two", 2),
+                (3, "three", 3)
+            ]
         );
     }
 }

@@ -5,6 +5,7 @@
 #include <array>
 #include <charconv>
 #include <cctype>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -711,6 +712,126 @@ std::optional<std::string> ReadTextFile(const std::filesystem::path& path)
     }
 
     return text;
+}
+
+template <typename T>
+bool ReadCatalogBinaryValue(std::ifstream& stream, T& value)
+{
+    return static_cast<bool>(stream.read(reinterpret_cast<char*>(&value), sizeof(value)));
+}
+
+bool ReadCatalogNullTerminatedString(std::ifstream& stream, std::string& value)
+{
+    value.clear();
+    char character = '\0';
+    while (stream.get(character))
+    {
+        if (character == '\0')
+        {
+            return true;
+        }
+        value.push_back(character);
+    }
+    return false;
+}
+
+std::optional<std::string> ReadInventoryIconPathsFromVpkImpl(
+    const std::filesystem::path& directory_vpk_path)
+{
+    constexpr std::uint32_t kVpkSignature = 0x55AA1234;
+    constexpr std::string_view kInventoryIconDirectory =
+        "panorama/images/econ/default_generated";
+
+    std::ifstream stream(directory_vpk_path, std::ios::binary);
+    if (!stream.is_open())
+    {
+        return std::nullopt;
+    }
+
+    std::uint32_t signature = 0;
+    std::uint32_t version = 0;
+    std::uint32_t tree_size = 0;
+    if (!ReadCatalogBinaryValue(stream, signature) || signature != kVpkSignature ||
+        !ReadCatalogBinaryValue(stream, version) ||
+        !ReadCatalogBinaryValue(stream, tree_size))
+    {
+        return std::nullopt;
+    }
+    static_cast<void>(tree_size);
+
+    if (version == 2)
+    {
+        std::uint32_t ignored = 0;
+        for (int index = 0; index < 4; ++index)
+        {
+            if (!ReadCatalogBinaryValue(stream, ignored))
+            {
+                return std::nullopt;
+            }
+        }
+    }
+    else if (version != 1)
+    {
+        return std::nullopt;
+    }
+
+    std::string extension;
+    std::string directory;
+    std::string filename;
+    std::string result;
+    result.reserve(512 * 1024);
+
+    while (ReadCatalogNullTerminatedString(stream, extension) && !extension.empty())
+    {
+        while (ReadCatalogNullTerminatedString(stream, directory) && !directory.empty())
+        {
+            while (ReadCatalogNullTerminatedString(stream, filename) && !filename.empty())
+            {
+                std::uint32_t crc = 0;
+                std::uint16_t preload_bytes = 0;
+                std::uint16_t archive_index = 0;
+                std::uint32_t offset = 0;
+                std::uint32_t length = 0;
+                std::uint16_t terminator = 0;
+                if (!ReadCatalogBinaryValue(stream, crc) ||
+                    !ReadCatalogBinaryValue(stream, preload_bytes) ||
+                    !ReadCatalogBinaryValue(stream, archive_index) ||
+                    !ReadCatalogBinaryValue(stream, offset) ||
+                    !ReadCatalogBinaryValue(stream, length) ||
+                    !ReadCatalogBinaryValue(stream, terminator) ||
+                    terminator != 0xFFFF)
+                {
+                    return std::nullopt;
+                }
+                static_cast<void>(crc);
+                static_cast<void>(archive_index);
+                static_cast<void>(offset);
+                static_cast<void>(length);
+
+                if (extension == "vtex_c" && directory == kInventoryIconDirectory &&
+                    filename.starts_with("weapon_"))
+                {
+                    result.append(filename);
+                    result.append(".vtex_c\n");
+                }
+
+                if (preload_bytes > 0)
+                {
+                    stream.seekg(preload_bytes, std::ios::cur);
+                    if (!stream)
+                    {
+                        return std::nullopt;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!stream.eof() && stream.fail())
+    {
+        return std::nullopt;
+    }
+    return result;
 }
 
 std::size_t SkipTrivia(const std::string_view text, std::size_t position)
@@ -1620,7 +1741,8 @@ nskinzcs2::model::Catalog nskinzcs2::CatalogBuilder::BuildFallbackCatalog()
 
 std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalogFromGameText(
     const std::string_view items_game_text,
-    const std::string_view localization_text)
+    const std::string_view localization_text,
+    const std::string_view inventory_icon_paths_text)
 {
     const auto items_section_text = ExtractNamedSectionText(items_game_text, "items");
     const auto qualities_section_text = ExtractNamedSectionText(items_game_text, "qualities");
@@ -1694,6 +1816,12 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
         else if (is_knife)
         {
             knife_names[id] = display_name;
+            // Knife paint compatibility is encoded with the same exact
+            // "[paint]weapon_name" entries as firearm finishes.  Keep knife
+            // definitions in the lookup as well; otherwise the catalog can
+            // parse every knife paint yet cannot associate any of them with a
+            // selectable knife model.
+            weapon_definitions_by_name.emplace(raw_name, id);
         }
         else if (StartsWith(raw_name, "weapon_") && IsSupportedBaseWeaponId(id))
         {
@@ -1820,6 +1948,83 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
                 if (weapon == weapon_definitions_by_name.end() || paints == paint_ids_by_name.end()) { continue; }
                 auto& allowed = catalog.weapon_paint_compatibility[weapon->second];
                 allowed.insert(allowed.end(), paints->second.begin(), paints->second.end());
+            }
+        }
+    }
+
+    // Current CS2 builds no longer list every knife combination in
+    // items_game.txt. The shipped inventory icons exist only for valid
+    // definition/paint pairs, so they supply exact knife mappings and an
+    // additional local source of truth for firearms.
+    if (!inventory_icon_paths_text.empty())
+    {
+        std::vector<std::pair<std::string_view, int>> weapon_names;
+        weapon_names.reserve(weapon_definitions_by_name.size());
+        for (const auto& [raw_name, definition] : weapon_definitions_by_name)
+        {
+            weapon_names.emplace_back(raw_name, definition);
+        }
+        std::sort(
+            weapon_names.begin(),
+            weapon_names.end(),
+            [](const auto& left, const auto& right)
+            {
+                return left.first.size() > right.first.size();
+            });
+
+        constexpr std::array<std::string_view, 3> icon_suffixes {
+            "_heavy_png.vtex_c",
+            "_medium_png.vtex_c",
+            "_light_png.vtex_c",
+        };
+
+        std::size_t start = 0;
+        while (start < inventory_icon_paths_text.size())
+        {
+            auto end = inventory_icon_paths_text.find('\n', start);
+            if (end == std::string_view::npos)
+            {
+                end = inventory_icon_paths_text.size();
+            }
+            auto icon = TrimView(inventory_icon_paths_text.substr(start, end - start));
+            start = end + 1;
+            if (const auto slash = icon.find_last_of("/\\"); slash != std::string_view::npos)
+            {
+                icon.remove_prefix(slash + 1);
+            }
+
+            bool recognized_suffix = false;
+            for (const auto suffix : icon_suffixes)
+            {
+                if (icon.ends_with(suffix))
+                {
+                    icon.remove_suffix(suffix.size());
+                    recognized_suffix = true;
+                    break;
+                }
+            }
+            if (!recognized_suffix || !StartsWith(icon, "weapon_"))
+            {
+                continue;
+            }
+
+            for (const auto& [weapon_name, definition] : weapon_names)
+            {
+                std::string prefix(weapon_name);
+                prefix.push_back('_');
+                if (!StartsWith(icon, prefix))
+                {
+                    continue;
+                }
+
+                const auto paint_name = icon.substr(prefix.size());
+                if (const auto paints = paint_ids_by_name.find(std::string(paint_name));
+                    paints != paint_ids_by_name.end())
+                {
+                    auto& allowed = catalog.weapon_paint_compatibility[definition];
+                    allowed.insert(allowed.end(), paints->second.begin(), paints->second.end());
+                }
+                break;
             }
         }
     }
@@ -1966,7 +2171,8 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
 
 std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalogFromGameFiles(
     const std::filesystem::path& items_game_path,
-    const std::filesystem::path& localization_path)
+    const std::filesystem::path& localization_path,
+    const std::filesystem::path& directory_vpk_path)
 {
     const auto items_game_text = ReadTextFile(items_game_path);
     const auto localization_text = ReadTextFile(localization_path);
@@ -1975,7 +2181,22 @@ std::optional<nskinzcs2::model::Catalog> nskinzcs2::CatalogBuilder::BuildCatalog
         return std::nullopt;
     }
 
-    return BuildCatalogFromGameText(*items_game_text, *localization_text);
+    std::string inventory_icon_paths;
+    if (!directory_vpk_path.empty())
+    {
+        if (const auto paths = ReadInventoryIconPathsFromVpk(directory_vpk_path); paths.has_value())
+        {
+            inventory_icon_paths = *paths;
+        }
+    }
+
+    return BuildCatalogFromGameText(*items_game_text, *localization_text, inventory_icon_paths);
+}
+
+std::optional<std::string> nskinzcs2::CatalogBuilder::ReadInventoryIconPathsFromVpk(
+    const std::filesystem::path& directory_vpk_path)
+{
+    return ReadInventoryIconPathsFromVpkImpl(directory_vpk_path);
 }
 
 nskinzcs2::WeaponPaintCompatibility nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(

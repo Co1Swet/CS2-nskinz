@@ -436,6 +436,14 @@ impl Entity {
         self.get_property_by_path(&self.class.serializer.get_path(name)?)
     }
 
+    /// Returns an entity property when it is currently materialized without
+    /// allocating an error for absent sparse-vector entries.
+    #[inline]
+    pub fn try_get_property(&self, name: &str) -> Option<&FieldValue> {
+        let path = self.class.serializer.get_path(name).ok()?;
+        self.state.get_value(&path)
+    }
+
     pub(crate) fn get_property_by_path(&self, fp: &FieldPath) -> Result<&FieldValue, EntityError> {
         self.state.get_value(fp).ok_or_else(|| {
             EntityError::PropertyNameNotFound(

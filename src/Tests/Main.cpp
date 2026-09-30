@@ -39,6 +39,7 @@ std::filesystem::path g_compatibility_cs2_root;
 bool g_mesh_benchmark_only = false;
 bool g_knife_model_only = false;
 bool g_weapon_paint_only = false;
+bool g_cosmetic_rewrite_only = false;
 
 void WriteRadarPreviewIfRequested(
     const std::string_view name,
@@ -888,6 +889,7 @@ void TestConfigRoundTrip()
     document.knife_profiles.push_back(knife_profile);
     nskinzcs2::model::GloveProfile glove_profile;
     glove_profile.explicit_vanilla_finish = true;
+    glove_profile.custom_name = "glove prop";
     document.glove_profiles.push_back(glove_profile);
     nskinzcs2::model::KeychainProfile keychain_profile;
     keychain_profile.explicit_clear = true;
@@ -923,6 +925,7 @@ void TestConfigRoundTrip()
     Expect(loaded.profiles[0].explicit_vanilla_finish, "weapon vanilla intent should round-trip");
     Expect(loaded.knife_profiles[0].explicit_vanilla_finish, "knife vanilla intent should round-trip");
     Expect(loaded.glove_profiles[0].explicit_vanilla_finish, "glove vanilla intent should round-trip");
+    Expect(loaded.glove_profiles[0].custom_name == "glove prop", "glove custom name should round-trip");
     Expect(loaded.keychain_profiles[0].explicit_clear, "keychain clear intent should round-trip");
     Expect(loaded.map_remap.enabled, "map remap enable intent should round-trip");
     Expect(!loaded.map_remap.use_source_radar, "map remap radar source intent should round-trip");
@@ -1580,6 +1583,7 @@ void TestCosmeticWearPolicy()
 {
     using nskinzcs2::model::CosmeticWearMatchesExactly;
     using nskinzcs2::model::NormalizeCosmeticWear;
+    using nskinzcs2::model::NormalizeCosmeticSeed;
     using nskinzcs2::model::kMaximumCosmeticWear;
     using nskinzcs2::model::kMinimumCosmeticWear;
 
@@ -1608,6 +1612,12 @@ void TestCosmeticWearPolicy()
             std::nextafter(kMinimumCosmeticWear, kMaximumCosmeticWear),
             kMinimumCosmeticWear),
         "exact wear comparison must distinguish adjacent float values");
+    Expect(NormalizeCosmeticSeed(-1) == 0,
+        "negative pattern seeds should normalize to the CS2 minimum");
+    Expect(NormalizeCosmeticSeed(1001) == 1000,
+        "pattern seeds above the CS2 range should normalize to 1000");
+    Expect(NormalizeCosmeticSeed(777) == 777,
+        "pattern seeds inside the CS2 range should be preserved exactly");
 
     namespace fs = std::filesystem;
     const auto load_path = fs::temp_directory_path() / "nSkinzCS2.wear.load.test.json";
@@ -1616,9 +1626,9 @@ void TestCosmeticWearPolicy()
         stream << R"json({
   "version": 4,
   "profiles": [
-    { "name": "zero", "enabled": true, "xuid": 1, "base_item": 7, "wear": 0.0 },
-    { "name": "negative", "enabled": true, "xuid": 2, "base_item": 9, "wear": -0.5 },
-    { "name": "above", "enabled": true, "xuid": 3, "base_item": 16, "wear": 2.0 },
+    { "name": "zero", "enabled": true, "xuid": 1, "base_item": 7, "wear": 0.0, "seed": -1 },
+    { "name": "negative", "enabled": true, "xuid": 2, "base_item": 9, "wear": -0.5, "seed": 1001 },
+    { "name": "above", "enabled": true, "xuid": 3, "base_item": 16, "wear": 2.0, "seed": 777 },
     { "name": "inside", "enabled": true, "xuid": 4, "base_item": 17, "wear": 0.25 }
   ],
   "glove_profiles": [
@@ -1641,6 +1651,8 @@ void TestCosmeticWearPolicy()
     Expect(
         CosmeticWearMatchesExactly(loaded.profiles[3].wear, 0.25f),
         "loaded weapon wear inside the supported range should be preserved");
+    Expect(loaded.profiles[0].seed == 0 && loaded.profiles[1].seed == 1000 && loaded.profiles[2].seed == 777,
+        "loaded firearm pattern seeds should clamp only outside the CS2 range");
     Expect(
         !loaded.glove_profiles.empty() &&
             CosmeticWearMatchesExactly(loaded.glove_profiles[0].wear, kMinimumCosmeticWear),
@@ -1651,6 +1663,7 @@ void TestCosmeticWearPolicy()
     nskinzcs2::model::ConfigDocument unbounded_document;
     nskinzcs2::model::CosmeticProfile unbounded_weapon;
     unbounded_weapon.wear = 0.0f;
+    unbounded_weapon.seed = 5000;
     unbounded_document.profiles.push_back(unbounded_weapon);
     nskinzcs2::model::GloveProfile unbounded_glove;
     unbounded_glove.wear = 5.0f;
@@ -1661,6 +1674,8 @@ void TestCosmeticWearPolicy()
         !saved.profiles.empty() &&
             CosmeticWearMatchesExactly(saved.profiles[0].wear, kMinimumCosmeticWear),
         "saved weapon wear should be normalized");
+    Expect(!saved.profiles.empty() && saved.profiles[0].seed == 1000,
+        "saved weapon pattern seed should be normalized");
     Expect(
         !saved.glove_profiles.empty() &&
             CosmeticWearMatchesExactly(saved.glove_profiles[0].wear, kMaximumCosmeticWear),
@@ -2202,6 +2217,12 @@ void TestCatalogFromGameText()
         {
             "name" "weapon_m4a1_silencer"
         }
+        "500"
+        {
+            "name" "weapon_bayonet"
+            "prefab" "melee_unusual"
+            "item_slot" "melee"
+        }
     }
     "paint_kits"
     {
@@ -2224,6 +2245,11 @@ void TestCatalogFromGameText()
         {
             "name" "m4a4_skrrrt_green"
             "composite_material_path" "weapons/paints/community/community_36/m4a4_skrrrt_green.vcompmat"
+        }
+        "568"
+        {
+            "name" "am_gamma_doppler_phase2"
+            "description_tag" "#PaintKit_GammaDoppler"
         }
     }
     "item_sets"
@@ -2289,16 +2315,22 @@ void TestCatalogFromGameText()
         "SFUI_WPNHUD_AK47" "AK-47"
         "PaintKit_Default" "Default"
         "PaintKit_Printstream" "Printstream"
+        "PaintKit_GammaDoppler" "Gamma Doppler"
         "StickerKit_crown" "Crown (Foil)"
         "Keychain_diamond_dog" "Diamond Dog"
     }
 }
 )kv";
 
-    const auto catalog = nskinzcs2::CatalogBuilder::BuildCatalogFromGameText(items_game_text, localization_text);
+    constexpr std::string_view inventory_icon_paths =
+        "panorama/images/econ/default_generated/weapon_bayonet_am_gamma_doppler_phase2_light_png.vtex_c\n";
+    const auto catalog = nskinzcs2::CatalogBuilder::BuildCatalogFromGameText(
+        items_game_text,
+        localization_text,
+        inventory_icon_paths);
     Expect(catalog.has_value(), "catalog should parse from in-memory game text");
     Expect(catalog->runtime_populated, "text-backed catalog should mark itself populated");
-    Expect(catalog->weapon_paint_kits.size() == 4, "text-backed catalog should expose full parsed paint kits");
+    Expect(catalog->weapon_paint_kits.size() == 5, "text-backed catalog should expose full parsed paint kits");
     Expect(catalog->weapon_paint_uses_legacy_model.at(844), "Emperor explicitly requires legacy mesh");
     Expect(!catalog->weapon_paint_uses_legacy_model.at(1353), "absent legacy flag means modern mesh, not unknown");
     Expect(catalog->weapon_paint_compatibility.at(16) == std::vector<int>({844, 1353}),
@@ -2307,6 +2339,11 @@ void TestCatalogFromGameText()
         "comments, foreign-platform pairs, malformed names and unknown IDs must not grant compatibility");
     Expect(catalog->weapon_paint_compatibility.at(60) == std::vector<int>({711}),
         "shared finishes retain each exact weapon; M4A4 and M4A1-S are distinct");
+    Expect(catalog->weapon_paint_compatibility.at(500) == std::vector<int>({568}),
+        "knife definitions must retain exact game-defined paint compatibility pairs");
+    const auto bayonet_paints = nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(*catalog, 500);
+    Expect(bayonet_paints.size() == 2 && bayonet_paints[1].id == 568,
+        "knife finish UI filtering must contain only vanilla plus compatible finishes");
     Expect(catalog->keychain_kits.size() == 2, "text-backed catalog should expose parsed keychain kits");
 
     const auto printstream_it = std::find_if(
@@ -2389,6 +2426,7 @@ void TestCatalogFromRealGameFilesIfProvided()
 {
     const char* items_game_env = std::getenv("NSKINZCS2_REAL_ITEMS_GAME");
     const char* localization_env = std::getenv("NSKINZCS2_REAL_LOCALIZATION");
+    const char* directory_vpk_env = std::getenv("NSKINZCS2_REAL_GAME_VPK");
     if (items_game_env == nullptr || localization_env == nullptr)
     {
         return;
@@ -2400,7 +2438,15 @@ void TestCatalogFromRealGameFilesIfProvided()
     Expect(fs::exists(items_game_path), "real items_game path should exist");
     Expect(fs::exists(localization_path), "real localization path should exist");
 
-    const auto catalog = nskinzcs2::CatalogBuilder::BuildCatalogFromGameFiles(items_game_path, localization_path);
+    const fs::path directory_vpk_path = directory_vpk_env == nullptr ? fs::path {} : fs::path(directory_vpk_env);
+    if (!directory_vpk_path.empty())
+    {
+        Expect(fs::exists(directory_vpk_path), "real game directory VPK should exist");
+    }
+    const auto catalog = nskinzcs2::CatalogBuilder::BuildCatalogFromGameFiles(
+        items_game_path,
+        localization_path,
+        directory_vpk_path);
     Expect(catalog.has_value(), "real installed game files should parse successfully");
     Expect(catalog->runtime_populated, "real installed game catalog should be runtime populated");
     Expect(catalog->weapon_paint_kits.size() > 100, "real installed game files should provide a large weapon paint list");
@@ -2445,7 +2491,51 @@ void TestCatalogFromRealGameFilesIfProvided()
     Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 7, 44) == WeaponPaintCompatibility::Compatible &&
         nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 3, 44) == WeaponPaintCompatibility::Compatible,
         "real shared Case Hardened paint retains both AK-47 and Five-SeveN combinations");
+    Expect(nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(&*catalog, 7, 801) == WeaponPaintCompatibility::Compatible,
+        "real AK-47 Asiimov paint ID 801 must remain bound to AK-47");
+    for (const auto& [definition, paints] : catalog->weapon_paint_compatibility)
+    {
+        if (definition != 7)
+        {
+            Expect(std::find(paints.begin(), paints.end(), 801) == paints.end(),
+                "AK-47 Asiimov paint ID 801 must not leak into another weapon or knife model");
+        }
+    }
+    std::size_t compatible_knife_pairs = 0;
+    if (!directory_vpk_path.empty())
+    {
+        for (const auto& knife : catalog->knife_items)
+        {
+            if (knife.id == 0) continue;
+            const auto found = catalog->weapon_paint_compatibility.find(knife.id);
+            if (found == catalog->weapon_paint_compatibility.end() || found->second.empty())
+            {
+                std::cerr << "missing knife compatibility: definition=" << knife.id
+                          << " name=" << knife.name << '\n';
+            }
+            Expect(found != catalog->weapon_paint_compatibility.end() && !found->second.empty(),
+                "every selectable knife model must have exact paint compatibility pairs");
+            Expect(std::is_sorted(found->second.begin(), found->second.end()),
+                "knife compatibility IDs must be sorted");
+            Expect(std::adjacent_find(found->second.begin(), found->second.end()) == found->second.end(),
+                "knife compatibility IDs must not contain duplicates");
+            compatible_knife_pairs += found->second.size();
+        }
+    }
+    for (const auto& [paint, definition] : catalog->glove_paint_compatibility)
+    {
+        if (paint == 0) continue;
+        Expect(std::any_of(catalog->glove_paint_kits.begin(), catalog->glove_paint_kits.end(),
+                   [&](const nskinzcs2::model::NamedId& value) { return value.id == paint; }),
+            "every glove compatibility paint must exist in the selectable glove paint catalog");
+        Expect(std::any_of(catalog->glove_items.begin(), catalog->glove_items.end(),
+                   [&](const nskinzcs2::model::NamedId& value) { return value.id == definition; }),
+            "every glove compatibility pair must target a selectable glove model");
+    }
     std::cout << "compatibility coverage: guns=" << checked_weapons << ", pairs=" << compatible_pairs << '\n';
+    std::cout << "compatibility coverage: knives=" << (catalog->knife_items.size() - 1)
+              << ", pairs=" << compatible_knife_pairs
+              << ", gloves=" << (catalog->glove_paint_compatibility.size() - 1) << '\n';
     if (g_weapon_paint_only)
     {
         Expect(catalog->weapon_paint_uses_legacy_model.at(844), "installed Emperor uses legacy model");
@@ -4558,6 +4648,7 @@ void TestGloveAppearanceModule()
         profile.quality = 3;
         profile.seed = 7;
         profile.wear = 0.15f;
+        profile.custom_name = "Glove";
 
         const auto request = BuildGloveAppearanceRequest(profile);
         Expect(request.xuid == profile.xuid, "glove request should preserve XUID");
@@ -4565,7 +4656,14 @@ void TestGloveAppearanceModule()
         Expect(request.model_definition == 5030, "glove request should preserve model definition");
         Expect(request.paint_kit == 10018, "glove request should preserve paint");
         Expect(request.explicit_vanilla_finish, "glove request should preserve explicit finish intent");
+        Expect(request.custom_name == "Glove", "glove request should preserve a custom name");
         Expect(GloveProfileRequiresModelDefinition(request.mode), "model-and-finish mode requires a model definition");
+    }
+
+    {
+        nskinzcs2::model::GloveProfile profile;
+        const auto request = BuildGloveAppearanceRequest(profile);
+        Expect(request.custom_name == "nSkinz CS2", "an empty glove name should resolve to the shared default name");
     }
 
     {
@@ -5522,6 +5620,23 @@ void TestStandardWeaponStockInitialization()
     Expect(!StandardWeaponHasCompositeMaterial(0, 0) && StandardWeaponHasCompositeMaterial(1, 0) &&
         StandardWeaponHasCompositeMaterial(0, 1) && !StandardWeaponHasCompositeMaterial(-1, 1) &&
         !StandardWeaponHasCompositeMaterial(129, 0), "empty/invalid material containers cannot count as generated");
+    constexpr std::array<std::uint8_t, 27> generator_2000918 {
+        0x40,0x55,0x53,0x41,0x57,0x48,0x8D,0xAC,0x24,0,0xFE,0xFF,0xFF,
+        0x48,0x81,0xEC,0,3,0,0,0x44,0x0F,0xB6,0xFA,0x48,0x8B,0xD9
+    };
+    constexpr std::array<std::uint8_t, 34> generator_2000919 {
+        0x40,0x55,0x53,0x41,0x57,0x48,0x8D,0xAC,0x24,0,0xFE,0xFF,0xFF,
+        0x48,0x81,0xEC,0,3,0,0,0x48,0x8B,0x05,0x35,0x08,0xCC,0x01,
+        0x44,0x0F,0xB6,0xFA,0x48,0x8B,0xD9
+    };
+    Expect(IsVerifiedWeaponMaterialGeneratorEntry(generator_2000918),
+        "CS2 2000918 standard-weapon material generator entry must remain supported");
+    Expect(IsVerifiedWeaponMaterialGeneratorEntry(generator_2000919),
+        "CS2 2000919 standard-weapon material generator entry must be supported");
+    auto corrupt_generator = generator_2000919;
+    corrupt_generator[27] ^= 1;
+    Expect(!IsVerifiedWeaponMaterialGeneratorEntry(corrupt_generator),
+        "changed CS2 2000919 generator ABI must fail closed");
     if (const auto* client = _wgetenv(L"NSKINZCS2_KNIFE_CLIENT_DLL"); client != nullptr)
     {
         Expect(ProbeStandardWeaponMaterialCallsForTests(client), "actual installed client must resolve both native material callees");
@@ -5683,11 +5798,19 @@ void TestWeaponAppearanceModule()
         Expect(payload.fallback_stat_trak == 9, "payload should preserve fallback StatTrak");
         Expect(payload.account_id == 123u, "payload should preserve account id");
         Expect(payload.writes_custom_name, "payload should mark custom-name writes");
+        Expect(payload.custom_name == "Dragon Lore", "payload should preserve a custom weapon name");
         Expect(payload.needs_refresh, "payload should request refresh when temporary attributes exist");
         Expect(ContainsRefreshAttribute(payload.temporary_attributes, 6, 344.0f), "payload should include paint");
         Expect(ContainsRefreshAttribute(payload.temporary_attributes, 8, 0.2f), "payload should include wear");
         Expect(ContainsRefreshAttribute(payload.temporary_attributes, 80, 9.0f), "payload should include StatTrak");
         Expect(ContainsRefreshAttribute(payload.temporary_attributes, 113, 3.0f), "payload should include sticker kit");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        const auto payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(payload.writes_custom_name, "default weapon names should be written");
+        Expect(payload.custom_name == "nSkinz CS2", "an empty weapon name should resolve to the shared default name");
     }
 
     {
@@ -5851,7 +5974,7 @@ void TestM4A4ModernLegacyTransition()
     Expect(ProbeStandardWeaponRenderOnlyBindingForTests(), "verified unindexed HUD survives production binding; unproven pointers do not");
     Expect(ProbeStandardWeaponHudDiscoveryForTests(), "production HUD walker verifies ownership, serials, active weapon and uniqueness");
     Expect(ProbeStandardWeaponHudPendingGateForTests(), "an expected but missing active HUD defers before writes and material refresh");
-    Expect(ProbeStandardWeaponAppearanceEpochForTests(), "only verified carrier/render generations invalidate completed refresh; stable or hidden HUDs do not");
+    Expect(ProbeStandardWeaponAppearanceEpochForTests(), "carrier generations invalidate completed material refresh, while render/HUD consumer changes only rebind fields and preserve the carrier material cache");
     nskinzcs2::model::CosmeticProfile profile;
     profile.base_item = 16;
     for (const int paint : {1353, 844, 1353, 844})
@@ -5949,6 +6072,17 @@ int RunAllTests()
             RunNamedTest("TestWeaponMeshMaskNonblocking", TestWeaponMeshMaskNonblocking);
             RunNamedTest("TestWeaponAppearanceModule", TestWeaponAppearanceModule);
             std::cout << "weapon paint regression passed (no CS2 process)\n";
+            return EXIT_SUCCESS;
+        }
+        if (g_cosmetic_rewrite_only)
+        {
+            RunNamedTest("TestConfigRoundTrip", TestConfigRoundTrip);
+            RunNamedTest("TestCosmeticWearPolicy", TestCosmeticWearPolicy);
+            RunNamedTest("TestDemoSkinRewritePlan", RunDemoSkinRewriteTests);
+            RunNamedTest("TestCatalogFromGameText", TestCatalogFromGameText);
+            RunNamedTest("TestWeaponPaintCompatibility", TestWeaponPaintCompatibility);
+            RunNamedTest("TestCatalogFromRealGameFilesIfProvided", TestCatalogFromRealGameFilesIfProvided);
+            std::cout << "cosmetic rewrite regression passed (no CS2 process)\n";
             return EXIT_SUCCESS;
         }
         if (g_mesh_benchmark_only)
@@ -6054,6 +6188,10 @@ void ParseArguments(const int argc, wchar_t** argv)
         else if (argument == L"--weapon-paint-only")
         {
             g_weapon_paint_only = true;
+        }
+        else if (argument == L"--cosmetic-rewrite-only")
+        {
+            g_cosmetic_rewrite_only = true;
         }
     }
 }

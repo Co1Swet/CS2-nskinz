@@ -267,7 +267,7 @@ static void to_json(json& j, const CosmeticProfile& value)
         {"paint_kit", value.paint_kit},
         {"explicit_vanilla_finish", value.explicit_vanilla_finish},
         {"quality", value.quality},
-        {"seed", value.seed},
+        {"seed", NormalizeCosmeticSeed(value.seed)},
         {"stat_trak", value.stat_trak},
         {"wear", serialized_wear},
         {"custom_name", value.custom_name},
@@ -285,7 +285,7 @@ static void from_json(const json& j, CosmeticProfile& value)
     value.paint_kit = j.value("paint_kit", 0);
     value.explicit_vanilla_finish = j.value("explicit_vanilla_finish", false);
     value.quality = j.value("quality", 0);
-    value.seed = j.value("seed", 0);
+    value.seed = NormalizeCosmeticSeed(j.value("seed", 0));
     value.stat_trak = j.value("stat_trak", 0);
     const auto parsed_wear = j.value("wear", kMinimumCosmeticWear);
     value.wear =
@@ -316,7 +316,7 @@ static void to_json(json& j, const KnifeProfile& value)
         {"paint_kit", value.paint_kit},
         {"explicit_vanilla_finish", value.explicit_vanilla_finish},
         {"quality", value.quality},
-        {"seed", value.seed},
+        {"seed", NormalizeCosmeticSeed(value.seed)},
         {"stat_trak", value.stat_trak},
         {"wear", value.wear},
         {"custom_name", value.custom_name},
@@ -333,7 +333,7 @@ static void from_json(const json& j, KnifeProfile& value)
     value.paint_kit = j.value("paint_kit", 0);
     value.explicit_vanilla_finish = j.value("explicit_vanilla_finish", false);
     value.quality = j.value("quality", 0);
-    value.seed = j.value("seed", 0);
+    value.seed = NormalizeCosmeticSeed(j.value("seed", 0));
     value.stat_trak = j.value("stat_trak", 0);
     value.wear = j.value("wear", 0.0000001f);
     value.custom_name = j.value("custom_name", std::string());
@@ -350,8 +350,9 @@ static void to_json(json& j, const GloveProfile& value)
         {"paint_kit", value.paint_kit},
         {"explicit_vanilla_finish", value.explicit_vanilla_finish},
         {"quality", value.quality},
-        {"seed", value.seed},
+        {"seed", NormalizeCosmeticSeed(value.seed)},
         {"wear", NormalizeCosmeticWear(value.wear)},
+        {"custom_name", value.custom_name},
     };
 }
 
@@ -365,8 +366,9 @@ static void from_json(const json& j, GloveProfile& value)
     value.paint_kit = j.value("paint_kit", 0);
     value.explicit_vanilla_finish = j.value("explicit_vanilla_finish", false);
     value.quality = j.value("quality", 0);
-    value.seed = j.value("seed", 0);
+    value.seed = NormalizeCosmeticSeed(j.value("seed", 0));
     value.wear = NormalizeCosmeticWear(j.value("wear", kMinimumCosmeticWear));
+    value.custom_name = j.value("custom_name", std::string());
 }
 
 static void to_json(json& j, const KeychainProfile& value)

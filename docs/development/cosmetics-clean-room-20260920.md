@@ -1,13 +1,12 @@
-# CS2 Insight cosmetics clean-room observations (2026-09-20)
+# Knife/glove cosmetics behavior observations (2026-09-20)
 
 ## Scope and license boundary
 
-The installed CS2 Insight desktop/backend files identify the public project as
-PolyForm Noncommercial 1.0.0. Its `skin-core.exe` is explicitly distributed as
-a closed component. nSkinz does not copy or link that executable, its Rust
-implementation, or its encryption protocol. The implementation in this tree
-is a clean-room runtime implementation based only on controlled input/output
-experiments and observable Source 2 state.
+This document records the observable Source 2 state required for a complete
+knife/glove transaction. The implementation in this tree is an independent
+clean-room implementation based on controlled input/output experiments and
+publicly observable replay state; it does not copy or link closed components,
+private protocols, or third-party executable code.
 
 nSkinz remains a HLAE / `-insecure` / offline-demo-only DLL. It does not patch
 the source demo on disk and does not add an online or anti-cheat path.

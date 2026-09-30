@@ -1,4 +1,4 @@
-# Insight knife/glove clean-room checkpoint (2026-09-21)
+# Knife/glove clean-room checkpoint (2026-09-21)
 
 This file freezes the cosmetics reverse-engineering state before the Workshop
 radar controls were changed.  The implementation remains HLAE / `-insecure` /

@@ -144,6 +144,7 @@ GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::Glove
     request.quality = profile.quality;
     request.seed = profile.seed;
     request.wear = nskinzcs2::model::NormalizeCosmeticWear(profile.wear);
+    request.custom_name = nskinzcs2::model::ResolveCosmeticCustomName(profile.custom_name);
     return request;
 }
 

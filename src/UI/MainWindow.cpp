@@ -57,6 +57,7 @@ using nskinzcs2::runtime::WorkshopMapScanResult;
 using nskinzcs2::runtime::IsLikelyAuxiliaryWorkshopMap;
 using nskinzcs2::model::kMaximumCosmeticWear;
 using nskinzcs2::model::kMinimumCosmeticWear;
+using nskinzcs2::model::NormalizeCosmeticSeed;
 using nskinzcs2::ui::UiTextId;
 
 constexpr wchar_t kWindowClassName[] = L"nSkinzCS2.ToolWindow";
@@ -1576,7 +1577,7 @@ private:
 
             if (ImGui::BeginTabItem(Ui(UiTextId::TabDemoRewrite)))
             {
-                DrawDemoSkinRewriteEditor();
+                DrawDemoSkinRewriteEditor(catalog);
                 ImGui::EndTabItem();
             }
 
@@ -1766,6 +1767,7 @@ private:
 
         if (ImGui::InputInt(Ui(UiTextId::Seed), &profile.seed))
         {
+            profile.seed = NormalizeCosmeticSeed(profile.seed);
             PushWorkingConfig();
         }
 
@@ -1828,7 +1830,11 @@ private:
 
         char custom_name_buffer[64] {};
         CopyToBuffer(profile.custom_name, custom_name_buffer, sizeof(custom_name_buffer));
-        if (ImGui::InputText(Ui(UiTextId::NameTag), custom_name_buffer, sizeof(custom_name_buffer)))
+        if (ImGui::InputTextWithHint(
+                Ui(UiTextId::NameTag),
+                nskinzcs2::model::kDefaultCosmeticCustomName.data(),
+                custom_name_buffer,
+                sizeof(custom_name_buffer)))
         {
             profile.custom_name = custom_name_buffer;
             PushWorkingConfig();
@@ -1930,14 +1936,44 @@ private:
             ImGui::TextWrapped("%s", Ui(UiTextId::KnifeTargetVanillaHint));
         }
 
+        const auto knife_paints =
+            profile.mode == KnifeProfileMode::ModelAndFinish && profile.model_definition > 0
+                ? nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(
+                    catalog, profile.model_definition)
+                : catalog.weapon_paint_kits;
+        const auto knife_paint_compatibility =
+            profile.mode == KnifeProfileMode::ModelAndFinish && profile.model_definition > 0
+                ? nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(
+                    &catalog, profile.model_definition, profile.paint_kit)
+                : nskinzcs2::WeaponPaintCompatibility::Compatible;
+        const auto blocked_knife_paint =
+            knife_paint_compatibility != nskinzcs2::WeaponPaintCompatibility::Compatible;
+        std::string blocked_knife_preview;
+        if (blocked_knife_paint)
+        {
+            const auto found = std::find_if(
+                catalog.weapon_paint_kits.begin(),
+                catalog.weapon_paint_kits.end(),
+                [&](const NamedId& paint) { return paint.id == profile.paint_kit; });
+            blocked_knife_preview = std::string(Ui(UiTextId::WeaponPaintBlocked)) + " " +
+                (found != catalog.weapon_paint_kits.end() ? found->name : std::string {}) +
+                " (" + std::to_string(profile.paint_kit) + ")";
+        }
         if (ComboFinishByIntent(
                 Ui(UiTextId::PaintKit),
-                catalog.weapon_paint_kits,
+                knife_paints,
                 profile.paint_kit,
                 profile.explicit_vanilla_finish,
-                12))
+                12,
+                blocked_knife_paint ? blocked_knife_preview.c_str() : nullptr))
         {
             PushWorkingConfig();
+        }
+        if (profile.mode == KnifeProfileMode::ModelAndFinish &&
+            profile.model_definition > 0 &&
+            blocked_knife_paint)
+        {
+            ImGui::TextWrapped("%s", Ui(UiTextId::WeaponPaintIncompatible));
         }
 
         if (ComboById(Ui(UiTextId::Quality), catalog.qualities, profile.quality, 8))
@@ -1947,6 +1983,7 @@ private:
 
         if (ImGui::InputInt(Ui(UiTextId::Seed), &profile.seed))
         {
+            profile.seed = NormalizeCosmeticSeed(profile.seed);
             PushWorkingConfig();
         }
 
@@ -1962,7 +1999,11 @@ private:
 
         char custom_name_buffer[64] {};
         CopyToBuffer(profile.custom_name, custom_name_buffer, sizeof(custom_name_buffer));
-        if (ImGui::InputText(Ui(UiTextId::NameTag), custom_name_buffer, sizeof(custom_name_buffer)))
+        if (ImGui::InputTextWithHint(
+                Ui(UiTextId::NameTag),
+                nskinzcs2::model::kDefaultCosmeticCustomName.data(),
+                custom_name_buffer,
+                sizeof(custom_name_buffer)))
         {
             profile.custom_name = custom_name_buffer;
             PushWorkingConfig();
@@ -2146,6 +2187,7 @@ private:
 
         if (ImGui::InputInt(Ui(UiTextId::Seed), &profile.seed))
         {
+            profile.seed = NormalizeCosmeticSeed(profile.seed);
             PushWorkingConfig();
         }
 
@@ -2156,6 +2198,18 @@ private:
                 kMaximumCosmeticWear,
                 "%.7f"))
         {
+            PushWorkingConfig();
+        }
+
+        char custom_name_buffer[64] {};
+        CopyToBuffer(profile.custom_name, custom_name_buffer, sizeof(custom_name_buffer));
+        if (ImGui::InputTextWithHint(
+                Ui(UiTextId::NameTag),
+                nskinzcs2::model::kDefaultCosmeticCustomName.data(),
+                custom_name_buffer,
+                sizeof(custom_name_buffer)))
+        {
+            profile.custom_name = custom_name_buffer;
             PushWorkingConfig();
         }
 
@@ -2634,13 +2688,12 @@ private:
         }
     }
 
-    void DrawDemoSkinRewriteEditor()
+    void DrawDemoSkinRewriteEditor(const Catalog& catalog)
     {
         RefreshCapturedDemoSkinSource();
         RefreshDemoSkinRewriteResult();
 
         ImGui::TextWrapped("%s", Ui(UiTextId::DemoRewriteDescription));
-        ImGui::TextDisabled("%s", Ui(UiTextId::DemoRewriteDependency));
         ImGui::Separator();
 
         char source_buffer[2048] {};
@@ -2658,28 +2711,39 @@ private:
             ImGui::TextWrapped("%s", Ui(UiTextId::DemoRewriteSourceWaiting));
         }
 
-        const auto plan = nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(working_config_);
+        const auto plan = nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(working_config_, &catalog);
         ImGui::Text(
             Ui(UiTextId::DemoRewriteProfilesFormat),
             static_cast<int>(plan.passes.size()),
+            plan.weapon_item_count,
             plan.knife_item_count,
             plan.glove_item_count);
+        if (!plan.validation_issue.empty())
+        {
+            ImGui::TextColored(
+                ImVec4(0.94f, 0.42f, 0.25f, 1.0f),
+                "%s",
+                Narrow(plan.validation_issue).c_str());
+        }
 
         const auto busy = demo_skin_rewrite_future_.valid();
-        ImGui::BeginDisabled(busy || demo_skin_source_path_.empty() || plan.passes.empty());
+        ImGui::BeginDisabled(
+            busy || demo_skin_source_path_.empty() || plan.passes.empty() || !plan.validation_issue.empty());
         if (ImGui::Button(Ui(UiTextId::DemoRewriteGenerateLoad), ImVec2(-1.0f, 34.0f)))
         {
             const auto config = working_config_;
+            const auto rewrite_catalog = catalog;
             const auto source = demo_skin_source_path_;
             const auto process_id = external_runtime_process_id_;
             demo_skin_rewrite_result_ = {};
             demo_skin_rewrite_result_.detail = L"Rewrite started.";
             demo_skin_rewrite_future_ = std::async(
                 std::launch::async,
-                [config, source, process_id]()
+                [config, rewrite_catalog, source, process_id]()
                 {
                     return nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
                         config,
+                        &rewrite_catalog,
                         source,
                         process_id);
                 });

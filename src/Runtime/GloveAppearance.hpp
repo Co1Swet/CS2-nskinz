@@ -33,6 +33,7 @@ struct GloveAppearanceRequest
     int quality = 0;
     int seed = 0;
     float wear = model::kMinimumCosmeticWear;
+    std::string custom_name;
 };
 
 struct ResolvedGloveCarrier

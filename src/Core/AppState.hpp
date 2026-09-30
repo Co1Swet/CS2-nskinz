@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -18,6 +19,14 @@ namespace nskinzcs2::model
 {
 inline constexpr float kMinimumCosmeticWear = 0.0000001f;
 inline constexpr float kMaximumCosmeticWear = 1.0f;
+inline constexpr int kMinimumCosmeticSeed = 0;
+inline constexpr int kMaximumCosmeticSeed = 1000;
+inline constexpr std::string_view kDefaultCosmeticCustomName = "nSkinz CS2";
+
+inline std::string ResolveCosmeticCustomName(const std::string_view custom_name)
+{
+    return custom_name.empty() ? std::string(kDefaultCosmeticCustomName) : std::string(custom_name);
+}
 
 inline float NormalizeCosmeticWear(const float wear) noexcept
 {
@@ -27,6 +36,11 @@ inline float NormalizeCosmeticWear(const float wear) noexcept
     }
 
     return std::clamp(wear, kMinimumCosmeticWear, kMaximumCosmeticWear);
+}
+
+inline int NormalizeCosmeticSeed(const int seed) noexcept
+{
+    return std::clamp(seed, kMinimumCosmeticSeed, kMaximumCosmeticSeed);
 }
 
 inline bool CosmeticWearMatchesExactly(const float actual, const float expected) noexcept
@@ -95,6 +109,7 @@ struct GloveProfile
     bool enabled = false;
     std::uint64_t xuid = 0;
     GloveProfileMode mode = GloveProfileMode::FinishOnly;
+    std::string custom_name;
     int model_definition = 0;
     int paint_kit = 0;
     bool explicit_vanilla_finish = false;

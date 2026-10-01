@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -40,6 +41,7 @@ bool g_mesh_benchmark_only = false;
 bool g_knife_model_only = false;
 bool g_weapon_paint_only = false;
 bool g_cosmetic_rewrite_only = false;
+bool g_glove_refresh_only = false;
 
 void WriteRadarPreviewIfRequested(
     const std::string_view name,
@@ -293,6 +295,19 @@ bool ContainsRefreshAttribute(
             return attribute.first == definition_index;
         });
     return it != attributes.end() && std::fabs(it->second - expected_value) <= epsilon;
+}
+
+bool ContainsRefreshDefinitionIndex(
+    const std::vector<std::pair<std::uint16_t, float>>& attributes,
+    const std::uint16_t definition_index)
+{
+    return std::any_of(
+        attributes.begin(),
+        attributes.end(),
+        [definition_index](const auto& attribute)
+        {
+            return attribute.first == definition_index;
+        });
 }
 
 bool ContainsExactWearAttribute(
@@ -1423,6 +1438,33 @@ void TestWorkshopMapDiscovery()
                 map_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::NotNeeded,
             "each installed audited workshop map radar should be generated or already transparent");
         WriteRadarPreviewIfRequested(std::string(map_name) + "-default", map_overlay);
+        if (map_name == "de_mirage_water")
+        {
+            nskinzcs2::runtime::RadarAlphaMaskSettings no_dark_recovery;
+            no_dark_recovery.dark_detail_radius = 0;
+            nskinzcs2::runtime::RadarAlphaOverlay no_dark_recovery_overlay;
+            const auto no_dark_recovery_outcome =
+                nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+                    radar->virtual_path,
+                    radar->bytes,
+                    no_dark_recovery_overlay,
+                    radar_diagnostic,
+                    no_dark_recovery);
+            Expect(
+                no_dark_recovery_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+                "Mirage Water should support disabling its map-specific dark-road recovery");
+            WriteRadarPreviewIfRequested(
+                "de_mirage_water-no-dark-recovery",
+                no_dark_recovery_overlay);
+            std::wcout << L"generic_radar_map=de_mirage_water road_recovery visible="
+                       << map_overlay.visible_pixels
+                       << L" no_recovery_visible=" << no_dark_recovery_overlay.visible_pixels
+                       << L" recovered=" << map_overlay.recovered_detail_pixels << L'\n';
+            Expect(
+                map_overlay.recovered_detail_pixels >= 50000 &&
+                    map_overlay.visible_pixels >= no_dark_recovery_overlay.visible_pixels + 45000,
+                "Mirage Water should restore its wide bounded roads without retaining the outside matte");
+        }
         if (map_name == "de_ancient_night")
         {
             std::wcout << L"generic_radar_map=de_ancient_night auto_tolerance="
@@ -5238,11 +5280,12 @@ void TestBuildWeaponRefreshAttributes()
         profile.stickers[0].rotation = 45.0f;
 
         const auto attributes = nskinzcs2::runtime::BuildWeaponRefreshAttributes(profile);
-        Expect(attributes.size() == 4, "sticker refresh should emit the full sticker attribute block");
-        Expect(ContainsRefreshAttribute(attributes, 113, 3.0f), "sticker refresh should include sticker kit");
-        Expect(ContainsRefreshAttribute(attributes, 114, 0.2f), "sticker refresh should include sticker wear");
-        Expect(ContainsRefreshAttribute(attributes, 115, 1.1f), "sticker refresh should include sticker scale");
-        Expect(ContainsRefreshAttribute(attributes, 116, 45.0f), "sticker refresh should include sticker rotation");
+        Expect(attributes.size() == 1, "existing-sticker replacement should emit only the sticker kit id");
+        Expect(ContainsRefreshAttribute(attributes, 113, std::bit_cast<float>(std::uint32_t {3})),
+            "existing-sticker replacement should encode the integer kit ID in the attribute union");
+        Expect(!ContainsRefreshDefinitionIndex(attributes, 114), "existing-sticker replacement should preserve recorded sticker wear");
+        Expect(!ContainsRefreshDefinitionIndex(attributes, 115), "existing-sticker replacement should preserve recorded sticker scale");
+        Expect(!ContainsRefreshDefinitionIndex(attributes, 116), "existing-sticker replacement should preserve recorded sticker rotation");
     }
 
     {
@@ -5262,10 +5305,11 @@ void TestBuildWeaponRefreshAttributes()
         Expect(ContainsRefreshAttribute(attributes, 7, 0.0f), "standard weapon refresh should include seed");
         Expect(ContainsRefreshAttribute(attributes, 8, 0.2f), "standard weapon refresh should include wear");
         Expect(ContainsRefreshAttribute(attributes, 80, 9.0f), "standard weapon refresh should include StatTrak");
-        Expect(ContainsRefreshAttribute(attributes, 113, 3.0f), "standard weapon refresh should include sticker kit");
-        Expect(ContainsRefreshAttribute(attributes, 114, 0.2f), "standard weapon refresh should include sticker wear");
-        Expect(ContainsRefreshAttribute(attributes, 115, 1.1f), "standard weapon refresh should include sticker scale");
-        Expect(ContainsRefreshAttribute(attributes, 116, 45.0f), "standard weapon refresh should include sticker rotation");
+        Expect(ContainsRefreshAttribute(attributes, 113, std::bit_cast<float>(std::uint32_t {3})),
+            "standard weapon refresh should bit-preserve the integer sticker kit ID");
+        Expect(!ContainsRefreshDefinitionIndex(attributes, 114), "standard weapon refresh should preserve recorded sticker wear");
+        Expect(!ContainsRefreshDefinitionIndex(attributes, 115), "standard weapon refresh should preserve recorded sticker scale");
+        Expect(!ContainsRefreshDefinitionIndex(attributes, 116), "standard weapon refresh should preserve recorded sticker rotation");
     }
 
     {
@@ -5319,11 +5363,12 @@ void TestBuildMissingWeaponAttributeDefinitionIndices()
 
         const auto missing =
             nskinzcs2::runtime::BuildMissingWeaponAttributeDefinitionIndices(profile, {6, 7, 8});
+        Expect(missing.size() == 2, "missing attribute set should contain only StatTrak and the sticker kit");
         Expect(ContainsDefinitionIndex(missing, 80), "missing attribute set should include stattrak");
         Expect(ContainsDefinitionIndex(missing, 113), "missing attribute set should include sticker kit");
-        Expect(ContainsDefinitionIndex(missing, 114), "missing attribute set should include sticker wear");
-        Expect(ContainsDefinitionIndex(missing, 115), "missing attribute set should include sticker scale");
-        Expect(ContainsDefinitionIndex(missing, 116), "missing attribute set should include sticker rotation");
+        Expect(!ContainsDefinitionIndex(missing, 114), "missing attribute set should not request sticker wear");
+        Expect(!ContainsDefinitionIndex(missing, 115), "missing attribute set should not request sticker scale");
+        Expect(!ContainsDefinitionIndex(missing, 116), "missing attribute set should not request sticker rotation");
     }
 
     {
@@ -5589,9 +5634,20 @@ void TestStandardWeaponAttributeSynchronization()
     const auto failed = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, desired, true, 2);
     Expect(!failed.synchronized && failed.original_values_restored && failed.vectors_and_node_metadata_preserved,
         "a mid-transaction notification failure must roll back scalar values without damaging nodes");
-    const auto sticker = ProbeStandardWeaponAttributeSynchronizationForTests({}, recorded, {{113, 12}});
+    const auto sticker = ProbeStandardWeaponAttributeSynchronizationForTests(
+        {}, recorded, {{113, std::bit_cast<float>(std::uint32_t {12})}});
     Expect(!sticker.synchronized && sticker.original_values_restored,
         "missing attributes without entity fallback storage cannot count as applied");
+    const auto existing_sticker = ProbeStandardWeaponAttributeSynchronizationForTests(
+        {},
+        {{113, std::bit_cast<float>(std::uint32_t {3})},
+         {114, 0.2f},
+         {115, 1.1f},
+         {116, 45.0f}},
+        {{113, std::bit_cast<float>(std::uint32_t {12})}});
+    Expect(existing_sticker.synchronized && existing_sticker.matched_after &&
+        existing_sticker.changed_slots == 1 && existing_sticker.original_values_restored,
+        "an existing sticker slot should replace only its kit id and restore transactionally");
     const auto invalid = ProbeStandardWeaponAttributeSynchronizationForTests({}, {{6, 1040}}, {{6, std::numeric_limits<float>::quiet_NaN()}});
     Expect(!invalid.synchronized && invalid.original_values_restored, "non-finite desired attributes must not be written");
 }
@@ -5633,10 +5689,22 @@ void TestStandardWeaponStockInitialization()
         "CS2 2000918 standard-weapon material generator entry must remain supported");
     Expect(IsVerifiedWeaponMaterialGeneratorEntry(generator_2000919),
         "CS2 2000919 standard-weapon material generator entry must be supported");
+    constexpr std::array<std::uint8_t, 31> generator_compact_frame {
+        0x40,0x55,0x56,0x41,0x57,0x48,0x8D,0x6C,0x24,0xB9,
+        0x48,0x81,0xEC,0xD0,0,0,0,
+        0x48,0x8B,0x05,0xE8,0x1A,0xCC,0x01,
+        0x44,0x0F,0xB6,0xFA,0x48,0x8B,0xF1
+    };
+    Expect(IsVerifiedWeaponMaterialGeneratorEntry(generator_compact_frame),
+        "current CS2 compact-frame standard-weapon material generator entry must be supported");
     auto corrupt_generator = generator_2000919;
     corrupt_generator[27] ^= 1;
     Expect(!IsVerifiedWeaponMaterialGeneratorEntry(corrupt_generator),
         "changed CS2 2000919 generator ABI must fail closed");
+    auto corrupt_compact_generator = generator_compact_frame;
+    corrupt_compact_generator[28] ^= 1;
+    Expect(!IsVerifiedWeaponMaterialGeneratorEntry(corrupt_compact_generator),
+        "changed compact-frame generator ABI must fail closed");
     if (const auto* client = _wgetenv(L"NSKINZCS2_KNIFE_CLIENT_DLL"); client != nullptr)
     {
         Expect(ProbeStandardWeaponMaterialCallsForTests(client), "actual installed client must resolve both native material callees");
@@ -5803,7 +5871,14 @@ void TestWeaponAppearanceModule()
         Expect(ContainsRefreshAttribute(payload.temporary_attributes, 6, 344.0f), "payload should include paint");
         Expect(ContainsRefreshAttribute(payload.temporary_attributes, 8, 0.2f), "payload should include wear");
         Expect(ContainsRefreshAttribute(payload.temporary_attributes, 80, 9.0f), "payload should include StatTrak");
-        Expect(ContainsRefreshAttribute(payload.temporary_attributes, 113, 3.0f), "payload should include sticker kit");
+        Expect(ContainsRefreshAttribute(
+            payload.temporary_attributes,
+            113,
+            std::bit_cast<float>(std::uint32_t {3})),
+            "payload should bit-preserve the integer sticker kit ID");
+        Expect(!ContainsRefreshDefinitionIndex(payload.temporary_attributes, 114), "payload should preserve sticker wear");
+        Expect(!ContainsRefreshDefinitionIndex(payload.temporary_attributes, 115), "payload should preserve sticker scale");
+        Expect(!ContainsRefreshDefinitionIndex(payload.temporary_attributes, 116), "payload should preserve sticker rotation");
     }
 
     {
@@ -6060,6 +6135,12 @@ int RunAllTests()
 {
     try
     {
+        if (g_glove_refresh_only)
+        {
+            RunNamedTest("TestGloveNativeVisualRefresh", TestGloveNativeVisualRefresh);
+            std::cout << "glove refresh regression passed (no CS2 process)\n";
+            return EXIT_SUCCESS;
+        }
         if (g_weapon_paint_only)
         {
             RunNamedTest("TestCatalogStoreRoundTrip", TestCatalogStoreRoundTrip);
@@ -6192,6 +6273,10 @@ void ParseArguments(const int argc, wchar_t** argv)
         else if (argument == L"--cosmetic-rewrite-only")
         {
             g_cosmetic_rewrite_only = true;
+        }
+        else if (argument == L"--glove-refresh-only")
+        {
+            g_glove_refresh_only = true;
         }
     }
 }

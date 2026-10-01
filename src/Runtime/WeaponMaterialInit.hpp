@@ -65,11 +65,35 @@ inline bool IsVerifiedWeaponMaterialGeneratorEntry(
         0x48,0x8B,0x05,0,0,0,0,
         0x44,0x0F,0xB6,0xFA,0x48,0x8B,0xD9
     };
-    if (bytes.size() < build_2000919.size()) return false;
-    for (std::size_t i = 0; i < build_2000919.size(); ++i)
+    if (bytes.size() >= build_2000919.size())
     {
-        if (i >= 23 && i < 27) continue; // RIP-relative relocation.
-        if (bytes[i] != build_2000919[i]) return false;
+        bool matched = true;
+        for (std::size_t i = 0; i < build_2000919.size(); ++i)
+        {
+            if (i >= 23 && i < 27) continue; // RIP-relative relocation.
+            if (bytes[i] != build_2000919[i])
+            {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+
+    // Current client keeps the same (RCX entity, DL flag) ABI but uses RSI for
+    // the entity and a compact 0xD0 stack frame. Only the process-state RIP
+    // displacement is relocation-dependent.
+    constexpr std::array<std::uint8_t, 31> compact_frame_build {
+        0x40,0x55,0x56,0x41,0x57,0x48,0x8D,0x6C,0x24,0xB9,
+        0x48,0x81,0xEC,0xD0,0,0,0,
+        0x48,0x8B,0x05,0,0,0,0,
+        0x44,0x0F,0xB6,0xFA,0x48,0x8B,0xF1
+    };
+    if (bytes.size() < compact_frame_build.size()) return false;
+    for (std::size_t i = 0; i < compact_frame_build.size(); ++i)
+    {
+        if (i >= 20 && i < 24) continue; // RIP-relative relocation.
+        if (bytes[i] != compact_frame_build[i]) return false;
     }
     return true;
 }

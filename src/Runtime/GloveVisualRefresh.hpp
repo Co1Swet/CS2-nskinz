@@ -6,16 +6,16 @@
 
 namespace nskinzcs2::runtime
 {
-// Build 2000918: the native pawn glove component's output is consumed by HUD.
+// Build 2000922: the native pawn glove component's output is consumed by HUD.
 // This is NOT m_hMyWearables or a fabricated CEconWearable.
-inline constexpr std::uintptr_t kGloveVisualRefreshRva = 0xC659D0;
-// Build 2000918: the continuously reached HUD glove assembly consumer. It
+inline constexpr std::uintptr_t kGloveVisualRefreshRva = 0xC65200;
+// Build 2000922: the continuously reached HUD glove assembly consumer. It
 // resolves the observed Pawn from this+0x520, then consumes Pawn+0x15F8.
-inline constexpr std::uintptr_t kGloveHudConsumerRva = 0x10CCD50;
+inline constexpr std::uintptr_t kGloveHudConsumerRva = 0x10CC670;
 inline constexpr std::ptrdiff_t kGloveHudConsumerPawnHandleOffset = 0x520;
-// Build 2000918: the native glove updater resolves its output handle through
+// Build 2000922: the native glove updater resolves its output handle through
 // this client-only identity chunk root, not the networked client entity system.
-inline constexpr std::uintptr_t kGloveVisualEntityChunksRva = 0x236A460;
+inline constexpr std::uintptr_t kGloveVisualEntityChunksRva = 0x236A9E0;
 inline constexpr std::ptrdiff_t kGloveVisualComponentOffset = 0x15F8;
 inline constexpr std::ptrdiff_t kGloveVisualComponentOwnerOffset = 0xB0;
 struct GloveVisualEvidenceWindow
@@ -24,8 +24,8 @@ struct GloveVisualEvidenceWindow
     std::span<const std::uint8_t> bytes;
 };
 const std::array<GloveVisualEvidenceWindow, 7>& GloveVisualEvidenceWindows() noexcept;
-// Mirrors client+0xC13520: a live client-only glove output requires an exact
-// full-handle match. Sentinel index values represent a freed output slot.
+// Mirrors the native client-only identity lookup: a live glove output requires
+// an exact full-handle match. Sentinel index values represent a freed slot.
 bool GloveVisualIdentityMatchesOutputHandle(
     std::uint32_t output_handle, std::uint32_t identity_handle) noexcept;
 struct GloveVisualRefreshKey

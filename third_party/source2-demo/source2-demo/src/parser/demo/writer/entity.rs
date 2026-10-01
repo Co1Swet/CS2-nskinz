@@ -8,7 +8,7 @@ use crate::proto::{CSvcMsgPacketEntities, Message};
 use crate::reader::{BitsReader, FieldPathCodec, MessageReader, SliceReader};
 use crate::stream::copy::{bit_position, copy_original_bits};
 use crate::stream::field_path::FieldOp;
-use crate::writer::{BitsWriter, BitstreamWriter};
+use crate::writer::{write_var_u32_to_buf, BitsWriter, BitstreamWriter};
 use std::cmp::Ordering;
 use std::io::{Seek, Write};
 
@@ -26,11 +26,16 @@ where
             return Ok(None);
         };
 
-        let (rewritten, changed) =
+        let (rewritten, changed, entry_bit_deltas) =
             self.rewrite_entity_data(entity_data, packet_entities.updated_entries())?;
         if changed {
+            if let Some(serialized_entities) = packet_entities.serialized_entities.as_deref() {
+                packet_entities.serialized_entities = Some(rewrite_serialized_entity_lengths(
+                    serialized_entities,
+                    &entry_bit_deltas,
+                )?);
+            }
             packet_entities.entity_data = Some(rewritten);
-            packet_entities.serialized_entities = None;
             Ok(Some(packet_entities.encode_to_vec()))
         } else {
             Ok(None)
@@ -41,50 +46,65 @@ where
         &mut self,
         entity_data: &[u8],
         updated_entries: i32,
-    ) -> Result<(Vec<u8>, bool), ParserError> {
+    ) -> Result<(Vec<u8>, bool, Vec<i64>), ParserError> {
         let mut reader = SliceReader::new(entity_data);
         self.entity_rewrite.replacements.clear();
         let mut index = usize::MAX;
         let path_reader = self.entity_rewrite.field_path_codec.clone();
+        let mut entry_ranges = Vec::with_capacity(updated_entries.max(0) as usize);
 
         for _ in 0..updated_entries {
+            let entry_start = bit_position(&reader);
             let delta = reader.read_ubit_var();
             index = index.wrapping_add((delta + 1) as usize);
 
             let cmd = reader.read_bits(2);
 
-            if cmd == 1 {
-                continue;
-            }
-
-            match EntityEvents::from_cmd(cmd) {
-                EntityEvents::Created => {
-                    self.rewrite_entity_created(&mut reader, &path_reader, index)?;
-                }
-                EntityEvents::Updated => {
-                    self.rewrite_entity_updated(&mut reader, &path_reader, index)?;
-                }
-                EntityEvents::Deleted => {
-                    self.parser.context.entities.entities_vec[index].index = u32::MAX;
+            if cmd != 1 {
+                match EntityEvents::from_cmd(cmd) {
+                    EntityEvents::Created => {
+                        self.rewrite_entity_created(&mut reader, &path_reader, index)?;
+                    }
+                    EntityEvents::Updated => {
+                        self.rewrite_entity_updated(&mut reader, &path_reader, index)?;
+                    }
+                    EntityEvents::Deleted => {
+                        self.parser.context.entities.entities_vec[index].index = u32::MAX;
+                    }
                 }
             }
+            entry_ranges.push((entry_start, bit_position(&reader)));
         }
 
         if self.entity_rewrite.replacements.is_empty() {
-            return Ok((Vec::new(), false));
+            return Ok((Vec::new(), false, Vec::new()));
         }
 
         let mut out = Vec::with_capacity(entity_data.len());
         let mut writer = BitstreamWriter::new(&mut out);
         let mut copy_start = 0;
+        let mut entry_index = 0usize;
+        let mut entry_bit_deltas = vec![0i64; entry_ranges.len()];
         let mut replacements = std::mem::take(&mut self.entity_rewrite.replacements);
         for replacement in replacements.drain(..) {
+            while entry_index + 1 < entry_ranges.len()
+                && replacement.value_start >= entry_ranges[entry_index].1
+            {
+                entry_index += 1;
+            }
+            let (entry_start, entry_end) = entry_ranges[entry_index];
+            if replacement.value_start < entry_start || replacement.value_end > entry_end {
+                return Err(ParserError::IoError(
+                    "entity field replacement crossed a serialized entity boundary".into(),
+                ));
+            }
             copy_original_bits(
                 entity_data,
                 copy_start,
                 replacement.value_start - copy_start,
                 &mut writer,
             )?;
+            let encoded_start = writer.bits_written();
             match replacement.value {
                 FieldReplacementValue::Field {
                     serializer,
@@ -95,6 +115,9 @@ where
                     writer.write_bits_as_bytes(&bytes, bit_len as u32)?;
                 }
             }
+            let encoded_len = writer.bits_written() - encoded_start;
+            let original_len = replacement.value_end - replacement.value_start;
+            entry_bit_deltas[entry_index] += encoded_len as i64 - original_len as i64;
             copy_start = replacement.value_end;
         }
         self.entity_rewrite.replacements = replacements;
@@ -106,7 +129,7 @@ where
         )?;
         writer.flush()?;
         drop(writer);
-        Ok((out, true))
+        Ok((out, true, entry_bit_deltas))
     }
 
     fn rewrite_entity_created(
@@ -230,11 +253,14 @@ where
         self.entity_rewrite.rewrite_paths.clear();
         let section_start = bit_position(reader);
         let mut fp = FieldPath::default();
+        let path_finish_start;
 
         loop {
             reader.refill();
+            let op_start = bit_position(reader);
             let op = path_reader.read_op(reader);
             if op == FieldOp::FieldPathEncodeFinish {
+                path_finish_start = op_start;
                 break;
             }
             op.execute(reader, &mut fp);
@@ -299,7 +325,7 @@ where
 
         let mut decoded_fields = std::mem::take(&mut self.entity_rewrite.decoded_fields);
         let mut replaced_values = Vec::new();
-        for field in decoded_fields.drain(..) {
+        for field in &decoded_fields {
             let Some(value) = entity.state.get_value(&field.fp) else {
                 continue;
             };
@@ -307,47 +333,59 @@ where
 
             if let Some(next_value) = replacement {
                 entity.state.set(&field.fp, next_value.clone());
-                replaced_values.push((field.fp, next_value, field.value_start, field.value_end));
+                replaced_values.push((field.fp, next_value));
             }
         }
 
         let extra_fields = self.additional_entity_fields(event, entity)?;
-        if extra_fields.is_empty() {
-            for (fp, value, value_start, value_end) in replaced_values {
+        let mut added_values = Vec::new();
+        for (name, value) in extra_fields {
+            let fp = entity.class.serializer.get_path(&name).map_err(|error| {
+                ParserError::IoError(format!("cannot materialize entity field {name}: {error}"))
+            })?;
+            entity.state.set(&fp, value.clone());
+            if original_paths.contains(&fp) {
+                if let Some(existing) = replaced_values.iter_mut().find(|(path, _)| *path == fp) {
+                    existing.1 = value;
+                } else {
+                    replaced_values.push((fp, value));
+                }
+            } else if let Some(existing) = added_values.iter_mut().find(|(path, _)| *path == fp) {
+                existing.1 = value;
+            } else {
+                added_values.push((fp, value));
+            }
+        }
+
+        if added_values.is_empty() {
+            for field in &decoded_fields {
+                let Some((_, value)) = replaced_values.iter().find(|(path, _)| *path == field.fp)
+                else {
+                    continue;
+                };
                 self.entity_rewrite.replacements.push(FieldReplacement {
                     value: FieldReplacementValue::Field {
                         serializer: entity.class.serializer.clone(),
-                        fp,
-                        value,
+                        fp: field.fp,
+                        value: value.clone(),
                     },
-                    value_start,
-                    value_end,
+                    value_start: field.value_start,
+                    value_end: field.value_end,
                 });
             }
         } else {
             let section_end = bit_position(reader);
-            let mut values = Vec::new();
-            for fp in original_paths.iter().copied() {
-                if let Some(value) = entity.state.get_value(&fp) {
-                    values.push((fp, value.clone()));
-                }
-            }
-            for (name, value) in extra_fields {
-                let fp = entity.class.serializer.get_path(&name).map_err(|error| {
-                    ParserError::IoError(format!("cannot materialize entity field {name}: {error}"))
-                })?;
-                entity.state.set(&fp, value.clone());
-                if let Some(existing) = values.iter_mut().find(|(path, _)| *path == fp) {
-                    existing.1 = value;
-                } else {
-                    values.push((fp, value));
-                }
-            }
-            values.sort_by(|(left, _), (right, _)| compare_field_paths(left, right));
-            let (bytes, bit_len) = encode_fields(
+            added_values.sort_by(|(left, _), (right, _)| compare_field_paths(left, right));
+            let (bytes, bit_len) = encode_fields_with_appended_paths(
                 &self.entity_rewrite.field_path_codec,
                 &entity.class.serializer,
-                &values,
+                reader.source_buffer,
+                section_start,
+                path_finish_start,
+                &original_paths,
+                &decoded_fields,
+                &replaced_values,
+                &added_values,
             )?;
             self.entity_rewrite.replacements.push(FieldReplacement {
                 value: FieldReplacementValue::EncodedBits { bytes, bit_len },
@@ -355,6 +393,7 @@ where
                 value_end: section_end,
             });
         }
+        decoded_fields.clear();
         self.entity_rewrite.decoded_fields = decoded_fields;
 
         Ok(())
@@ -381,6 +420,60 @@ where
     }
 }
 
+fn rewrite_serialized_entity_lengths(
+    encoded: &[u8],
+    entry_bit_deltas: &[i64],
+) -> Result<Vec<u8>, ParserError> {
+    let mut values = Vec::with_capacity(entry_bit_deltas.len());
+    let mut offset = 0usize;
+    while offset < encoded.len() {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let Some(&byte) = encoded.get(offset) else {
+                return Err(ParserError::IoError(
+                    "serialized entity length table ended inside a varint".into(),
+                ));
+            };
+            offset += 1;
+            if shift >= 64 && byte & 0x7f != 0 {
+                return Err(ParserError::IoError(
+                    "serialized entity length table contains an overflowing varint".into(),
+                ));
+            }
+            value |= u64::from(byte & 0x7f) << shift.min(63);
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if shift > 63 {
+                return Err(ParserError::IoError(
+                    "serialized entity length table contains an oversized varint".into(),
+                ));
+            }
+        }
+        values.push(value);
+    }
+
+    if values.len() != entry_bit_deltas.len() {
+        return Err(ParserError::IoError(format!(
+            "serialized entity length count mismatch: table has {}, packet has {} entries",
+            values.len(),
+            entry_bit_deltas.len()
+        )));
+    }
+
+    let mut rewritten = Vec::with_capacity(encoded.len());
+    for (value, delta) in values.into_iter().zip(entry_bit_deltas) {
+        let adjusted = i128::from(value) + i128::from(*delta);
+        let adjusted = u64::try_from(adjusted).map_err(|_| {
+            ParserError::IoError("serialized entity bit length became negative".into())
+        })?;
+        write_var_u32_to_buf(&mut rewritten, adjusted);
+    }
+    Ok(rewritten)
+}
+
 fn compare_field_paths(left: &FieldPath, right: &FieldPath) -> Ordering {
     for index in 0..=left.last.min(right.last) {
         match left.path[index].cmp(&right.path[index]) {
@@ -396,57 +489,118 @@ fn component_delta(from: u16, to: u16) -> i32 {
     to as i32 - from
 }
 
-fn encode_fields(
+fn write_field_path_transition<W: BitsWriter>(
+    codec: &FieldPathCodec,
+    writer: &mut W,
+    current: &mut FieldPath,
+    target: &FieldPath,
+) -> Result<(), ParserError> {
+    if target.last > current.last {
+        codec.write_op(writer, FieldOp::PushNAndNonTopological)?;
+        for index in 0..=current.last {
+            let delta = component_delta(current.path[index], target.path[index]);
+            writer.write_bit(delta != 0)?;
+            if delta != 0 {
+                writer.write_var_i32(delta - 1)?;
+            }
+        }
+        writer.write_ubit_var((target.last - current.last) as u32)?;
+        for index in (current.last + 1)..=target.last {
+            writer.write_ubit_var_fp(target.path[index] as i32)?;
+        }
+    } else if target.last < current.last {
+        codec.write_op(writer, FieldOp::PopNAndNonTopographical)?;
+        writer.write_ubit_var_fp_unchecked((current.last - target.last) as i32)?;
+        for index in 0..=target.last {
+            let delta = component_delta(current.path[index], target.path[index]);
+            writer.write_bit(delta != 0)?;
+            if delta != 0 {
+                writer.write_var_i32(delta)?;
+            }
+        }
+    } else {
+        codec.write_op(writer, FieldOp::NonTopoComplex)?;
+        for index in 0..=target.last {
+            let delta = component_delta(current.path[index], target.path[index]);
+            writer.write_bit(delta != 0)?;
+            if delta != 0 {
+                writer.write_var_i32(delta)?;
+            }
+        }
+    }
+    *current = *target;
+    Ok(())
+}
+
+fn encode_fields_with_appended_paths(
     codec: &FieldPathCodec,
     serializer: &Serializer,
-    values: &[(FieldPath, crate::FieldValue)],
+    source: &[u8],
+    section_start: usize,
+    path_finish_start: usize,
+    original_paths: &[FieldPath],
+    original_fields: &[DecodedEntityField],
+    replaced_values: &[(FieldPath, crate::FieldValue)],
+    added_values: &[(FieldPath, crate::FieldValue)],
 ) -> Result<(Vec<u8>, usize), ParserError> {
     let mut bytes = Vec::new();
     let mut writer = BitstreamWriter::new(&mut bytes);
-    let mut current = FieldPath::default();
 
-    for (target, _) in values {
-        if target.last > current.last {
-            codec.write_op(&mut writer, FieldOp::PushNAndNonTopological)?;
-            for index in 0..=current.last {
-                let delta = component_delta(current.path[index], target.path[index]);
-                writer.write_bit(delta != 0)?;
-                if delta != 0 {
-                    writer.write_var_i32(delta - 1)?;
-                }
-            }
-            writer.write_ubit_var((target.last - current.last) as u32)?;
-            for index in (current.last + 1)..=target.last {
-                writer.write_ubit_var_fp(target.path[index] as i32)?;
-            }
-        } else if target.last < current.last {
-            codec.write_op(&mut writer, FieldOp::PopNAndNonTopographical)?;
-            writer.write_ubit_var_fp_unchecked((current.last - target.last) as i32)?;
-            for index in 0..=target.last {
-                let delta = component_delta(current.path[index], target.path[index]);
-                writer.write_bit(delta != 0)?;
-                if delta != 0 {
-                    writer.write_var_i32(delta)?;
-                }
-            }
-        } else {
-            codec.write_op(&mut writer, FieldOp::NonTopoComplex)?;
-            for index in 0..=target.last {
-                let delta = component_delta(current.path[index], target.path[index]);
-                writer.write_bit(delta != 0)?;
-                if delta != 0 {
-                    writer.write_var_i32(delta)?;
-                }
-            }
-        }
-        current = *target;
+    copy_original_bits(
+        source,
+        section_start,
+        path_finish_start - section_start,
+        &mut writer,
+    )?;
+    let mut current = original_paths.last().copied().unwrap_or_default();
+    for (target, _) in added_values {
+        write_field_path_transition(codec, &mut writer, &mut current, target)?;
     }
     codec.write_op(&mut writer, FieldOp::FieldPathEncodeFinish)?;
-    for (fp, value) in values {
+
+    for field in original_fields {
+        if let Some((_, value)) = replaced_values.iter().find(|(path, _)| *path == field.fp) {
+            serializer
+                .get_decoder(&field.fp)
+                .encode(&mut writer, value)?;
+        } else {
+            copy_original_bits(
+                source,
+                field.value_start,
+                field.value_end - field.value_start,
+                &mut writer,
+            )?;
+        }
+    }
+    for (fp, value) in added_values {
         serializer.get_decoder(fp).encode(&mut writer, value)?;
     }
+
     let bit_len = writer.bits_written();
     writer.flush()?;
     drop(writer);
     Ok((bytes, bit_len))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_serialized_entity_lengths;
+
+    #[test]
+    fn serialized_entity_lengths_follow_entity_bit_deltas() {
+        let encoded = [0x0e, 0xb8, 0x03, 0x1e]; // 14, 440, 30 bits.
+        let rewritten = rewrite_serialized_entity_lengths(&encoded, &[0, 472, -5])
+            .expect("rewrite serialized entity lengths");
+        assert_eq!(rewritten, [0x0e, 0x90, 0x07, 0x19]); // 14, 912, 25 bits.
+    }
+
+    #[test]
+    fn serialized_entity_length_count_must_match_packet_entries() {
+        assert!(rewrite_serialized_entity_lengths(&[0x0e], &[0, 0]).is_err());
+    }
+
+    #[test]
+    fn serialized_entity_length_cannot_become_negative() {
+        assert!(rewrite_serialized_entity_lengths(&[0x01], &[-2]).is_err());
+    }
 }

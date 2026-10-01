@@ -527,7 +527,8 @@ json BuildBatchItem(
     const char* team,
     const bool preserve_source_definition = false,
     const std::optional<std::uint64_t> mesh_group_mask = std::nullopt,
-    const std::string_view custom_name = {})
+    const std::string_view custom_name = {},
+    const std::array<nskinzcs2::model::StickerProfile, 5>* stickers = nullptr)
 {
     json item {
         {"item_id64", "0"},
@@ -551,18 +552,28 @@ json BuildBatchItem(
         item["mesh_group_mask"] = *mesh_group_mask;
     }
     item["custom_name"] = nskinzcs2::model::ResolveCosmeticCustomName(custom_name);
+    if (stickers != nullptr)
+    {
+        item["stickers"] = json::array();
+        for (const auto& sticker : *stickers)
+        {
+            item["stickers"].push_back(std::max(0, sticker.kit_id));
+        }
+    }
     return item;
 }
 
-std::optional<std::uint64_t> ResolveRebuiltAkMeshGroupMask(
+std::optional<std::uint64_t> ResolveRebuiltWeaponMeshGroupMask(
     const nskinzcs2::model::Catalog* catalog,
     const int base_item,
     const int paint_kit) noexcept
 {
-    // This is deliberately scoped to default/unpainted AK reconstruction.
-    // Already-painted source weapons stay on the helper's passthrough path,
-    // and other firearm definitions retain their existing rewrite behavior.
-    if (base_item != 7 || paint_kit <= 0)
+    // Every standard firearm can carry a legacy/modern model selection in
+    // paint-kit metadata. The demo writer must serialize that selection just
+    // like the live runtime does; otherwise a reconstructed finish can be
+    // rendered against the wrong mesh family. Knives are routed separately.
+    if (base_item <= 0 || base_item >= 500 || base_item == 42 || base_item == 59 ||
+        paint_kit <= 0)
     {
         return std::nullopt;
     }
@@ -803,13 +814,17 @@ DemoSkinRewritePlan nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(
 
     for (const auto& profile : config.profiles)
     {
+        const auto sticker_slot_count = static_cast<int>(std::count_if(
+            profile.stickers.begin(),
+            profile.stickers.end(),
+            [](const auto& sticker) { return sticker.kit_id > 0; }));
         if (!profile.enabled || profile.xuid == 0 || profile.base_item <= 0 ||
             profile.base_item >= 500 || profile.base_item == 42 || profile.base_item == 59 ||
-            profile.paint_kit <= 0)
+            (profile.paint_kit <= 0 && sticker_slot_count == 0))
         {
             continue;
         }
-        if (catalog != nullptr &&
+        if (catalog != nullptr && profile.paint_kit > 0 &&
             CatalogBuilder::CheckWeaponPaintCompatibility(
                 catalog,
                 profile.base_item,
@@ -820,11 +835,12 @@ DemoSkinRewritePlan nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(
                 std::to_wstring(profile.paint_kit) + L".";
             return result;
         }
-        const auto ak_mesh_group_mask =
-            ResolveRebuiltAkMeshGroupMask(catalog, profile.base_item, profile.paint_kit);
-        if (catalog != nullptr && profile.base_item == 7 && !ak_mesh_group_mask.has_value())
+        const auto weapon_mesh_group_mask = profile.paint_kit > 0
+            ? ResolveRebuiltWeaponMeshGroupMask(catalog, profile.base_item, profile.paint_kit)
+            : std::nullopt;
+        if (catalog != nullptr && profile.paint_kit > 0 && !weapon_mesh_group_mask.has_value())
         {
-            result.validation_issue = L"AK paint mesh metadata is unavailable for paint kit " +
+            result.validation_issue = L"Weapon paint mesh metadata is unavailable for paint kit " +
                 std::to_wstring(profile.paint_kit) + L".";
             return result;
         }
@@ -837,9 +853,11 @@ DemoSkinRewritePlan nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(
             model::NormalizeCosmeticWear(profile.wear),
             "ANY",
             false,
-            ak_mesh_group_mask,
-            profile.custom_name));
+            weapon_mesh_group_mask,
+            profile.custom_name,
+            &profile.stickers));
         ++result.weapon_item_count;
+        result.sticker_slot_request_count += sticker_slot_count;
     }
 
     for (const auto& profile : config.knife_profiles)
@@ -1036,16 +1054,25 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         return result;
     }
     std::uint64_t rewritten_pawns = 0;
+    std::uint64_t matched_players = 0;
+    std::uint64_t skipped_players = 0;
+    std::uint64_t matched_knife_requests = 0;
+    std::uint64_t matched_glove_requests = 0;
+    std::uint64_t matched_sticker_slot_requests = 0;
     std::uint64_t rewritten_knives = 0;
     std::uint64_t rewritten_gloves = 0;
     std::uint64_t rewritten_weapons = 0;
     std::uint64_t painted_glove_passthroughs = 0;
     std::uint64_t painted_weapon_passthroughs = 0;
+    std::uint64_t rewritten_sticker_weapons = 0;
+    std::uint64_t rewritten_sticker_slots = 0;
+    std::uint64_t missing_sticker_slots = 0;
     std::uint64_t inserted_animation_resources = 0;
     std::wstring animation_resource_source;
     std::uint64_t input_read_ms = 0;
     std::uint64_t discovery_ms = 0;
     std::uint64_t rewrite_ms = 0;
+    std::uint64_t verification_ms = 0;
     std::uint64_t total_ms = 0;
     std::wstring input_mode;
     try
@@ -1057,6 +1084,18 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
             return result;
         }
         rewritten_pawns = response.value("pawn_count", std::uint64_t {0});
+        matched_players = response.value(
+            "matched_player_count", static_cast<std::uint64_t>(plan.passes.size()));
+        skipped_players = response.value("skipped_player_count", std::uint64_t {0});
+        matched_knife_requests = response.value(
+            "matched_knife_request_count",
+            plan.knife_item_count > 0 ? std::uint64_t {1} : std::uint64_t {0});
+        matched_glove_requests = response.value(
+            "matched_glove_request_count",
+            plan.glove_item_count > 0 ? std::uint64_t {1} : std::uint64_t {0});
+        matched_sticker_slot_requests = response.value(
+            "requested_sticker_slot_count",
+            static_cast<std::uint64_t>(plan.sticker_slot_request_count));
         rewritten_knives = response.value("knife_count", std::uint64_t {0});
         rewritten_gloves = response.value("glove_count", std::uint64_t {0});
         rewritten_weapons = response.value("weapon_count", std::uint64_t {0});
@@ -1064,6 +1103,12 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
             response.value("painted_glove_passthrough_count", std::uint64_t {0});
         painted_weapon_passthroughs =
             response.value("painted_weapon_passthrough_count", std::uint64_t {0});
+        rewritten_sticker_weapons =
+            response.value("sticker_weapon_count", std::uint64_t {0});
+        rewritten_sticker_slots =
+            response.value("sticker_slot_count", std::uint64_t {0});
+        missing_sticker_slots =
+            response.value("missing_sticker_slot_count", std::uint64_t {0});
         inserted_animation_resources =
             response.value("animation_resource_count", std::uint64_t {0});
         animation_resource_source = Utf8ToWide(
@@ -1071,6 +1116,7 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         input_read_ms = response.value("input_read_ms", std::uint64_t {0});
         discovery_ms = response.value("discovery_ms", std::uint64_t {0});
         rewrite_ms = response.value("rewrite_ms", std::uint64_t {0});
+        verification_ms = response.value("verification_ms", std::uint64_t {0});
         total_ms = response.value("total_ms", std::uint64_t {0});
         input_mode = Utf8ToWide(response.value("input_mode", std::string {}));
     }
@@ -1079,14 +1125,22 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         result.detail = L"The nSkinz demo rewriter response was invalid: " + Utf8ToWide(exception.what());
         return result;
     }
-    if ((plan.knife_item_count > 0 && rewritten_knives == 0) ||
-        (plan.glove_item_count > 0 && rewritten_gloves + painted_glove_passthroughs == 0))
+    if ((matched_knife_requests > 0 && rewritten_knives == 0) ||
+        (matched_glove_requests > 0 && rewritten_gloves + painted_glove_passthroughs == 0))
     {
         result.detail = L"The nSkinz demo rewriter completed but did not resolve every requested cosmetic class: "
             L"pawns=" + std::to_wstring(rewritten_pawns) +
             L", knives=" + std::to_wstring(rewritten_knives) +
             L", gloves=" + std::to_wstring(rewritten_gloves) +
             L", painted_glove_passthroughs=" + std::to_wstring(painted_glove_passthroughs) + L".";
+        Logger::Error(result.detail);
+        return result;
+    }
+    if (matched_sticker_slot_requests > 0 && rewritten_sticker_slots == 0)
+    {
+        result.detail = L"The selected weapons in this demo do not contain any of the requested existing sticker slots. "
+            L"Existing-slot replacement cannot create a new sticker; choose a weapon that already has a sticker in that slot. "
+            L"Missing slots=" + std::to_wstring(missing_sticker_slots) + L".";
         Logger::Error(result.detail);
         return result;
     }
@@ -1115,9 +1169,14 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         WideToUtf8(std::wstring(kGeneratedDemoDirectoryName)) + "/" +
         WideToUtf8(filename) + "\"";
     result.detail = L"Temporary skinned demo is ready: " + output.wstring() +
-        L" (pawns=" + std::to_wstring(rewritten_pawns) +
+        L" (matched_players=" + std::to_wstring(matched_players) +
+        L", skipped_players=" + std::to_wstring(skipped_players) +
+        L", pawns=" + std::to_wstring(rewritten_pawns) +
         L", weapons=" + std::to_wstring(rewritten_weapons) +
         L", painted_weapon_passthroughs=" + std::to_wstring(painted_weapon_passthroughs) +
+        L", sticker_weapons=" + std::to_wstring(rewritten_sticker_weapons) +
+        L", sticker_slots=" + std::to_wstring(rewritten_sticker_slots) +
+        L", missing_sticker_slots=" + std::to_wstring(missing_sticker_slots) +
         L", knives=" + std::to_wstring(rewritten_knives) +
         L", gloves=" + std::to_wstring(rewritten_gloves) +
         L", painted_glove_passthroughs=" + std::to_wstring(painted_glove_passthroughs) +
@@ -1127,6 +1186,7 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         L", read_ms=" + std::to_wstring(input_read_ms) +
         L", discovery_ms=" + std::to_wstring(discovery_ms) +
         L", rewrite_ms=" + std::to_wstring(rewrite_ms) +
+        L", verification_ms=" + std::to_wstring(verification_ms) +
         L", total_ms=" + std::to_wstring(total_ms) + L")";
     Logger::Info(result.detail + L"; queued command=" + Utf8ToWide(result.playdemo_command) + L".");
     return result;

@@ -18,7 +18,8 @@ use std::time::Instant;
 const IO_BUFFER_CAPACITY: usize = 8 * 1024 * 1024;
 const IN_MEMORY_DEMO_LIMIT: u64 = 768 * 1024 * 1024;
 const WEAPON_SLOT_COUNT: usize = 64;
-const PAINT_ATTRIBUTE_SLOT_COUNT: usize = 16;
+const ECON_ATTRIBUTE_SLOT_COUNT: usize = 64;
+const STICKER_SLOT_COUNT: usize = 5;
 
 static WEAPON_FIELDS: LazyLock<Vec<String>> = LazyLock::new(|| {
     (0..WEAPON_SLOT_COUNT)
@@ -33,7 +34,7 @@ struct PaintAttributeFields {
 }
 
 fn paint_attribute_fields(prefix: &str) -> Vec<PaintAttributeFields> {
-    (0..PAINT_ATTRIBUTE_SLOT_COUNT)
+    (0..ECON_ATTRIBUTE_SLOT_COUNT)
         .map(|slot| {
             let base = format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes.{slot:04}");
             PaintAttributeFields {
@@ -81,6 +82,8 @@ struct RequestItem {
     mesh_group_mask: Option<u64>,
     #[serde(default)]
     custom_name: String,
+    #[serde(default)]
+    stickers: [i32; STICKER_SLOT_COUNT],
     team: String,
 }
 
@@ -88,18 +91,27 @@ struct RequestItem {
 struct Response {
     ok: bool,
     error: Option<String>,
+    matched_player_count: usize,
+    skipped_player_count: usize,
+    matched_knife_request_count: usize,
+    matched_glove_request_count: usize,
+    requested_sticker_slot_count: usize,
     pawn_count: usize,
     knife_count: usize,
     glove_count: usize,
     weapon_count: usize,
     painted_glove_passthrough_count: usize,
     painted_weapon_passthrough_count: usize,
+    sticker_weapon_count: usize,
+    sticker_slot_count: usize,
+    missing_sticker_slot_count: usize,
     animation_resource_count: usize,
     animation_resource_source: String,
     input_mode: String,
     input_read_ms: u64,
     discovery_ms: u64,
     rewrite_ms: u64,
+    verification_ms: u64,
     total_ms: u64,
 }
 
@@ -139,6 +151,7 @@ struct Cosmetic {
     wear: f32,
     mesh_group_mask: Option<u64>,
     custom_name: String,
+    stickers: [i32; STICKER_SLOT_COUNT],
 }
 
 #[derive(Default)]
@@ -284,14 +297,29 @@ struct PawnDiscovery {
     controllers: HashSet<u32>,
     weapons: HashSet<u32>,
     teams: HashSet<u8>,
-    painted_gloves_by_team: HashSet<u8>,
     glove_definitions_by_team: HashMap<u8, u16>,
+    glove_paint_attributes_by_team: HashMap<u8, PaintAttributeLayout>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PaintAttributeLayout {
+    count: usize,
+    indices: [Option<usize>; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MaterializedPaintAttributes {
+    count: usize,
+    indices: [usize; 3],
 }
 
 #[derive(Default)]
 struct WeaponDiscovery {
     definition: u16,
-    painted: bool,
+    paint_attributes: PaintAttributeLayout,
+    sticker_slots: [bool; STICKER_SLOT_COUNT],
+    sticker_kits: [HashSet<u32>; STICKER_SLOT_COUNT],
+    sticker_attribute_indices: [HashSet<usize>; STICKER_SLOT_COUNT],
 }
 
 #[derive(Default)]
@@ -314,60 +342,103 @@ fn field_integer(entity: &Entity, name: &str) -> Option<u64> {
     entity.try_get_property(name).and_then(integer)
 }
 
-fn positive_number(value: &FieldValue) -> bool {
+fn positive_u32(value: &FieldValue) -> Option<u32> {
     match value {
-        FieldValue::Float(value) => value.is_finite() && *value > 0.0,
-        FieldValue::Signed8(value) => *value > 0,
-        FieldValue::Signed16(value) => *value > 0,
-        FieldValue::Signed32(value) => *value > 0,
-        FieldValue::Signed64(value) => *value > 0,
-        FieldValue::Unsigned8(value) => *value > 0,
-        FieldValue::Unsigned16(value) => *value > 0,
-        FieldValue::Unsigned32(value) => *value > 0,
-        FieldValue::Unsigned64(value) => *value > 0,
-        _ => false,
+        // EconItemAttribute stores a 32-bit value union. Integer attributes
+        // such as "sticker slot N id" are exposed by the demo serializer as
+        // a float field, but their integer bit pattern must remain untouched.
+        FieldValue::Float(value) => (value.to_bits() > 0).then_some(value.to_bits()),
+        _ => integer(value)
+            .filter(|value| *value > 0 && *value <= u32::MAX as u64)
+            .map(|value| value as u32),
     }
 }
 
-fn has_networked_paint(
+fn sticker_slot_from_definition(definition: u64) -> Option<usize> {
+    let relative = definition.checked_sub(113)?;
+    if relative % 4 != 0 {
+        return None;
+    }
+    let slot = (relative / 4) as usize;
+    (slot < STICKER_SLOT_COUNT).then_some(slot)
+}
+
+fn paint_attribute_slot(definition: u64) -> Option<usize> {
+    match definition {
+        6 => Some(0),
+        7 => Some(1),
+        8 => Some(2),
+        _ => None,
+    }
+}
+
+fn discover_paint_attribute_layout(
     entity: &Entity,
     count_field: &str,
     fields: &[PaintAttributeFields],
-) -> bool {
-    // Source 2 can retain decoded child values after the replicated vector was
-    // resized to zero.  Those slots are inactive and must not make a stock
-    // weapon/glove look painted.  Only inspect entries inside the authoritative
-    // vector length.
+    layout: &mut PaintAttributeLayout,
+) {
     let active_count = field_integer(entity, count_field).unwrap_or_default() as usize;
-    fields
+    layout.count = layout.count.max(active_count);
+    for (attribute_index, field) in fields
         .iter()
+        .enumerate()
         .take(active_count.min(fields.len()))
-        .any(|field| {
-            field_integer(entity, &field.definition) == Some(6)
-                && [field.raw.as_str(), field.initial.as_str()]
-                    .iter()
-                    .filter_map(|name| entity.try_get_property(name))
-                    .any(positive_number)
-        })
+    {
+        let Some(slot) = field_integer(entity, &field.definition).and_then(paint_attribute_slot)
+        else {
+            continue;
+        };
+        layout.indices[slot].get_or_insert(attribute_index);
+    }
 }
 
-fn has_weapon_paint(entity: &Entity) -> bool {
-    entity
-        .try_get_property("m_nFallbackPaintKit")
-        .is_some_and(positive_number)
-        || has_networked_paint(
-            entity,
-            "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes",
-            &WEAPON_PAINT_FIELDS,
-        )
+fn materialize_paint_attributes(layout: PaintAttributeLayout) -> MaterializedPaintAttributes {
+    let mut count = layout.count;
+    let mut indices = [0usize; 3];
+    for (slot, discovered) in layout.indices.into_iter().enumerate() {
+        indices[slot] = match discovered {
+            Some(index) => index,
+            None => {
+                let index = count;
+                count += 1;
+                index
+            }
+        };
+        count = count.max(indices[slot] + 1);
+    }
+    MaterializedPaintAttributes { count, indices }
 }
 
-fn has_glove_paint(entity: &Entity) -> bool {
-    has_networked_paint(
+fn discover_weapon_attributes(entity: &Entity, weapon: &mut WeaponDiscovery) {
+    let count_field = "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes";
+    let active_count = field_integer(entity, count_field).unwrap_or_default() as usize;
+    discover_paint_attribute_layout(
         entity,
-        "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes",
-        &GLOVE_PAINT_FIELDS,
-    )
+        count_field,
+        &WEAPON_PAINT_FIELDS,
+        &mut weapon.paint_attributes,
+    );
+    for (attribute_index, field) in WEAPON_PAINT_FIELDS
+        .iter()
+        .enumerate()
+        .take(active_count.min(WEAPON_PAINT_FIELDS.len()))
+    {
+        let Some(logical_slot) =
+            field_integer(entity, &field.definition).and_then(sticker_slot_from_definition)
+        else {
+            continue;
+        };
+        for kit in [field.raw.as_str(), field.initial.as_str()]
+            .iter()
+            .filter_map(|name| entity.try_get_property(name))
+            .filter_map(positive_u32)
+        {
+            weapon.sticker_slots[logical_slot] = true;
+            weapon.sticker_kits[logical_slot].insert(kit);
+            weapon.sticker_attribute_indices[logical_slot].insert(attribute_index);
+        }
+    }
 }
 
 impl Observer for Discovery {
@@ -418,9 +489,12 @@ impl Observer for Discovery {
                 {
                     pawn.glove_definitions_by_team.insert(team, definition);
                 }
-                if has_glove_paint(entity) {
-                    pawn.painted_gloves_by_team.insert(team);
-                }
+                discover_paint_attribute_layout(
+                    entity,
+                    "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes",
+                    &GLOVE_PAINT_FIELDS,
+                    pawn.glove_paint_attributes_by_team.entry(team).or_default(),
+                );
             }
             for name in ["m_hController", "m_hOriginalController"] {
                 if let Some(controller) = field_integer(entity, name).map(|value| value as u32) {
@@ -444,10 +518,9 @@ impl Observer for Discovery {
                 .map(|value| value as u16)
                 .filter(|value| *value != 0)
         {
-            let painted = has_weapon_paint(entity);
             let weapon = self.weapons.entry(handle).or_default();
             weapon.definition = definition;
-            weapon.painted |= painted;
+            discover_weapon_attributes(entity, weapon);
         }
         Ok(())
     }
@@ -519,6 +592,7 @@ fn parse_plans(request: &Request) -> Result<HashMap<u64, PlayerPlan>> {
                 seed: item.pattern_seed.clamp(0.0, 1000.0),
                 wear: item.wear.clamp(0.0000001, 1.0),
                 mesh_group_mask: item.mesh_group_mask,
+                stickers: item.stickers.map(|kit| kit.max(0)),
                 custom_name: {
                     let requested = item.custom_name.trim();
                     if requested.is_empty() {
@@ -885,12 +959,20 @@ struct KnifeRule {
 struct GloveRule {
     steam: u64,
     cosmetic: Cosmetic,
+    paint_attributes: MaterializedPaintAttributes,
 }
 
 #[derive(Clone)]
 struct WeaponRule {
     steam: u64,
     cosmetic: Cosmetic,
+    paint_attributes: MaterializedPaintAttributes,
+}
+
+#[derive(Clone)]
+struct StickerRule {
+    kits: [i32; STICKER_SLOT_COUNT],
+    attribute_kits: HashMap<usize, i32>,
 }
 
 #[derive(Clone)]
@@ -900,14 +982,22 @@ struct AnimAsset {
     value: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct RewritePlan {
     knives: HashMap<u32, KnifeRule>,
     gloves: HashMap<u32, GloveRule>,
     weapons: HashMap<u32, WeaponRule>,
+    sticker_weapons: HashMap<u32, StickerRule>,
+    requested_sticker_slots: usize,
+    missing_sticker_slots: usize,
     painted_glove_passthroughs: HashSet<(u32, u8)>,
     painted_weapon_passthroughs: HashSet<u32>,
     resources: Vec<AnimAsset>,
     selected_pawns: HashSet<u32>,
+    matched_players: usize,
+    skipped_players: usize,
+    matched_knife_requests: usize,
+    matched_glove_requests: usize,
 }
 
 fn player_pawns(discovery: &Discovery, steam: u64) -> HashSet<u32> {
@@ -965,16 +1055,28 @@ fn build_rewrite_plan(
     let mut knives = HashMap::new();
     let mut gloves = HashMap::new();
     let mut weapons = HashMap::new();
-    let mut painted_glove_passthroughs = HashSet::new();
-    let mut painted_weapon_passthroughs = HashSet::new();
+    let mut sticker_weapons: HashMap<u32, StickerRule> = HashMap::new();
+    let mut requested_sticker_slots = HashSet::new();
+    let mut missing_sticker_slots = HashSet::new();
+    // Kept in the response/manifest schema for compatibility with older UI
+    // builds. Current rewrites never bypass an existing paint: discovered
+    // attribute slots are updated in place instead.
+    let painted_glove_passthroughs = HashSet::new();
+    let painted_weapon_passthroughs = HashSet::new();
     let mut selected_pawns = HashSet::new();
     let mut target_definitions = BTreeSet::new();
+    let mut matched_players = 0;
+    let mut skipped_players = 0;
+    let mut matched_knife_players = HashSet::new();
+    let mut matched_glove_players = HashSet::new();
 
     for (steam, player_plan) in plans {
         let pawns = player_pawns(discovery, *steam);
         if pawns.is_empty() {
-            bail!("当前 ID 不属于该 Demo：{steam}");
+            skipped_players += 1;
+            continue;
         }
+        matched_players += 1;
         for pawn_handle in pawns {
             let Some(pawn) = discovery.pawns.get(&pawn_handle) else {
                 continue;
@@ -988,28 +1090,33 @@ fn build_rewrite_plan(
             selected_pawns.insert(pawn_handle);
             if let Some(team_plan) = team_plan {
                 if let Some(cosmetic) = &team_plan.glove {
+                    matched_glove_players.insert(*steam);
                     let team_number = team.and_then(Team::number).unwrap_or_default();
-                    if pawn.painted_gloves_by_team.contains(&team_number) {
-                        painted_glove_passthroughs.insert((pawn_handle, team_number));
-                    } else {
-                        let mut cosmetic = cosmetic.clone();
-                        if cosmetic.preserve_source_definition {
-                            cosmetic.definition = pawn
-                                .glove_definitions_by_team
-                                .get(&team_number)
-                                .copied()
-                                .unwrap_or(cosmetic.definition);
-                        }
-                        gloves.insert(
-                            pawn_handle,
-                            GloveRule {
-                                steam: *steam,
-                                cosmetic,
-                            },
-                        );
+                    let mut cosmetic = cosmetic.clone();
+                    if cosmetic.preserve_source_definition {
+                        cosmetic.definition = pawn
+                            .glove_definitions_by_team
+                            .get(&team_number)
+                            .copied()
+                            .unwrap_or(cosmetic.definition);
                     }
+                    let paint_attributes = pawn
+                        .glove_paint_attributes_by_team
+                        .get(&team_number)
+                        .copied()
+                        .map(materialize_paint_attributes)
+                        .unwrap_or_else(|| materialize_paint_attributes(Default::default()));
+                    gloves.insert(
+                        pawn_handle,
+                        GloveRule {
+                            steam: *steam,
+                            cosmetic,
+                            paint_attributes,
+                        },
+                    );
                 }
                 if let Some(cosmetic) = &team_plan.knife {
+                    matched_knife_players.insert(*steam);
                     let variant = installed_variant(cosmetic.definition).ok_or_else(|| {
                         anyhow!(
                             "knife definition {} has no installed CS2 model/subclass mapping",
@@ -1043,17 +1150,42 @@ fn build_rewrite_plan(
                         if discovered.definition != *source_definition {
                             continue;
                         }
-                        if discovered.painted {
-                            painted_weapon_passthroughs.insert(*weapon_handle);
-                        } else {
-                            weapons.insert(
-                                *weapon_handle,
-                                WeaponRule {
-                                    steam: *steam,
-                                    cosmetic: cosmetic.clone(),
-                                },
-                            );
+                        for (logical_slot, kit) in cosmetic.stickers.iter().copied().enumerate() {
+                            if kit <= 0 {
+                                continue;
+                            }
+                            requested_sticker_slots.insert((*weapon_handle, logical_slot));
+                            if discovered.sticker_slots[logical_slot] {
+                                let rule =
+                                    sticker_weapons.entry(*weapon_handle).or_insert_with(|| {
+                                        StickerRule {
+                                            kits: [0; STICKER_SLOT_COUNT],
+                                            attribute_kits: HashMap::new(),
+                                        }
+                                    });
+                                rule.kits[logical_slot] = kit;
+                                for attribute_index in
+                                    &discovered.sticker_attribute_indices[logical_slot]
+                                {
+                                    rule.attribute_kits.insert(*attribute_index, kit);
+                                }
+                            } else {
+                                missing_sticker_slots.insert((*weapon_handle, logical_slot));
+                            }
                         }
+                        if cosmetic.paint_kit <= 0 {
+                            continue;
+                        }
+                        weapons.insert(
+                            *weapon_handle,
+                            WeaponRule {
+                                steam: *steam,
+                                cosmetic: cosmetic.clone(),
+                                paint_attributes: materialize_paint_attributes(
+                                    discovered.paint_attributes,
+                                ),
+                            },
+                        );
                     }
                 }
             }
@@ -1064,7 +1196,11 @@ fn build_rewrite_plan(
         && weapons.is_empty()
         && painted_glove_passthroughs.is_empty()
         && painted_weapon_passthroughs.is_empty()
+        && requested_sticker_slots.is_empty()
     {
+        if matched_players == 0 && skipped_players > 0 {
+            bail!("none of the {skipped_players} configured Steam IDs belong to this demo");
+        }
         bail!("no owned knife, glove or weapon targets were resolved from the demo");
     }
 
@@ -1110,10 +1246,17 @@ fn build_rewrite_plan(
         knives,
         gloves,
         weapons,
+        sticker_weapons,
+        requested_sticker_slots: requested_sticker_slots.len(),
+        missing_sticker_slots: missing_sticker_slots.len(),
         painted_glove_passthroughs,
         painted_weapon_passthroughs,
         resources,
         selected_pawns,
+        matched_players,
+        skipped_players,
+        matched_knife_requests: matched_knife_players.len(),
+        matched_glove_requests: matched_glove_players.len(),
     })
 }
 
@@ -1224,7 +1367,7 @@ fn weapon_fields(rule: &WeaponRule) -> Vec<(String, FieldValue)> {
         ),
         (
             format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes"),
-            FieldValue::Unsigned32(3),
+            FieldValue::Unsigned32(rule.paint_attributes.count as u32),
         ),
         (
             format!("{prefix}.m_szCustomName"),
@@ -1246,9 +1389,27 @@ fn weapon_fields(rule: &WeaponRule) -> Vec<(String, FieldValue)> {
             FieldValue::Unsigned64(mask),
         ));
     }
-    push_attribute(&mut fields, prefix, 0, 6, c.paint_kit as f32);
-    push_attribute(&mut fields, prefix, 1, 7, c.seed);
-    push_attribute(&mut fields, prefix, 2, 8, c.wear);
+    push_attribute(
+        &mut fields,
+        prefix,
+        rule.paint_attributes.indices[0],
+        6,
+        c.paint_kit as f32,
+    );
+    push_attribute(
+        &mut fields,
+        prefix,
+        rule.paint_attributes.indices[1],
+        7,
+        c.seed,
+    );
+    push_attribute(
+        &mut fields,
+        prefix,
+        rule.paint_attributes.indices[2],
+        8,
+        c.wear,
+    );
     fields
 }
 
@@ -1292,15 +1453,11 @@ fn glove_fields(rule: &GloveRule) -> Vec<(String, FieldValue)> {
         ),
         (
             format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes"),
-            FieldValue::Unsigned32(3),
+            FieldValue::Unsigned32(rule.paint_attributes.count as u32),
         ),
         (
             format!("{prefix}.m_szCustomName"),
             FieldValue::String(c.custom_name.clone()),
-        ),
-        (
-            format!("{prefix}.m_szCustomName"),
-            FieldValue::String("nSkinzCS2".into()),
         ),
         (
             "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0000".into(),
@@ -1308,9 +1465,27 @@ fn glove_fields(rule: &GloveRule) -> Vec<(String, FieldValue)> {
         ),
         ("m_nEconGlovesChanged".into(), FieldValue::Unsigned8(1)),
     ];
-    push_attribute(&mut fields, prefix, 0, 6, c.paint_kit as f32);
-    push_attribute(&mut fields, prefix, 1, 7, c.seed);
-    push_attribute(&mut fields, prefix, 2, 8, c.wear);
+    push_attribute(
+        &mut fields,
+        prefix,
+        rule.paint_attributes.indices[0],
+        6,
+        c.paint_kit as f32,
+    );
+    push_attribute(
+        &mut fields,
+        prefix,
+        rule.paint_attributes.indices[1],
+        7,
+        c.seed,
+    );
+    push_attribute(
+        &mut fields,
+        prefix,
+        rule.paint_attributes.indices[2],
+        8,
+        c.wear,
+    );
     fields
 }
 
@@ -1325,6 +1500,30 @@ fn replacement_from_fields(
     fields
         .into_iter()
         .find_map(|(name, value)| (name == field_name).then_some(value))
+}
+
+fn sticker_field_replacement(rule: &StickerRule, field_name: &str) -> Option<FieldValue> {
+    for (attribute_index, field) in WEAPON_PAINT_FIELDS.iter().enumerate() {
+        if field_name != field.raw && field_name != field.initial {
+            continue;
+        }
+        let kit = *rule.attribute_kits.get(&attribute_index)?;
+        return Some(FieldValue::Float(f32::from_bits(kit as u32)));
+    }
+    None
+}
+
+fn sticker_fields(rule: &StickerRule) -> Vec<(String, FieldValue)> {
+    let prefix = "m_AttributeManager.m_Item";
+    let mut fields = Vec::with_capacity(rule.attribute_kits.len() * 2);
+    for (attribute_index, kit) in &rule.attribute_kits {
+        let base =
+            format!("{prefix}.m_NetworkedDynamicAttributes.m_Attributes.{attribute_index:04}");
+        let value = FieldValue::Float(f32::from_bits(*kit as u32));
+        fields.push((format!("{base}.m_iRawValue32"), value.clone()));
+        fields.push((format!("{base}.m_flInitialValue"), value));
+    }
+    fields
 }
 
 impl DemoRewriter for CosmeticRewriter {
@@ -1344,6 +1543,7 @@ impl DemoRewriter for CosmeticRewriter {
         self.plan.knives.contains_key(&entity.handle())
             || self.plan.gloves.contains_key(&entity.handle())
             || self.plan.weapons.contains_key(&entity.handle())
+            || self.plan.sticker_weapons.contains_key(&entity.handle())
     }
 
     fn replace_entity_field(
@@ -1358,10 +1558,15 @@ impl DemoRewriter for CosmeticRewriter {
             return replacement_from_fields(knife_fields(rule), field_name);
         }
         if let Some(rule) = self.plan.weapons.get(&entity.handle()) {
-            return replacement_from_fields(weapon_fields(rule), field_name);
+            if let Some(replacement) = replacement_from_fields(weapon_fields(rule), field_name) {
+                return Some(replacement);
+            }
         }
         if let Some(rule) = self.plan.gloves.get(&entity.handle()) {
             return replacement_from_fields(glove_fields(rule), field_name);
+        }
+        if let Some(rule) = self.plan.sticker_weapons.get(&entity.handle()) {
+            return sticker_field_replacement(rule, field_name);
         }
         None
     }
@@ -1375,16 +1580,20 @@ impl DemoRewriter for CosmeticRewriter {
         if event != EntityEvents::Created {
             return Ok(Vec::new());
         }
+        let mut fields = Vec::new();
         if let Some(rule) = self.plan.knives.get(&entity.handle()) {
-            return Ok(knife_fields(rule));
+            fields.extend(knife_fields(rule));
         }
         if let Some(rule) = self.plan.weapons.get(&entity.handle()) {
-            return Ok(weapon_fields(rule));
+            fields.extend(weapon_fields(rule));
         }
         if let Some(rule) = self.plan.gloves.get(&entity.handle()) {
-            return Ok(glove_fields(rule));
+            fields.extend(glove_fields(rule));
         }
-        Ok(Vec::new())
+        if let Some(rule) = self.plan.sticker_weapons.get(&entity.handle()) {
+            fields.extend(sticker_fields(rule));
+        }
+        Ok(fields)
     }
 
     fn rewrite_string_table_entry(
@@ -1483,6 +1692,32 @@ fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
+fn verify_sticker_rewrites(plan: &RewritePlan, discovery: &Discovery) -> Result<usize> {
+    let mut verified = 0;
+    for (handle, rule) in &plan.sticker_weapons {
+        let weapon = discovery
+            .weapons
+            .get(handle)
+            .ok_or_else(|| anyhow!("rewritten demo lost sticker weapon handle {handle}"))?;
+        for (logical_slot, desired) in rule.kits.iter().copied().enumerate() {
+            if desired <= 0 {
+                continue;
+            }
+            let observed = &weapon.sticker_kits[logical_slot];
+            if observed.len() != 1 || !observed.contains(&(desired as u32)) {
+                bail!(
+                    "sticker verification failed for weapon handle {handle}, slot {}: desired {}, observed {:?}",
+                    logical_slot + 1,
+                    desired,
+                    observed
+                );
+            }
+            verified += 1;
+        }
+    }
+    Ok(verified)
+}
+
 fn rewrite(request: &Request) -> Result<Response> {
     let total_started = Instant::now();
     if request.schema_version != 1 {
@@ -1516,6 +1751,17 @@ fn rewrite(request: &Request) -> Result<Response> {
     let discovery_ms = elapsed_ms(discovery_started);
     let plan = build_rewrite_plan(&plans, &discovery, request.cs2_game_dir.as_deref())?;
     let rewritten_knives = plan.knives.len();
+    let rewritten_sticker_weapons = plan.sticker_weapons.len();
+    let rewritten_sticker_slots = plan
+        .sticker_weapons
+        .values()
+        .map(|rule| rule.kits.iter().filter(|kit| **kit > 0).count())
+        .sum();
+    let missing_sticker_slots = plan.missing_sticker_slots;
+    debug_assert_eq!(
+        rewritten_sticker_slots + missing_sticker_slots,
+        plan.requested_sticker_slots
+    );
     let counts = (
         plan.selected_pawns.len(),
         rewritten_knives,
@@ -1534,27 +1780,44 @@ fn rewrite(request: &Request) -> Result<Response> {
     match in_memory.as_deref() {
         Some(bytes) => {
             let mut writer = DemoWriter::from_slice(bytes, output)?;
-            writer.add_rewriter(CosmeticRewriter { plan });
+            writer.add_rewriter(CosmeticRewriter { plan: plan.clone() });
             writer.run()?;
         }
         None => {
             let input = File::open(&request.input_dem)?;
             let input = BufReader::with_capacity(IO_BUFFER_CAPACITY, input);
             let mut writer = DemoWriter::from_reader(input, output)?;
-            writer.add_rewriter(CosmeticRewriter { plan });
+            writer.add_rewriter(CosmeticRewriter { plan: plan.clone() });
             writer.run()?;
         }
     }
     let rewrite_ms = elapsed_ms(rewrite_started);
+    let verification_started = Instant::now();
+    let rewritten_discovery = discover(&request.output_dem)?;
+    let verified_sticker_slots = verify_sticker_rewrites(&plan, &rewritten_discovery)?;
+    if verified_sticker_slots != rewritten_sticker_slots {
+        bail!(
+            "sticker verification count mismatch: planned {rewritten_sticker_slots}, verified {verified_sticker_slots}"
+        );
+    }
+    let verification_ms = elapsed_ms(verification_started);
     Ok(Response {
         ok: true,
         error: None,
+        matched_player_count: plan.matched_players,
+        skipped_player_count: plan.skipped_players,
+        matched_knife_request_count: plan.matched_knife_requests,
+        matched_glove_request_count: plan.matched_glove_requests,
+        requested_sticker_slot_count: plan.requested_sticker_slots,
         pawn_count: counts.0,
         knife_count: counts.1,
         glove_count: counts.2,
         weapon_count: counts.3,
         painted_glove_passthrough_count: counts.4,
         painted_weapon_passthrough_count: counts.5,
+        sticker_weapon_count: rewritten_sticker_weapons,
+        sticker_slot_count: rewritten_sticker_slots,
+        missing_sticker_slot_count: missing_sticker_slots,
         animation_resource_count: counts.6,
         animation_resource_source: if counts.6 == 0 {
             "none".to_string()
@@ -1565,6 +1828,7 @@ fn rewrite(request: &Request) -> Result<Response> {
         input_read_ms,
         discovery_ms,
         rewrite_ms,
+        verification_ms,
         total_ms: elapsed_ms(total_started),
     })
 }
@@ -1606,18 +1870,27 @@ fn run_main() -> Result<()> {
             let response = Response {
                 ok: false,
                 error: Some(format!("{error:#}")),
+                matched_player_count: 0,
+                skipped_player_count: 0,
+                matched_knife_request_count: 0,
+                matched_glove_request_count: 0,
+                requested_sticker_slot_count: 0,
                 pawn_count: 0,
                 knife_count: 0,
                 glove_count: 0,
                 weapon_count: 0,
                 painted_glove_passthrough_count: 0,
                 painted_weapon_passthrough_count: 0,
+                sticker_weapon_count: 0,
+                sticker_slot_count: 0,
+                missing_sticker_slot_count: 0,
                 animation_resource_count: 0,
                 animation_resource_source: String::new(),
                 input_mode: String::new(),
                 input_read_ms: 0,
                 discovery_ms: 0,
                 rewrite_ms: 0,
+                verification_ms: 0,
                 total_ms: 0,
             };
             let _ = write_response(&response_path, &response);
@@ -1659,6 +1932,189 @@ mod tests {
     }
 
     #[test]
+    fn sticker_ids_preserve_integer_union_bits() {
+        let rule = StickerRule {
+            kits: [76, 0, 0, 0, 0],
+            attribute_kits: HashMap::from([(4, 76)]),
+        };
+        let fields = sticker_fields(&rule);
+        let encoded = FieldValue::Float(f32::from_bits(76));
+        assert!(has_field(
+            &fields,
+            "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes.0004.m_iRawValue32",
+            encoded.clone()
+        ));
+        assert!(has_field(
+            &fields,
+            "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes.0004.m_flInitialValue",
+            encoded
+        ));
+        assert_eq!(
+            sticker_field_replacement(
+                &rule,
+                "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes.0004.m_iRawValue32"
+            ),
+            Some(FieldValue::Float(f32::from_bits(76)))
+        );
+    }
+
+    #[test]
+    fn existing_paint_attribute_slots_are_reused_without_shrinking_vectors() {
+        let layout = PaintAttributeLayout {
+            count: 9,
+            indices: [Some(4), None, Some(7)],
+        };
+        let materialized = materialize_paint_attributes(layout);
+        assert_eq!(materialized.indices, [4, 9, 7]);
+        assert_eq!(materialized.count, 10);
+
+        let complete = materialize_paint_attributes(PaintAttributeLayout {
+            count: 12,
+            indices: [Some(8), Some(2), Some(11)],
+        });
+        assert_eq!(complete.indices, [8, 2, 11]);
+        assert_eq!(complete.count, 12);
+    }
+
+    #[test]
+    fn rewrite_plan_overwrites_existing_weapon_and_glove_paint() {
+        let steam = 76_561_198_812_513_923u64;
+        let weapon_cosmetic = Cosmetic {
+            definition: 60,
+            preserve_source_definition: false,
+            paint_kit: 1177,
+            quality: 4,
+            seed: 321.0,
+            wear: 0.17,
+            mesh_group_mask: Some(1),
+            custom_name: "weapon replacement".into(),
+            stickers: [0; STICKER_SLOT_COUNT],
+        };
+        let glove_cosmetic = Cosmetic {
+            definition: 5034,
+            preserve_source_definition: false,
+            paint_kit: 10033,
+            quality: 3,
+            seed: 7.0,
+            wear: 0.22,
+            mesh_group_mask: None,
+            custom_name: "glove replacement".into(),
+            stickers: [0; STICKER_SLOT_COUNT],
+        };
+        let mut any = TeamPlan::default();
+        any.weapons.insert(60, weapon_cosmetic);
+        let mut ct = TeamPlan::default();
+        ct.glove = Some(glove_cosmetic);
+        let mut player = PlayerPlan::default();
+        player.by_team.insert(Team::Any, any);
+        player.by_team.insert(Team::Ct, ct);
+
+        let weapon_discovery = WeaponDiscovery {
+            definition: 60,
+            paint_attributes: PaintAttributeLayout {
+                count: 10,
+                indices: [Some(3), Some(6), Some(8)],
+            },
+            ..Default::default()
+        };
+        let pawn_discovery = PawnDiscovery {
+            controllers: HashSet::from([1]),
+            weapons: HashSet::from([100]),
+            teams: HashSet::from([3]),
+            glove_definitions_by_team: HashMap::from([(3, 5031)]),
+            glove_paint_attributes_by_team: HashMap::from([(
+                3,
+                PaintAttributeLayout {
+                    count: 7,
+                    indices: [Some(1), Some(4), Some(5)],
+                },
+            )]),
+        };
+        let discovery = Discovery {
+            controller_steam: HashMap::from([(1, steam)]),
+            controller_pawns: HashMap::from([(1, HashSet::from([10]))]),
+            pawns: HashMap::from([(10, pawn_discovery)]),
+            weapons: HashMap::from([(100, weapon_discovery)]),
+            ..Default::default()
+        };
+
+        let plan = build_rewrite_plan(&HashMap::from([(steam, player)]), &discovery, None)
+            .expect("painted source items should be rewritten in place");
+        assert!(plan.painted_weapon_passthroughs.is_empty());
+        assert!(plan.painted_glove_passthroughs.is_empty());
+        let weapon = plan.weapons.get(&100).expect("existing weapon rewrite");
+        assert_eq!(weapon.paint_attributes.indices, [3, 6, 8]);
+        assert_eq!(weapon.paint_attributes.count, 10);
+        let glove = plan.gloves.get(&10).expect("existing glove rewrite");
+        assert_eq!(glove.paint_attributes.indices, [1, 4, 5]);
+        assert_eq!(glove.paint_attributes.count, 7);
+        assert!(has_field(
+            &weapon_fields(weapon),
+            "m_AttributeManager.m_Item.m_NetworkedDynamicAttributes.m_Attributes.0003.m_iRawValue32",
+            FieldValue::Float(1177.0),
+        ));
+        assert!(has_field(
+            &glove_fields(glove),
+            "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes.0001.m_iRawValue32",
+            FieldValue::Float(10033.0),
+        ));
+    }
+
+    #[test]
+    fn rewrite_plan_skips_configured_players_missing_from_demo() {
+        let valid_steam = 76_561_198_812_513_923u64;
+        let missing_steam = 76_561_199_840_349_579u64;
+        let cosmetic = Cosmetic {
+            definition: 60,
+            preserve_source_definition: false,
+            paint_kit: 0,
+            quality: 0,
+            seed: 0.0,
+            wear: 0.0000001,
+            mesh_group_mask: None,
+            custom_name: String::new(),
+            stickers: [76, 0, 0, 0, 0],
+        };
+        let mut valid_team = TeamPlan::default();
+        valid_team.weapons.insert(60, cosmetic.clone());
+        let mut valid_plan = PlayerPlan::default();
+        valid_plan.by_team.insert(Team::Any, valid_team);
+
+        let mut missing_team = TeamPlan::default();
+        missing_team.weapons.insert(60, cosmetic);
+        let mut missing_plan = PlayerPlan::default();
+        missing_plan.by_team.insert(Team::Any, missing_team);
+        let plans = HashMap::from([(valid_steam, valid_plan), (missing_steam, missing_plan)]);
+
+        let mut discovered_weapon = WeaponDiscovery::default();
+        discovered_weapon.definition = 60;
+        discovered_weapon.paint_attributes.count = 1;
+        discovered_weapon.sticker_slots[0] = true;
+        discovered_weapon.sticker_attribute_indices[0].insert(0);
+        let discovery = Discovery {
+            controller_steam: HashMap::from([(1, valid_steam)]),
+            controller_pawns: HashMap::from([(1, HashSet::from([10]))]),
+            pawns: HashMap::from([(
+                10,
+                PawnDiscovery {
+                    controllers: HashSet::from([1]),
+                    weapons: HashSet::from([100]),
+                    ..Default::default()
+                },
+            )]),
+            weapons: HashMap::from([(100, discovered_weapon)]),
+            ..Default::default()
+        };
+
+        let plan = build_rewrite_plan(&plans, &discovery, None)
+            .expect("valid demo player should survive an unrelated configured player");
+        assert_eq!(plan.matched_players, 1);
+        assert_eq!(plan.skipped_players, 1);
+        assert_eq!(plan.requested_sticker_slots, 1);
+        assert_eq!(plan.sticker_weapons.len(), 1);
+    }
+
+    #[test]
     fn request_cosmetic_ranges_match_cs2_fields() {
         let request = Request {
             schema_version: 1,
@@ -1678,6 +2134,7 @@ mod tests {
                         wear: 0.0000001,
                         mesh_group_mask: Some(2),
                         custom_name: String::new(),
+                        stickers: [76, 0, 0, 0, 0],
                         team: "ANY".into(),
                     },
                     RequestItem {
@@ -1690,6 +2147,7 @@ mod tests {
                         wear: 2.0,
                         mesh_group_mask: None,
                         custom_name: "M4 test".into(),
+                        stickers: [0; STICKER_SLOT_COUNT],
                         team: "ANY".into(),
                     },
                 ],
@@ -1705,6 +2163,7 @@ mod tests {
         assert_eq!(ak.wear.to_bits(), 0.0000001f32.to_bits());
         assert_eq!(ak.mesh_group_mask, Some(2));
         assert_eq!(ak.custom_name, "nSkinz CS2");
+        assert_eq!(ak.stickers, [76, 0, 0, 0, 0]);
         let m4 = any.weapons.get(&16).expect("M4 plan");
         assert_eq!(m4.seed, 1000.0);
         assert_eq!(m4.wear, 1.0);
@@ -1862,10 +2321,12 @@ mod tests {
             wear: 0.226326,
             mesh_group_mask: None,
             custom_name: "nSkinz CS2".into(),
+            stickers: [0; STICKER_SLOT_COUNT],
         };
         let glove = glove_fields(&GloveRule {
             steam: 76_561_199_674_674_473,
             cosmetic: cosmetic.clone(),
+            paint_attributes: materialize_paint_attributes(Default::default()),
         });
         assert!(has_field(
             &glove,
@@ -1919,7 +2380,9 @@ mod tests {
                 wear: 0.2,
                 mesh_group_mask: Some(2),
                 custom_name: "AK custom".into(),
+                stickers: [0; STICKER_SLOT_COUNT],
             },
+            paint_attributes: materialize_paint_attributes(Default::default()),
         });
         assert!(has_field(
             &weapon,

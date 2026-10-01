@@ -26,6 +26,7 @@ struct DemoSkinRewritePlan
 {
     std::vector<DemoSkinRewritePass> passes;
     int weapon_item_count = 0;
+    int sticker_slot_request_count = 0;
     int knife_item_count = 0;
     int glove_item_count = 0;
     std::wstring validation_issue;

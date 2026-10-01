@@ -1198,6 +1198,24 @@ std::string BuildContentAddressedRadarVirtualPath(
         "_radar_tga.vtex_c";
 }
 
+nskinzcs2::runtime::RadarAlphaMaskSettings ResolveRadarMaskSettings(
+    const std::string_view virtual_path,
+    const nskinzcs2::runtime::RadarAlphaMaskSettings& settings)
+{
+    auto resolved = settings;
+    // Mirage Water contains legitimate dark road spans that are wider than
+    // the generic 12-pixel bridge. They remain bounded by retained floor
+    // pixels, so using the algorithm's existing 32-pixel safe maximum restores
+    // those roads without dilating the exterior matte. Radius zero remains an
+    // explicit opt-out for diagnostics and user control.
+    if (resolved.dark_detail_radius > 0 &&
+        virtual_path.find("de_mirage_water_radar") != std::string_view::npos)
+    {
+        resolved.dark_detail_radius = std::max(resolved.dark_detail_radius, 32);
+    }
+    return resolved;
+}
+
 }
 
 nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
@@ -1221,6 +1239,7 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOver
     {
         return RadarAlphaFixOutcome::Unsupported;
     }
+    const auto resolved_settings = ResolveRadarMaskSettings(virtual_path, settings);
     bool changed = false;
     if (!ApplyRadarForegroundMask(
             rgba,
@@ -1236,7 +1255,7 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOver
             output.detected_neutral_mode_pixels,
             changed,
             diagnostic,
-            settings))
+            resolved_settings))
     {
         return RadarAlphaFixOutcome::Unsupported;
     }

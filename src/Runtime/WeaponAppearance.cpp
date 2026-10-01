@@ -1,6 +1,7 @@
 #include "Runtime/WeaponAppearance.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cwchar>
 
@@ -12,9 +13,6 @@ constexpr std::uint16_t kAttributeWear = 8;
 constexpr std::uint16_t kAttributeStatTrak = 80;
 constexpr std::uint16_t kAttributeStickerKitBase = 113;
 constexpr std::uint16_t kAttributeStickerStride = 4;
-constexpr std::uint16_t kAttributeStickerWear = 1;
-constexpr std::uint16_t kAttributeStickerScale = 2;
-constexpr std::uint16_t kAttributeStickerRotation = 3;
 constexpr std::uint16_t kAttributeKeychainId = 299;
 constexpr std::uint16_t kAttributeKeychainOffsetX = 300;
 constexpr std::uint16_t kAttributeKeychainOffsetY = 301;
@@ -24,12 +22,14 @@ constexpr std::uint16_t kAttributeKeychainHighlight = 314;
 constexpr std::uint16_t kAttributeKeychainSticker = 321;
 constexpr float kDefaultWear = 0.0000001f;
 
-bool StickerNeedsAttributes(const nskinzcs2::model::StickerProfile& sticker) noexcept
+bool StickerReplacesExistingSlot(const nskinzcs2::model::StickerProfile& sticker) noexcept
 {
-    return sticker.kit_id != 0 ||
-        std::fabs(sticker.wear - kDefaultWear) > 0.0000001f ||
-        std::fabs(sticker.scale - 1.0f) > 0.0001f ||
-        std::fabs(sticker.rotation) > 0.0001f;
+    return sticker.kit_id > 0;
+}
+
+float EncodeStickerKitAttributeValue(const int kit_id) noexcept
+{
+    return std::bit_cast<float>(static_cast<std::uint32_t>(std::max(0, kit_id)));
 }
 
 void AppendKeychainSlotZeroAttributes(
@@ -198,16 +198,22 @@ nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppea
     for (std::size_t slot = 0; slot < profile.stickers.size(); ++slot)
     {
         const auto& sticker = profile.stickers[slot];
-        if (!StickerNeedsAttributes(sticker))
+        if (!StickerReplacesExistingSlot(sticker))
         {
             continue;
         }
 
+        // This path intentionally replaces only an already-recorded sticker
+        // kit. Omitting the neighboring wear/scale/rotation attributes keeps
+        // the demo's original transform, including CS2 free-placement data.
+        // The runtime attribute collector rejects this write when the kit
+        // attribute for the requested logical slot does not already exist.
         const auto base = static_cast<std::uint16_t>(kAttributeStickerKitBase + slot * kAttributeStickerStride);
-        payload.temporary_attributes.emplace_back(base, static_cast<float>(sticker.kit_id));
-        payload.temporary_attributes.emplace_back(static_cast<std::uint16_t>(base + kAttributeStickerWear), sticker.wear);
-        payload.temporary_attributes.emplace_back(static_cast<std::uint16_t>(base + kAttributeStickerScale), sticker.scale);
-        payload.temporary_attributes.emplace_back(static_cast<std::uint16_t>(base + kAttributeStickerRotation), sticker.rotation);
+        // "sticker slot N id" is an integer Econ attribute. The networked
+        // attribute node exposes its 32-bit union through a float field, so
+        // preserve the integer bit pattern instead of numerically converting
+        // (76.0f would be read by the native integer getter as 0x42980000).
+        payload.temporary_attributes.emplace_back(base, EncodeStickerKitAttributeValue(sticker.kit_id));
     }
 
     if (keychain_profile != nullptr &&

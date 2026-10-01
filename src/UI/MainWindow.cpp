@@ -2716,6 +2716,7 @@ private:
             Ui(UiTextId::DemoRewriteProfilesFormat),
             static_cast<int>(plan.passes.size()),
             plan.weapon_item_count,
+            plan.sticker_slot_request_count,
             plan.knife_item_count,
             plan.glove_item_count);
         if (!plan.validation_issue.empty())
@@ -2815,20 +2816,7 @@ private:
             PushWorkingConfig();
         }
 
-        if (ImGui::SliderFloat(Ui(UiTextId::StickerWear), &sticker.wear, 0.0000001f, 1.0f, "%.7f"))
-        {
-            PushWorkingConfig();
-        }
-
-        if (ImGui::SliderFloat(Ui(UiTextId::Scale), &sticker.scale, 0.1f, 5.0f, "%.3f"))
-        {
-            PushWorkingConfig();
-        }
-
-        if (ImGui::SliderFloat(Ui(UiTextId::Rotation), &sticker.rotation, 0.0f, 360.0f, "%.1f"))
-        {
-            PushWorkingConfig();
-        }
+        ImGui::TextWrapped("%s", Ui(UiTextId::StickerExistingSlotReplacementHelp));
 
         ImGui::Columns(1);
         ImGui::PopID();

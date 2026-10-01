@@ -72,11 +72,15 @@ void RunDemoSkinRewriteTests()
     weapon.custom_name = "Test AK";
     weapon.seed = 77;
     weapon.wear = 0.19f;
+    weapon.stickers[0].kit_id = 76;
+    weapon.stickers[2].kit_id = 137;
     config.profiles.push_back(weapon);
 
     const auto plan = runtime::BuildDefaultDemoSkinRewritePlan(config);
     Check(plan.passes.size() == 1, "weapon, knife and glove for one owner must share one rewrite pass");
     Check(plan.weapon_item_count == 1, "one firearm profile must create one ANY-team source record");
+    Check(plan.sticker_slot_request_count == 2,
+        "firearm rewrite plans must count requested existing-slot sticker replacements");
     Check(plan.knife_item_count == 2, "one knife profile must materialize both T and CT defaults");
     Check(plan.glove_item_count == 2, "one glove profile must materialize both T and CT defaults");
     Check(plan.passes[0].xuid == knife.xuid, "rewrite pass must preserve the profile owner XUID");
@@ -89,6 +93,8 @@ void RunDemoSkinRewriteTests()
     Check(items.at(7).at("custom_name") == "Test AK", "firearm custom name must be serialized");
     Check(items.at(7).at("quality") == weapon.quality, "firearm quality must be serialized");
     Check(items.at(7).at("pattern_seed") == 77.0, "firearm seed must be serialized");
+    Check(items.at(7).at("stickers") == json::array({76, 0, 137, 0, 0}),
+        "firearm sticker kit IDs must be serialized without transform overrides");
     Check(std::abs(items.at(7).at("wear").get<double>() - 0.19) < 0.000001,
         "firearm wear must be serialized");
     Check(items.at(7).at("mesh_group_mask") == 2,
@@ -148,8 +154,14 @@ void RunDemoSkinRewriteTests()
     const auto non_ak_plan = runtime::BuildDefaultDemoSkinRewritePlan(
         non_ak_config,
         &compatibility_catalog);
-    Check(!IndexItems(non_ak_plan.passes.at(0)).at(16).contains("mesh_group_mask"),
-        "AK mesh selection must not alter other default firearm reconstruction requests");
+    Check(IndexItems(non_ak_plan.passes.at(0)).at(16).at("mesh_group_mask") == 2,
+        "all reconstructed firearms must serialize their paint kit's legacy or modern mesh family");
+    modern_mesh_catalog.weapon_paint_compatibility[16] = {302};
+    const auto modern_non_ak_plan = runtime::BuildDefaultDemoSkinRewritePlan(
+        non_ak_config,
+        &modern_mesh_catalog);
+    Check(IndexItems(modern_non_ak_plan.passes.at(0)).at(16).at("mesh_group_mask") == 1,
+        "a non-AK modern finish must not inherit the source demo's stale legacy mesh group");
     auto incompatible_config = config;
     incompatible_config.profiles[0].paint_kit = 999;
     Check(
@@ -188,9 +200,11 @@ void RunDemoSkinRewriteTests()
     no_finish_change.xuid += 4;
     no_finish_change.paint_kit = 0;
     config.profiles.push_back(no_finish_change);
-    Check(
-        runtime::BuildDefaultDemoSkinRewritePlan(config).weapon_item_count == 1,
-        "firearm profiles without a positive target paint must stay on the existing runtime path");
+    const auto sticker_only_plan = runtime::BuildDefaultDemoSkinRewritePlan(config);
+    Check(sticker_only_plan.weapon_item_count == 2,
+        "sticker-only firearm profiles must be included in the demo rewrite request");
+    Check(sticker_only_plan.sticker_slot_request_count == 4,
+        "sticker-only profiles must preserve all requested slot kit IDs");
 
     Check(
         runtime::IsGeneratedDemoSkinPath(L"C:\\demo\\nskinz_skin_match_123.dem"),

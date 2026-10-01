@@ -1,5 +1,20 @@
 # Changelog / 更新记录
 
+## v0.5.5 — 2026-10-01
+
+- Updated the verified baseline to CS2 Steam Build `25640462`, Client/Server `2000922`, Patch `1.41.8.8`, Source revision `11064488`, including the shifted native glove refresh/HUD/entity-root evidence and compact weapon-material generator ABI.
+- 已验证基线更新至 CS2 Steam Build `25640462`、Client/Server `2000922`、Patch `1.41.8.8`、Source revision `11064488`，同步迁移手套视觉刷新／HUD／实体块证据与紧凑栈帧枪械材质生成 ABI。
+- Fixed Temporary Demo output that could stall on the loading/progress screen by preserving field-path bit encoding and synchronizing the per-entry `serialized_entities` bit-length table after rewrites.
+- 修复临时 Demo 因字段路径位流和逐实体 `serialized_entities` 位长度表不同步而卡在加载进度条的问题。
+- Existing firearm/glove paint attributes are now overwritten in place instead of bypassed. All rebuilt firearms serialize verified legacy/modern mesh selection; knife routing remains unchanged.
+- 已有枪械／手套涂装属性现在原位覆盖而非跳过；所有重建枪械都会写入经验证的新旧网格选择，刀具路径保持不变。
+- Added firearm existing-sticker image replacement while preserving the demo's wear, scale, rotation and CS2 free placement. Missing sticker slots are not created.
+- 新增枪械已有贴纸原位换图案，保留 Demo 中的磨损、缩放、旋转与 CS2 自由摆放；不会创建缺失槽位。
+- Added a `de_mirage_water` radar profile that restores its wider bounded dark roads without retaining the outside matte.
+- 为 `de_mirage_water` 雷达增加专用安全恢复参数，补回更宽的封闭暗色道路，同时不保留外部底色。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.5.md).
+
 ## v0.5.4 — 2026-09-30
 
 - The temporary-demo knife path no longer copies or requires the target animation skeleton row from the source demo. It validates the compiled target skeleton in the installed CS2 `game/csgo` loose content or `pak01_dir.vpk`, then writes the standard `AnimAssetData` loader metadata.

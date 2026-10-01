@@ -12058,11 +12058,6 @@ constexpr std::uint16_t kAttributeWear = 8;
 constexpr std::uint16_t kAttributeStatTrak = 80;
 constexpr std::uint16_t kAttributeKeychainId = 299;
 constexpr std::uint16_t kAttributeKeychainSeed = 306;
-constexpr std::uint16_t kAttributeStickerKitBase = 113;
-constexpr std::uint16_t kAttributeStickerStride = 4;
-constexpr std::uint16_t kAttributeStickerWear = 1;
-constexpr std::uint16_t kAttributeStickerScale = 2;
-constexpr std::uint16_t kAttributeStickerRotation = 3;
 constexpr float kReferenceStandardWeaponWear = 0.01f;
 constexpr std::ptrdiff_t kReferenceModelStateDirtyModelDataOffset = 0xD8;
 constexpr std::ptrdiff_t kReferenceDirtyMeshGroupMaskOffset = 0x10;
@@ -17087,10 +17082,7 @@ std::uint64_t BuildProfileApplySignature(
 
     for (const auto& sticker : profile.stickers)
     {
-        HashCombine(signature, static_cast<std::uint64_t>(sticker.kit_id));
-        HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.wear)));
-        HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.scale)));
-        HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.rotation)));
+        HashCombine(signature, static_cast<std::uint64_t>(std::max(0, sticker.kit_id)));
     }
 
     if (keychain_profile != nullptr)
@@ -29469,10 +29461,10 @@ float ReadAttributeValueOrDefault(
 
 bool IsDefaultStickerProfile(const nskinzcs2::model::StickerProfile& sticker) noexcept
 {
-    return sticker.kit_id == 0 &&
-        std::fabs(sticker.wear - 0.0000001f) <= 0.0000001f &&
-        std::fabs(sticker.scale - 1.0f) <= 0.0001f &&
-        std::fabs(sticker.rotation) <= 0.0001f;
+    // Existing-slot replacement only consumes the kit id. Legacy transform
+    // fields can remain in old configs without turning a keychain-only apply
+    // into a weapon-material refresh.
+    return sticker.kit_id <= 0;
 }
 
 bool IsKeychainOnlyApplyRequest(
@@ -51074,7 +51066,7 @@ nskinzcs2::runtime::ResolvedGloveRenderBinding ResolveGloveRenderBinding(
         binding.has_world_render = true;
     }
 
-    // The viewmodel does not consume m_hMyWearables directly. Build 2000918
+    // The viewmodel does not consume m_hMyWearables directly. Build 2000922
     // resolves the native pawn glove component output at pawn+0x15F8 through a
     // separate client-only identity table. A runtime CEconWearable can have a
     // perfect model/finish readback while remaining invisible unless this exact
@@ -60406,13 +60398,47 @@ bool TryResolveWeaponSkinRefreshBinding(
         return false;
     }
 
-    auto* patch_address = function + 0x52;
     const auto module_span = GetModuleSpan(client_module);
-    if (!module_span.has_value() || !PointerInModule(*module_span, patch_address))
+    if (!module_span.has_value())
     {
-        issue = L"Weapon refresh helper was found, but the offset patch address is outside client.dll.";
+        issue = L"Weapon refresh helper was found, but the client.dll image span is unavailable.";
         return false;
     }
+
+    // The material loop moved from helper+0x50 to helper+0x60 in the current
+    // client build. Locate the one fully verified gate/call ABI inside a small
+    // bounded portion of the same helper instead of treating its byte offset
+    // as ABI. DecodeWeaponMaterialCalls still validates every opcode, both
+    // vector displacements, the owner displacement and both call sites.
+    std::uint8_t* material_gate = nullptr;
+    nskinzcs2::runtime::WeaponMaterialCalls decoded;
+    for (std::ptrdiff_t relative = 0x30; relative <= 0xA0; ++relative)
+    {
+        auto* const candidate = function + relative;
+        std::array<std::uint8_t, 42> candidate_bytes {};
+        nskinzcs2::runtime::WeaponMaterialCalls candidate_decoded;
+        if (!PointerInModule(*module_span, candidate) ||
+            !PointerInModule(*module_span, candidate + candidate_bytes.size() - 1) ||
+            !SafeReadBytes(candidate, candidate_bytes.data(), candidate_bytes.size()) ||
+            !nskinzcs2::runtime::DecodeWeaponMaterialCalls(candidate_bytes, candidate_decoded))
+        {
+            continue;
+        }
+        if (material_gate != nullptr)
+        {
+            issue = L"Weapon refresh helper contains more than one verified material gate.";
+            return false;
+        }
+        material_gate = candidate;
+        decoded = candidate_decoded;
+    }
+    if (material_gate == nullptr)
+    {
+        issue = L"Weapon refresh helper does not contain a verified material gate/call ABI.";
+        return false;
+    }
+
+    auto* const patch_address = material_gate + 2;
 
     std::uint16_t original_offset = 0;
     if (!SafeReadValue(patch_address, original_offset))
@@ -60431,13 +60457,9 @@ bool TryResolveWeaponSkinRefreshBinding(
     // Validate the complete native gate + call ABI, then resolve both rel32
     // callees inside this client. Empty stock owners are skipped by the loop,
     // but are accepted by its generator when called for a verified gun.
-    std::array<std::uint8_t, 42> material_calls {};
-    nskinzcs2::runtime::WeaponMaterialCalls decoded;
-    if (SafeReadBytes(function + 0x50, material_calls.data(), material_calls.size()) &&
-        nskinzcs2::runtime::DecodeWeaponMaterialCalls(material_calls, decoded))
     {
-        auto* clear = function + 0x50 + 32 + decoded.clear_relative;
-        auto* generate = function + 0x50 + 42 + decoded.generate_relative;
+        auto* clear = material_gate + 32 + decoded.clear_relative;
+        auto* generate = material_gate + 42 + decoded.generate_relative;
         std::array<std::uint8_t, 34> observed_generator {};
         constexpr std::array<std::uint8_t, 31> clear_entry {
             0x48,0x89,0x5C,0x24,0x10,0x48,0x89,0x6C,0x24,0x18,0x48,0x89,0x74,0x24,0x20,
@@ -79921,8 +79943,8 @@ bool VerifyGloveVisualRefreshEvidence(const ModuleSpan& client)
 }
 
 // The pawn glove component does not publish its visual through the networked
-// client entity system. Mirror the exact build-2000918 native lookup rooted at
-// client+0x236A460. Client-only entries preserve the output generation while
+// client entity system. Mirror the exact build-2000922 native lookup rooted at
+// client+0x236A9E0. Client-only entries preserve the output generation while
 // storing the invalid-index sentinel in their identity handle.
 bool TryResolveGloveVisualOutputEntity(const ModuleSpan& client,
     const std::uint32_t handle, void*& entity, std::uint32_t& identity_handle)
@@ -80415,7 +80437,7 @@ bool EnsurePawnGloveVisualRefreshHookInstalled()
 
     g_hook_state.pawn_glove_visual_refresh_hook_installed.store(true);
     nskinzcs2::Logger::Info(
-        L"Pawn glove native callback hook installed at client+0xC659D0; demo state is patched inside the original HUD update chain.");
+        L"Pawn glove native callback hook installed at client+0xC65200; demo state is patched inside the original HUD update chain.");
     return true;
 }
 
@@ -80472,7 +80494,7 @@ bool EnsurePawnGloveHudConsumerHookInstalled()
 
     g_hook_state.pawn_glove_hud_consumer_hook_installed.store(true);
     nskinzcs2::Logger::Info(
-        L"Pawn glove HUD consumer hook installed at client+0x10CCD50; native output will be created immediately before HUD ownership.");
+        L"Pawn glove HUD consumer hook installed at client+0x10CC670; native output will be created immediately before HUD ownership.");
     return true;
 }
 

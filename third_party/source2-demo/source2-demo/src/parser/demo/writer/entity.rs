@@ -26,13 +26,14 @@ where
             return Ok(None);
         };
 
-        let (rewritten, changed, entry_bit_deltas) =
+        let (rewritten, changed, entry_bit_deltas, entry_commands) =
             self.rewrite_entity_data(entity_data, packet_entities.updated_entries())?;
         if changed {
             if let Some(serialized_entities) = packet_entities.serialized_entities.as_deref() {
                 packet_entities.serialized_entities = Some(rewrite_serialized_entity_lengths(
                     serialized_entities,
                     &entry_bit_deltas,
+                    &entry_commands,
                 )?);
             }
             packet_entities.entity_data = Some(rewritten);
@@ -46,12 +47,13 @@ where
         &mut self,
         entity_data: &[u8],
         updated_entries: i32,
-    ) -> Result<(Vec<u8>, bool, Vec<i64>), ParserError> {
+    ) -> Result<(Vec<u8>, bool, Vec<i64>, Vec<u32>), ParserError> {
         let mut reader = SliceReader::new(entity_data);
         self.entity_rewrite.replacements.clear();
         let mut index = usize::MAX;
         let path_reader = self.entity_rewrite.field_path_codec.clone();
         let mut entry_ranges = Vec::with_capacity(updated_entries.max(0) as usize);
+        let mut entry_commands = Vec::with_capacity(updated_entries.max(0) as usize);
 
         for _ in 0..updated_entries {
             let entry_start = bit_position(&reader);
@@ -59,6 +61,7 @@ where
             index = index.wrapping_add((delta + 1) as usize);
 
             let cmd = reader.read_bits(2);
+            entry_commands.push(cmd);
 
             if cmd != 1 {
                 match EntityEvents::from_cmd(cmd) {
@@ -77,7 +80,7 @@ where
         }
 
         if self.entity_rewrite.replacements.is_empty() {
-            return Ok((Vec::new(), false, Vec::new()));
+            return Ok((Vec::new(), false, Vec::new(), Vec::new()));
         }
 
         let mut out = Vec::with_capacity(entity_data.len());
@@ -129,7 +132,7 @@ where
         )?;
         writer.flush()?;
         drop(writer);
-        Ok((out, true, entry_bit_deltas))
+        Ok((out, true, entry_bit_deltas, entry_commands))
     }
 
     fn rewrite_entity_created(
@@ -423,7 +426,16 @@ where
 fn rewrite_serialized_entity_lengths(
     encoded: &[u8],
     entry_bit_deltas: &[i64],
+    entry_commands: &[u32],
 ) -> Result<Vec<u8>, ParserError> {
+    if entry_bit_deltas.len() != entry_commands.len() {
+        return Err(ParserError::IoError(format!(
+            "serialized entity metadata mismatch: packet has {} deltas and {} commands",
+            entry_bit_deltas.len(),
+            entry_commands.len()
+        )));
+    }
+
     let mut values = Vec::with_capacity(entry_bit_deltas.len());
     let mut offset = 0usize;
     while offset < encoded.len() {
@@ -455,17 +467,39 @@ fn rewrite_serialized_entity_lengths(
         values.push(value);
     }
 
-    if values.len() != entry_bit_deltas.len() {
+    let field_entry_indices = entry_commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cmd)| matches!(*cmd, 0 | 2).then_some(index))
+        .collect::<Vec<_>>();
+    let non_leave_entry_indices = entry_commands
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cmd)| (*cmd != 1).then_some(index))
+        .collect::<Vec<_>>();
+    let entry_indices = if values.len() == entry_bit_deltas.len() {
+        (0..entry_bit_deltas.len()).collect::<Vec<_>>()
+    } else if values.len() == field_entry_indices.len() {
+        // Current CS2 packets omit leave-PVS and delete commands from this table:
+        // neither command carries a serialized field payload whose size can change.
+        field_entry_indices
+    } else if values.len() == non_leave_entry_indices.len() {
+        // Keep compatibility with builds that include delete commands but omit
+        // leave-PVS commands from serialized_entities.
+        non_leave_entry_indices
+    } else {
         return Err(ParserError::IoError(format!(
-            "serialized entity length count mismatch: table has {}, packet has {} entries",
+            "serialized entity length count mismatch: table has {}, packet has {} entries ({} field-bearing, {} non-leave)",
             values.len(),
-            entry_bit_deltas.len()
+            entry_bit_deltas.len(),
+            field_entry_indices.len(),
+            non_leave_entry_indices.len()
         )));
-    }
+    };
 
     let mut rewritten = Vec::with_capacity(encoded.len());
-    for (value, delta) in values.into_iter().zip(entry_bit_deltas) {
-        let adjusted = i128::from(value) + i128::from(*delta);
+    for (value, entry_index) in values.into_iter().zip(entry_indices) {
+        let adjusted = i128::from(value) + i128::from(entry_bit_deltas[entry_index]);
         let adjusted = u64::try_from(adjusted).map_err(|_| {
             ParserError::IoError("serialized entity bit length became negative".into())
         })?;
@@ -589,18 +623,75 @@ mod tests {
     #[test]
     fn serialized_entity_lengths_follow_entity_bit_deltas() {
         let encoded = [0x0e, 0xb8, 0x03, 0x1e]; // 14, 440, 30 bits.
-        let rewritten = rewrite_serialized_entity_lengths(&encoded, &[0, 472, -5])
+        let rewritten = rewrite_serialized_entity_lengths(&encoded, &[0, 472, -5], &[0, 2, 0])
             .expect("rewrite serialized entity lengths");
         assert_eq!(rewritten, [0x0e, 0x90, 0x07, 0x19]); // 14, 912, 25 bits.
     }
 
     #[test]
-    fn serialized_entity_length_count_must_match_packet_entries() {
-        assert!(rewrite_serialized_entity_lengths(&[0x0e], &[0, 0]).is_err());
+    fn serialized_entity_lengths_skip_entries_without_field_payloads() {
+        let encoded = [0x0e, 0x1e]; // Update and create entries only.
+        let rewritten = rewrite_serialized_entity_lengths(&encoded, &[5, 0, 0, -3], &[0, 1, 3, 2])
+            .expect("rewrite sparse serialized entity lengths");
+        assert_eq!(rewritten, [0x13, 0x1b]); // 19 and 27 bits.
+    }
+
+    #[test]
+    fn serialized_entity_lengths_accept_117_values_for_191_packet_entries() {
+        let mut commands = vec![1; 191];
+        for command in commands.iter_mut().skip(74) {
+            *command = 0;
+        }
+        let mut deltas = vec![0; 191];
+        deltas[100] = 9;
+        let encoded = vec![20; 117];
+
+        let rewritten = rewrite_serialized_entity_lengths(&encoded, &deltas, &commands)
+            .expect("rewrite the sparse length layout seen in current CS2 demos");
+
+        assert_eq!(rewritten.len(), 117);
+        assert_eq!(rewritten[26], 29);
+    }
+
+    #[test]
+    fn serialized_entity_lengths_accept_any_field_entry_count() {
+        for field_count in 0..=256 {
+            let mut commands = Vec::with_capacity(field_count * 3);
+            let mut deltas = Vec::with_capacity(field_count * 3);
+            for index in 0..field_count {
+                commands.push(1); // Leave PVS: no serialized field payload.
+                deltas.push(0);
+                commands.push(if index % 2 == 0 { 0 } else { 2 }); // Update/create.
+                deltas.push(1);
+                if index % 3 == 0 {
+                    commands.push(3); // Delete: no serialized field payload.
+                    deltas.push(0);
+                }
+            }
+            let encoded = vec![20; field_count];
+
+            let rewritten = rewrite_serialized_entity_lengths(&encoded, &deltas, &commands)
+                .expect("rewrite an arbitrary sparse serialized entity length table");
+
+            assert_eq!(rewritten, vec![21; field_count]);
+        }
+    }
+
+    #[test]
+    fn serialized_entity_lengths_support_delete_entries_without_leave_entries() {
+        let encoded = [0x0e, 0x07, 0x1e]; // Update, delete and create entries.
+        let rewritten = rewrite_serialized_entity_lengths(&encoded, &[5, 0, 0, -3], &[0, 1, 3, 2])
+            .expect("rewrite non-leave serialized entity lengths");
+        assert_eq!(rewritten, [0x13, 0x07, 0x1b]); // 19, 7 and 27 bits.
+    }
+
+    #[test]
+    fn serialized_entity_length_count_must_match_a_supported_layout() {
+        assert!(rewrite_serialized_entity_lengths(&[0x0e], &[0, 0], &[0, 2]).is_err());
     }
 
     #[test]
     fn serialized_entity_length_cannot_become_negative() {
-        assert!(rewrite_serialized_entity_lengths(&[0x01], &[-2]).is_err());
+        assert!(rewrite_serialized_entity_lengths(&[0x01], &[-2], &[0]).is_err());
     }
 }

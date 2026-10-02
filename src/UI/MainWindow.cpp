@@ -1588,103 +1588,105 @@ private:
         DrawActions();
 
         ImGui::Separator();
-        ImGui::Text(Ui(UiTextId::RuntimeFormat), AvailabilityText(status.availability));
-        ImGui::TextWrapped(Ui(UiTextId::DetailFormat), Narrow(status.detail).c_str());
-        ImGui::Text(Ui(UiTextId::FrameCallbacksFormat), static_cast<unsigned long long>(status.frame_callback_count));
-        if (status.last_frame_stage >= 0)
+        if (ImGui::CollapsingHeader(Ui(UiTextId::RuntimeDiagnostics)))
         {
-            ImGui::Text(Ui(UiTextId::LastStageFormat), status.last_frame_stage);
-        }
-        ImGui::Text(
-            Ui(UiTextId::DemoFormat),
-            status.demo_playing
-                ? (status.demo_paused ? Ui(UiTextId::DemoPlayingPaused) : Ui(UiTextId::DemoPlaying))
-                : Ui(UiTextId::DemoWaiting));
-        if (!status.level_name.empty())
-        {
-            ImGui::Text(Ui(UiTextId::LevelFormat), Narrow(status.level_name).c_str());
-        }
-        if (status.demo_tick >= 0)
-        {
-            ImGui::Text(Ui(UiTextId::DemoTickFormat), status.demo_tick);
-        }
-        ImGui::Text(
-            Ui(UiTextId::SchemaFormat),
-            status.schema_bound ? Ui(UiTextId::StateBound) : Ui(UiTextId::StatePending));
-        ImGui::Text(
-            Ui(UiTextId::EntitySystemFormat),
-            status.entity_system_bound ? Ui(UiTextId::StateBound) : Ui(UiTextId::StatePending));
-        ImGui::Text(
-            Ui(UiTextId::EntityFactoryFormat),
-            !status.client_entity_factory_requested
-                ? Ui(UiTextId::StateIdle)
-                : (status.client_entity_factory_resolved ? Ui(UiTextId::StateResolved) : Ui(UiTextId::StateUnavailable)));
-        if (status.highest_entity_index >= 0)
-        {
-            ImGui::Text(Ui(UiTextId::HighestEntityFormat), status.highest_entity_index);
-        }
-        if (status.watched_xuid != 0)
-        {
-            ImGui::Text(Ui(UiTextId::WatchedXuidFormat), static_cast<unsigned long long>(status.watched_xuid));
-        }
-        ImGui::Text(Ui(UiTextId::ProfilesEnabledFormat), status.enabled_profile_count);
-        if (status.stable_wearable_bound ||
-            status.runtime_created_wearable_bound ||
-            status.glove_pawn_fallback_bound ||
-            status.knife_viewmodel_sync_ready)
-        {
-            ImGui::Text(
-                Ui(UiTextId::BindingsFormat),
-                YesNoText(status.stable_wearable_bound),
-                YesNoText(status.runtime_created_wearable_bound),
-                YesNoText(status.glove_pawn_fallback_bound),
-                YesNoText(status.knife_viewmodel_sync_ready));
-        }
-        if (!status.knife_runtime_path.empty())
-        {
-            ImGui::TextWrapped(Ui(UiTextId::KnifeRuntimePathFormat), Narrow(status.knife_runtime_path).c_str());
-        }
-        if (!status.knife_runtime_reason.empty())
-        {
-            ImGui::TextWrapped(Ui(UiTextId::KnifeRuntimeReasonFormat), Narrow(status.knife_runtime_reason).c_str());
-        }
-        if (status.player_controller_count > 0 || status.player_pawn_count > 0 || status.preview_character_count > 0)
-        {
-            ImGui::Text(
-                Ui(UiTextId::PlayersFormat),
-                status.player_controller_count,
-                status.player_pawn_count,
-                status.preview_character_count,
-                status.active_weapon_count,
-                status.owned_weapon_count,
-                status.matched_profile_count);
-            ImGui::Text(
-                Ui(UiTextId::AppliedFormat),
-                status.applied_weapon_count,
-                status.applied_glove_count);
-        }
-        if (!status.last_error.empty())
-        {
-            ImGui::TextWrapped(Ui(UiTextId::LastErrorFormat), Narrow(status.last_error).c_str());
-        }
-
-        if (!status.diagnostics.empty())
-        {
-            ImGui::Spacing();
-            ImGui::TextUnformatted(Ui(UiTextId::RuntimeDiagnostics));
-            for (const auto& line : status.diagnostics)
+            ImGui::Text(Ui(UiTextId::RuntimeFormat), AvailabilityText(status.availability));
+            ImGui::TextWrapped(Ui(UiTextId::DetailFormat), Narrow(status.detail).c_str());
+            ImGui::Text(Ui(UiTextId::FrameCallbacksFormat), static_cast<unsigned long long>(status.frame_callback_count));
+            if (status.last_frame_stage >= 0)
             {
-                ImGui::BulletText("%s", Narrow(line).c_str());
+                ImGui::Text(Ui(UiTextId::LastStageFormat), status.last_frame_stage);
             }
-        }
-
-        if (!catalog.warnings.empty())
-        {
-            ImGui::Spacing();
-            ImGui::TextUnformatted(Ui(UiTextId::CatalogWarnings));
-            for (const auto& warning : catalog.warnings)
+            ImGui::Text(
+                Ui(UiTextId::DemoFormat),
+                status.demo_playing
+                    ? (status.demo_paused ? Ui(UiTextId::DemoPlayingPaused) : Ui(UiTextId::DemoPlaying))
+                    : Ui(UiTextId::DemoWaiting));
+            if (!status.level_name.empty())
             {
-                ImGui::BulletText("%s", warning.c_str());
+                ImGui::Text(Ui(UiTextId::LevelFormat), Narrow(status.level_name).c_str());
+            }
+            if (status.demo_tick >= 0)
+            {
+                ImGui::Text(Ui(UiTextId::DemoTickFormat), status.demo_tick);
+            }
+            ImGui::Text(
+                Ui(UiTextId::SchemaFormat),
+                status.schema_bound ? Ui(UiTextId::StateBound) : Ui(UiTextId::StatePending));
+            ImGui::Text(
+                Ui(UiTextId::EntitySystemFormat),
+                status.entity_system_bound ? Ui(UiTextId::StateBound) : Ui(UiTextId::StatePending));
+            ImGui::Text(
+                Ui(UiTextId::EntityFactoryFormat),
+                !status.client_entity_factory_requested
+                    ? Ui(UiTextId::StateIdle)
+                    : (status.client_entity_factory_resolved ? Ui(UiTextId::StateResolved) : Ui(UiTextId::StateUnavailable)));
+            if (status.highest_entity_index >= 0)
+            {
+                ImGui::Text(Ui(UiTextId::HighestEntityFormat), status.highest_entity_index);
+            }
+            if (status.watched_xuid != 0)
+            {
+                ImGui::Text(Ui(UiTextId::WatchedXuidFormat), static_cast<unsigned long long>(status.watched_xuid));
+            }
+            ImGui::Text(Ui(UiTextId::ProfilesEnabledFormat), status.enabled_profile_count);
+            if (status.stable_wearable_bound ||
+                status.runtime_created_wearable_bound ||
+                status.glove_pawn_fallback_bound ||
+                status.knife_viewmodel_sync_ready)
+            {
+                ImGui::Text(
+                    Ui(UiTextId::BindingsFormat),
+                    YesNoText(status.stable_wearable_bound),
+                    YesNoText(status.runtime_created_wearable_bound),
+                    YesNoText(status.glove_pawn_fallback_bound),
+                    YesNoText(status.knife_viewmodel_sync_ready));
+            }
+            if (!status.knife_runtime_path.empty())
+            {
+                ImGui::TextWrapped(Ui(UiTextId::KnifeRuntimePathFormat), Narrow(status.knife_runtime_path).c_str());
+            }
+            if (!status.knife_runtime_reason.empty())
+            {
+                ImGui::TextWrapped(Ui(UiTextId::KnifeRuntimeReasonFormat), Narrow(status.knife_runtime_reason).c_str());
+            }
+            if (status.player_controller_count > 0 || status.player_pawn_count > 0 || status.preview_character_count > 0)
+            {
+                ImGui::Text(
+                    Ui(UiTextId::PlayersFormat),
+                    status.player_controller_count,
+                    status.player_pawn_count,
+                    status.preview_character_count,
+                    status.active_weapon_count,
+                    status.owned_weapon_count,
+                    status.matched_profile_count);
+                ImGui::Text(
+                    Ui(UiTextId::AppliedFormat),
+                    status.applied_weapon_count,
+                    status.applied_glove_count);
+            }
+            if (!status.last_error.empty())
+            {
+                ImGui::TextWrapped(Ui(UiTextId::LastErrorFormat), Narrow(status.last_error).c_str());
+            }
+
+            if (!status.diagnostics.empty())
+            {
+                ImGui::Spacing();
+                for (const auto& line : status.diagnostics)
+                {
+                    ImGui::BulletText("%s", Narrow(line).c_str());
+                }
+            }
+
+            if (!catalog.warnings.empty())
+            {
+                ImGui::Spacing();
+                ImGui::TextUnformatted(Ui(UiTextId::CatalogWarnings));
+                for (const auto& warning : catalog.warnings)
+                {
+                    ImGui::BulletText("%s", warning.c_str());
+                }
             }
         }
 

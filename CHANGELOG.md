@@ -1,5 +1,14 @@
 # Changelog / 更新记录
 
+## v0.5.6 — 2026-10-02
+
+- Fixed valid current-CS2 demos failing with `serialized entity length count mismatch` by dynamically mapping the `serialized_entities` table to update/create commands that actually carry field payloads. The implementation accepts arbitrary sparse counts rather than hard-coding the reported `117 / 191` case, while retaining full-entry and delete-inclusive compatibility.
+- 修复当前 CS2 合法 Demo 因 `serialized entity length count mismatch` 而重写失败：现在动态把 `serialized_entities` 长度表映射到真正携带字段数据的 Update/Create 命令。实现兼容任意稀疏数量，不写死截图中的 `117 / 191`，同时保留全条目及包含 Delete 的布局。
+- Moved runtime state, schema/entity binding, application statistics, diagnostics and catalog warnings into a collapsed-by-default diagnostics panel.
+- 将运行时状态、Schema／实体绑定、应用统计、诊断及 Catalog 警告整合到默认收起的调试信息栏。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.6.md).
+
 ## v0.5.5 — 2026-10-01
 
 - Updated the verified baseline to CS2 Steam Build `25640462`, Client/Server `2000922`, Patch `1.41.8.8`, Source revision `11064488`, including the shifted native glove refresh/HUD/entity-root evidence and compact weapon-material generator ABI.

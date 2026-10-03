@@ -1397,9 +1397,10 @@ void TestWorkshopMapDiscovery()
         std::cout << "generic_radar_overlay=SKIPPED (nirage Workshop item not installed)\n";
     }
 
-    constexpr std::array<std::string_view, 6> additional_radar_maps {
+    constexpr std::array<std::string_view, 7> additional_radar_maps {
         "de_all_in_one",
         "de_ancient_night",
+        "de_inferno_d",
         "de_mirage_water",
         "de_dust2_water",
         "de_inferno_water",
@@ -1438,6 +1439,34 @@ void TestWorkshopMapDiscovery()
                 map_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::NotNeeded,
             "each installed audited workshop map radar should be generated or already transparent");
         WriteRadarPreviewIfRequested(std::string(map_name) + "-default", map_overlay);
+        if (map_name == "de_inferno_d")
+        {
+            Expect(
+                map_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+                "Inferno Reforged source alpha must be normalized instead of being skipped as already transparent");
+            Expect(
+                !map_overlay.png_bytes.empty() &&
+                    map_overlay.virtual_path != map_overlay.request_virtual_path,
+                "Inferno Reforged should publish a cache-isolated native-alpha overlay");
+            Expect(
+                map_overlay.transparent_pixels >= 700000,
+                "Inferno Reforged should preserve its large transparent exterior area");
+            auto steamapps = entry->item_directory;
+            for (int level = 0; level < 4; ++level)
+            {
+                steamapps = steamapps.parent_path();
+            }
+            const auto cs2_install_root = steamapps / L"common/Counter-Strike Global Offensive";
+            Expect(
+                nskinzcs2::runtime::CompileRadarOverlayWithCs2(
+                    cs2_install_root,
+                    map_overlay,
+                    radar_diagnostic),
+                "Inferno Reforged normalized-alpha PNG should compile through CS2's native resourcecompiler");
+            Expect(
+                map_overlay.vtex_bytes.size() >= 64,
+                "Inferno Reforged normalized native VTEX should not be empty");
+        }
         if (map_name == "de_mirage_water")
         {
             nskinzcs2::runtime::RadarAlphaMaskSettings no_dark_recovery;

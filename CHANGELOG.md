@@ -1,5 +1,12 @@
 # Changelog / 更新记录
 
+## v0.5.7 — 2026-10-03
+
+- Fixed transparent Workshop radars such as `INFERNO REFORGED` being skipped as “already transparent” even though their packaged VTEX could still render an opaque black field in `mirv_pov`. Existing source alpha is now normalized through the cache-isolated native overlay path, and the radar background-opacity control also synchronizes `cl_hud_radar_background_alpha` on a safe render frame.
+- 修复 `INFERNO REFORGED` 等工坊雷达因解码后存在 Alpha 而被误判为“无需处理”，但在 `mirv_pov` 中仍显示不透明黑底的问题。现在会通过独立缓存的原生 VTEX 覆盖路径规范化已有 Alpha，并在安全渲染帧同步 `cl_hud_radar_background_alpha` 与面板中的黑底不透明度。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.7.md).
+
 ## v0.5.6 — 2026-10-02
 
 - Fixed valid current-CS2 demos failing with `serialized entity length count mismatch` by dynamically mapping the `serialized_entities` table to update/create commands that actually carry field payloads. The implementation accepts arbitrary sparse counts rather than hard-coding the reported `117 / 191` case, while retaining full-entry and delete-inclusive compatibility.

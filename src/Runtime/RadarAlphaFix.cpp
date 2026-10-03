@@ -1262,11 +1262,21 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOver
     output.request_virtual_path = virtual_path;
     output.width = decoded_width;
     output.height = decoded_height;
-    if (!changed)
+    const auto pixel_count = static_cast<std::size_t>(decoded_width) * decoded_height;
+    const bool normalize_existing_transparency =
+        output.transparent_pixels > pixel_count / 10;
+    if (!changed && !normalize_existing_transparency)
     {
-        diagnostic = L"The selected radar texture already has usable transparency or no opaque black field.";
+        diagnostic = L"The selected radar texture has no opaque black field that needs an alpha overlay.";
         return RadarAlphaFixOutcome::NotNeeded;
     }
+    // A decoded Workshop VTEX can contain plenty of zero-alpha pixels while
+    // its original resource metadata still makes Panorama / mirv_pov display
+    // those pixels over an opaque black field.  Do not treat decoded alpha as
+    // proof that the packaged resource renders correctly.  Re-encode and
+    // compile already-transparent Workshop radars into the same known-good,
+    // cache-isolated native VTEX used by the mask path.  The RGBA pixels are
+    // preserved; only the resource representation is normalized.
     std::vector<std::uint8_t> png;
     if (!EncodePng(rgba, decoded_width, decoded_height, png, diagnostic))
     {

@@ -12305,6 +12305,10 @@ struct HookState
     std::atomic_bool console_player_query_inflight {false};
     std::atomic_bool console_player_refresh_requested {false};
     std::atomic_bool local_demo_command_requested {false};
+    // -1 means no pending update. Map-remap UI changes are converted to the
+    // 0..100 range here and dispatched from FRAME_RENDER_PASS, where calling
+    // Source2EngineToClient001 is safe.
+    std::atomic<int> radar_background_alpha_percent_requested {-1};
     std::atomic<std::uint64_t> console_player_query_started_millis {0};
     std::atomic<std::uint64_t> console_player_query_completed_millis {0};
     std::atomic<std::uint64_t> console_player_query_not_before_millis {0};
@@ -12708,6 +12712,54 @@ bool DispatchPendingLocalDemoCommandAtFrameRenderPassGuarded() noexcept
     }
     __except (LogStructuredThreadException(
         L"Local demo automation command",
+        GetExceptionInformation()))
+    {
+        return false;
+    }
+}
+
+void DispatchPendingRadarBackgroundAlphaAtFrameRenderPass()
+{
+    const auto percent =
+        g_hook_state.radar_background_alpha_percent_requested.exchange(-1, std::memory_order_acq_rel);
+    if (percent < 0)
+    {
+        return;
+    }
+
+    const auto clamped_percent = std::clamp(percent, 0, 100);
+    char command[96] {};
+    sprintf_s(
+        command,
+        "cl_hud_radar_background_alpha %.3f",
+        static_cast<double>(clamped_percent) / 100.0);
+    if (!SafeInvokeMethod3Void(
+            g_hook_state.engine_to_client,
+            nskinzcs2::compatibility::kEngineExecuteClientCmdVtableIndex,
+            0,
+            command,
+            true))
+    {
+        nskinzcs2::Logger::Warn(
+            L"Map-remap radar background alpha could not be synchronized through "
+            L"Source2EngineToClient001::ExecuteClientCmd.");
+        return;
+    }
+
+    nskinzcs2::Logger::Info(
+        L"[MapRemap/RadarBackground] synchronized cl_hud_radar_background_alpha to " +
+        std::to_wstring(clamped_percent) + L"% for mirv_pov.");
+}
+
+bool DispatchPendingRadarBackgroundAlphaAtFrameRenderPassGuarded() noexcept
+{
+    __try
+    {
+        DispatchPendingRadarBackgroundAlphaAtFrameRenderPass();
+        return true;
+    }
+    __except (LogStructuredThreadException(
+        L"Map-remap radar background alpha",
         GetExceptionInformation()))
     {
         return false;
@@ -87749,6 +87801,7 @@ void HookedClientFrameStageNotify(void* this_ptr, int cur_stage)
 
     if (cur_stage == kCs2FrameRenderPass)
     {
+        DispatchPendingRadarBackgroundAlphaAtFrameRenderPassGuarded();
         DispatchPendingLocalDemoCommandAtFrameRenderPassGuarded();
 
         if (g_hook_state.pending_runtime_reset_after_seek.exchange(false))
@@ -91389,6 +91442,12 @@ void nskinzcs2::RuntimeController::ConsumeManualRefresh(runtime::Status& status)
 
     const auto map_config = state_.SnapshotConfig().map_remap;
     nskinzcs2::runtime::ConfigureMapRemap(map_config, SnapshotLevelName());
+    if (map_config.enabled && map_config.use_source_radar)
+    {
+        g_hook_state.radar_background_alpha_percent_requested.store(
+            std::clamp(map_config.radar_background_alpha_percent, 0, 100),
+            std::memory_order_release);
+    }
     const auto map_status = nskinzcs2::runtime::SnapshotMapRemapStatus();
     if (map_config.enabled && !map_status.hooks_installed)
     {

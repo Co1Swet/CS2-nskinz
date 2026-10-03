@@ -1,4 +1,4 @@
-# Temporary cosmetic demo workflow (updated 2026-09-28)
+# Temporary cosmetic demo workflow (updated 2026-10-03)
 
 ## Goal
 
@@ -26,11 +26,9 @@ as one transaction. The input demo is read-only. The output is a new file.
    in later rounds. Common-size demos are read from disk once and reused in
    memory for both phases; files above 768 MiB automatically use 8 MiB buffered
    streaming instead.
-5. Every owned firearm and glove is routed independently. A positive networked
-   fallback paint value, or a positive dynamic paint attribute (definition
-   index `6`), marks the source item as already painted and leaves it unchanged
-   for the established live path. Stock/default carriers are selected for
-   reconstruction. A finish-only glove request records
+5. Every owned firearm and glove is routed independently. Existing paint
+   attributes are updated in place, while stock/default carriers receive the
+   missing paint fields. A finish-only glove request records
    `preserve_source_definition`; the ownership pass resolves the current
    `m_EconGloves.m_iItemDefinitionIndex` and keeps that model definition while
    materializing the missing paint state.
@@ -42,10 +40,13 @@ as one transaction. The input demo is read-only. The output is a new file.
    `AnimAssetData` classification row that tells Source 2 to load that installed
    resource. Default-glove EconItemView fields and the changed flag are
    materialized on each selected pawn. Default firearm records receive
-   synthetic item identity, quality, paint, seed and normalized wear fields;
-   quality, name tags, stickers and other live-only fields remain owned by the
-   existing runtime path. The implementation is nSkinz code and does not
-   require an external client, Python module or service.
+   synthetic item identity, quality, paint, seed and normalized wear fields.
+   Existing sticker slots replace only their integer-union kit value, preserving
+   wear, scale, rotation and CS2 offset/schema fields. A requested missing
+   logical slot grows the same dynamic-attribute vector and receives the full
+   kit/wear/scale/rotation quartet at the weapon's native preset position. The
+   implementation is nSkinz code and does not require an external client,
+   Python module or service.
 7. The final file is validated for the exact eight-byte `PBDEMS2\0` header and
    placed at `game/csgo/nskinz_temp/nskinz_skin_<source>_<time>.dem`.
 8. A local event asks the injected runtime to dispatch the generated
@@ -72,10 +73,11 @@ rebuilding the same first-person hands.
   tool cache, so repeated jobs do not rewrite or rescan the executable.
 - The parser/writer is the vendored open-source `source2-demo` 0.5.8 tree with
   nSkinz extensions for missing entity fields and string-table insertion.
-- Eligible firearm profiles are present in the request with team `ANY`. The
-  rewriter changes only owned carriers whose source item has no networked paint;
-  already-painted carriers are counted as passthroughs and left byte-for-byte
-  unchanged by the rewrite rule.
+- Eligible firearm profiles are present in the request with team `ANY`. Paint
+  attributes are reused in place when present and materialized when missing.
+  Sticker slots are handled independently from paint state: existing slots
+  preserve placement, while missing requested slots append only absent Econ
+  attributes and update the vector count.
 - The complete MIT/Apache-2.0 component notices and modified source ship with
   the project. There is no external client authentication or runtime download.
 
@@ -87,8 +89,8 @@ rebuilding the same first-person hands.
   accepting an output.
 - The embedded helper runs outside CS2 with a ten-minute timeout and redirected log;
   failure text is returned to the panel.
-- An output is accepted only after required knife records resolve, each glove
-  request resolves as either a rewrite or an already-painted passthrough, and
+- An output is accepted only after required knife/glove records resolve, every
+  matched requested sticker slot reparses with exactly the requested kit, and
   the demo header validates. A configured firearm that is absent from the
   replay does not invalidate unrelated successful records. `playdemo` is never
   queued for a failed result.

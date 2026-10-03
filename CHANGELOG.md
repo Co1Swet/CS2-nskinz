@@ -1,5 +1,14 @@
 # Changelog / 更新记录
 
+## v0.5.8 — 2026-10-03
+
+- Temporary Demo can now create requested firearm sticker slots that are absent from the source demo. The rewriter grows the Econ dynamic-attribute vector, writes the complete ID/wear/scale/rotation record at the weapon's native preset position, preserves existing CS2 free-placement data, and reparses the output to verify every requested slot.
+- “临时换肤 Demo”现在可创建源 Demo 中不存在的枪械贴纸槽。重写器会扩展 Econ 动态属性向量，按武器原生预设位置写入完整的 ID／磨损／缩放／旋转记录，保留已有 CS2 自由摆放数据，并在输出后二次解析验证每一个请求槽位。
+- Live Update remains an existing-slot replacement path. v0.5.8 deliberately does not create or edit CS2 free-placement offset/schema attributes; newly created slots use their native preset positions.
+- 实时“更新”仍只替换已有槽位。v0.5.8 明确不创建或修改 CS2 自由摆放的偏移／Schema 属性；新建槽位使用原生预设位置。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.5.8.md).
+
 ## v0.5.7 — 2026-10-03
 
 - Fixed transparent Workshop radars such as `INFERNO REFORGED` being skipped as “already transparent” even though their packaged VTEX could still render an opaque black field in `mirv_pov`. Existing source alpha is now normalized through the cache-isolated native overlay path, and the radar background-opacity control also synchronizes `cl_hud_radar_background_alpha` on a safe render frame.

@@ -555,9 +555,15 @@ json BuildBatchItem(
     if (stickers != nullptr)
     {
         item["stickers"] = json::array();
+        item["sticker_transforms"] = json::array();
         for (const auto& sticker : *stickers)
         {
             item["stickers"].push_back(std::max(0, sticker.kit_id));
+            item["sticker_transforms"].push_back({
+                {"wear", static_cast<double>(sticker.wear)},
+                {"scale", static_cast<double>(sticker.scale)},
+                {"rotation", static_cast<double>(sticker.rotation)},
+            });
         }
     }
     return item;
@@ -1066,6 +1072,7 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
     std::uint64_t painted_weapon_passthroughs = 0;
     std::uint64_t rewritten_sticker_weapons = 0;
     std::uint64_t rewritten_sticker_slots = 0;
+    std::uint64_t created_sticker_slots = 0;
     std::uint64_t missing_sticker_slots = 0;
     std::uint64_t inserted_animation_resources = 0;
     std::wstring animation_resource_source;
@@ -1107,6 +1114,8 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
             response.value("sticker_weapon_count", std::uint64_t {0});
         rewritten_sticker_slots =
             response.value("sticker_slot_count", std::uint64_t {0});
+        created_sticker_slots =
+            response.value("created_sticker_slot_count", std::uint64_t {0});
         missing_sticker_slots =
             response.value("missing_sticker_slot_count", std::uint64_t {0});
         inserted_animation_resources =
@@ -1136,11 +1145,12 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         Logger::Error(result.detail);
         return result;
     }
-    if (matched_sticker_slot_requests > 0 && rewritten_sticker_slots == 0)
+    if (matched_sticker_slot_requests > rewritten_sticker_slots || missing_sticker_slots > 0)
     {
-        result.detail = L"The selected weapons in this demo do not contain any of the requested existing sticker slots. "
-            L"Existing-slot replacement cannot create a new sticker; choose a weapon that already has a sticker in that slot. "
-            L"Missing slots=" + std::to_wstring(missing_sticker_slots) + L".";
+        result.detail = L"The nSkinz demo rewriter could not materialize every requested sticker slot: "
+            L"requested=" + std::to_wstring(matched_sticker_slot_requests) +
+            L", rewritten=" + std::to_wstring(rewritten_sticker_slots) +
+            L", missing=" + std::to_wstring(missing_sticker_slots) + L".";
         Logger::Error(result.detail);
         return result;
     }
@@ -1176,6 +1186,7 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         L", painted_weapon_passthroughs=" + std::to_wstring(painted_weapon_passthroughs) +
         L", sticker_weapons=" + std::to_wstring(rewritten_sticker_weapons) +
         L", sticker_slots=" + std::to_wstring(rewritten_sticker_slots) +
+        L", created_sticker_slots=" + std::to_wstring(created_sticker_slots) +
         L", missing_sticker_slots=" + std::to_wstring(missing_sticker_slots) +
         L", knives=" + std::to_wstring(rewritten_knives) +
         L", gloves=" + std::to_wstring(rewritten_gloves) +

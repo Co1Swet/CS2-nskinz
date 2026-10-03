@@ -73,6 +73,9 @@ void RunDemoSkinRewriteTests()
     weapon.seed = 77;
     weapon.wear = 0.19f;
     weapon.stickers[0].kit_id = 76;
+    weapon.stickers[0].wear = 0.25f;
+    weapon.stickers[0].scale = 1.4f;
+    weapon.stickers[0].rotation = 37.0f;
     weapon.stickers[2].kit_id = 137;
     config.profiles.push_back(weapon);
 
@@ -94,7 +97,16 @@ void RunDemoSkinRewriteTests()
     Check(items.at(7).at("quality") == weapon.quality, "firearm quality must be serialized");
     Check(items.at(7).at("pattern_seed") == 77.0, "firearm seed must be serialized");
     Check(items.at(7).at("stickers") == json::array({76, 0, 137, 0, 0}),
-        "firearm sticker kit IDs must be serialized without transform overrides");
+        "firearm sticker kit IDs must be serialized for replacement or creation");
+    const auto& sticker_transforms = items.at(7).at("sticker_transforms");
+    Check(sticker_transforms.is_array() && sticker_transforms.size() == 5,
+        "every logical sticker slot must carry a transform record for missing-slot creation");
+    Check(std::abs(sticker_transforms.at(0).at("wear").get<double>() - 0.25) < 0.000001,
+        "missing-slot sticker wear must be serialized");
+    Check(std::abs(sticker_transforms.at(0).at("scale").get<double>() - 1.4) < 0.000001,
+        "missing-slot sticker scale must be serialized");
+    Check(std::abs(sticker_transforms.at(0).at("rotation").get<double>() - 37.0) < 0.000001,
+        "missing-slot sticker rotation must be serialized");
     Check(std::abs(items.at(7).at("wear").get<double>() - 0.19) < 0.000001,
         "firearm wear must be serialized");
     Check(items.at(7).at("mesh_group_mask") == 2,

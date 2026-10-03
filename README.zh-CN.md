@@ -150,7 +150,7 @@ mirv_loadlibrary "D:\Lyan_nskinz-v0.5.7-EN.dll"
 
 按 `Insert` 显示面板，选择观战玩家 XUID 和外观配置，点击“更新”（`Update`）。请把 DLL 放在可写文件夹，独立面板与运行时需要在此生成和共享目录/配置文件。运行日志为 `nSkinzCS2.log`，面板日志为 `nSkinzCS2.ui.log`。
 
-升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 发布包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.7/Lyan_nskinz-v0.5.7-CS2-2000922-windows-x64.zip)含中英文 DLL、游戏版本、许可证／声明与加载说明。
+升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 发布包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.7/Lyan_nskinz-v0.5.7-CS2-2000924-windows-x64.zip)含中英文 DLL、游戏版本、许可证／声明与加载说明。
 
 ## 创意工坊地图与模型替换
 
@@ -181,9 +181,9 @@ mirv_loadlibrary "D:\Lyan_nskinz-v0.5.7-EN.dll"
 
 当前 `v0.5.7` 源码／本地构建对应以下已检查基线。临时 Demo 可重写原皮和已有涂装的枪械／手套；地图模型／雷达、刀模、动作和外观效果仍需按 Demo 画面验收。精确兼容修复与测试边界见 [v0.5.7 发布说明](docs/releases/v0.5.7.md)。
 
-- Steam app build ID `25640462`
-- CS2 Client/Server `2000922`、Patch `1.41.8.8`、Source revision `11064488`（2026-09-30 16:29:50）
-- `client.dll` SHA-256：`9DDF30D68B8EF66607783D418C4F74A6004CF2104572E6C630625E52C1C1202D`
+- Steam app build ID `25687242`
+- CS2 Client/Server `2000924`、Patch `1.41.8.8`、Source revision `11076591`（2026-10-02 14:45:21）
+- `client.dll` SHA-256：`D7DB25D48F1D10C5E0B0296E20ED803426EB9509DA41760DAEDA39DD35BA89B9`
 - `animationsystem.dll` SHA-256：`7B210F739C886381E6EA5697472868C11D26F02C0807094D8782C20530CCD7D3`
 - HLAE `2.192.6`；AfxHookSource2 `0.41.6`，SHA-256：`0E1378B81B5B82974EA8DD5C3E701E924D63C452927B50D64C1580F746D01F8B`
 - `Source2Client002`、`ResourceSystem013`、`VFileSystem017`

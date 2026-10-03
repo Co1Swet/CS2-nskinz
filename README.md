@@ -137,7 +137,7 @@ These examples require the DLL to be in the root of drive D. Use your actual ful
 
 Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Keep the DLL in a writable folder: the isolated panel and runtime share generated catalog/config sidecars there. Runtime diagnostics are written to `nSkinzCS2.log`; panel diagnostics to `nSkinzCS2.ui.log`.
 
-When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.7/Lyan_nskinz-v0.5.7-CS2-2000922-windows-x64.zip) contains both language options, game-version evidence, license/notices and loading instructions.
+When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.7/Lyan_nskinz-v0.5.7-CS2-2000924-windows-x64.zip) contains both language options, game-version evidence, license/notices and loading instructions.
 
 ## Workshop map and model replacement
 
@@ -168,9 +168,9 @@ For an nSkinz-generated demo, only live knife mutation is disabled to preserve t
 
 The current `v0.5.7` source/local build targets the checked baseline below. Temporary Demo can rewrite stock and already-painted firearm/glove carriers; map models/radars, knives, actions and cosmetic rendering remain acceptance items for each demo. See the [v0.5.7 release notes](docs/releases/v0.5.7.md) for the exact compatibility fix and test boundary.
 
-- Steam app build ID `25640462`
-- CS2 Client/Server `2000922`, patch `1.41.8.8`, Source revision `11064488` (2026-09-30 16:29:50)
-- `client.dll` SHA-256 `9DDF30D68B8EF66607783D418C4F74A6004CF2104572E6C630625E52C1C1202D`
+- Steam app build ID `25687242`
+- CS2 Client/Server `2000924`, patch `1.41.8.8`, Source revision `11076591` (2026-10-02 14:45:21)
+- `client.dll` SHA-256 `D7DB25D48F1D10C5E0B0296E20ED803426EB9509DA41760DAEDA39DD35BA89B9`
 - `animationsystem.dll` SHA-256 `7B210F739C886381E6EA5697472868C11D26F02C0807094D8782C20530CCD7D3`
 - HLAE `2.192.6`; AfxHookSource2 `0.41.6`, SHA-256 `0E1378B81B5B82974EA8DD5C3E701E924D63C452927B50D64C1580F746D01F8B`
 - `Source2Client002`, `ResourceSystem013` and `VFileSystem017`

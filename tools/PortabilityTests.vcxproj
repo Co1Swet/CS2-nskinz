@@ -36,6 +36,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <AdditionalDependencies Condition="'$(TestKind)'=='Renderer'">d3d11.lib;%(AdditionalDependencies)</AdditionalDependencies>

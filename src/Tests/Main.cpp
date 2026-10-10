@@ -15,6 +15,7 @@
 #include "Runtime/WeaponAppearance.hpp"
 #include "Runtime/WeaponMaterialInit.hpp"
 #include "Runtime/WorkshopMaps.hpp"
+#include "UI/StickerPreviewPlacement.generated.hpp"
 
 #include <algorithm>
 #include <array>
@@ -89,6 +90,184 @@ void Expect(bool condition, const char* message)
     {
         throw std::runtime_error(message);
     }
+}
+
+void TestStickerPreviewNativePlacement()
+{
+    using nskinzcs2::ui::sticker_preview::FindWeaponLayout;
+    using nskinzcs2::ui::sticker_preview::FindPreviewLayout;
+    using nskinzcs2::ui::sticker_preview::DefaultPreset;
+    using nskinzcs2::ui::sticker_preview::DefaultStoredOffset;
+    using nskinzcs2::ui::sticker_preview::EffectiveOffsetToPreview;
+    using nskinzcs2::ui::sticker_preview::EffectivePreset;
+    using nskinzcs2::ui::sticker_preview::HasNativePreset;
+    using nskinzcs2::ui::sticker_preview::MaterialToStoredOffset;
+    using nskinzcs2::ui::sticker_preview::NativePreset;
+    using nskinzcs2::ui::sticker_preview::OffsetToPreview;
+    using nskinzcs2::ui::sticker_preview::PreviewToOffset;
+    using nskinzcs2::ui::sticker_preview::PreviewToEffectiveOffset;
+    using nskinzcs2::ui::sticker_preview::SurfaceForSlot;
+    using nskinzcs2::ui::sticker_preview::StoredToMaterialOffset;
+    using nskinzcs2::ui::sticker_preview::kPreviewLayouts;
+    using nskinzcs2::ui::sticker_preview::kSurfaceTriangles;
+    using nskinzcs2::ui::sticker_preview::kWeaponLayouts;
+
+    Expect(std::fabs(nskinzcs2::model::NormalizeStickerOffset(0.901f) - 0.901f) <= 0.00001f,
+        "sticker offsets outside the material editor slider range must not be truncated");
+    Expect(nskinzcs2::model::NormalizeStickerOffset(
+        std::numeric_limits<float>::infinity()) == 0.0f,
+        "non-finite sticker offsets must still be rejected");
+
+    Expect(kWeaponLayouts.size() == 68,
+        "every supported firearm must have distinct legacy and HD sticker placement data");
+    Expect(kPreviewLayouts.size() == kWeaponLayouts.size(),
+        "every supported firearm must have model-calibrated preview anchors");
+    for (std::size_t index = 0; index < kWeaponLayouts.size(); ++index)
+    {
+        const auto& layout = kWeaponLayouts[index];
+        Expect(FindWeaponLayout(layout.definition, layout.legacy_model) == &layout,
+            "variant-specific sticker layout lookup must be stable");
+        const auto* preview = FindPreviewLayout(layout.definition, layout.legacy_model);
+        Expect(preview == &kPreviewLayouts[index] && preview->definition == layout.definition,
+            "preview calibration must stay aligned with the native weapon table");
+        if (index > 0)
+        {
+            const auto& previous = kWeaponLayouts[index - 1];
+            Expect(previous.definition < layout.definition ||
+                (previous.definition == layout.definition && previous.legacy_model && !layout.legacy_model),
+                "native sticker layouts must remain sorted by weapon and mesh variant");
+        }
+        for (std::size_t slot_index = 0; slot_index < layout.slots.size(); ++slot_index)
+        {
+            const auto& slot = layout.slots[slot_index];
+            Expect(slot.offset_x >= -0.5f && slot.offset_x <= 0.5f,
+                "native sticker X must fit the CS2 material domain");
+            Expect(slot.offset_y >= -0.5f && slot.offset_y <= 0.5f,
+                "native sticker Y must fit the CS2 material domain");
+            const auto preset = DefaultPreset(layout.definition, slot_index, layout.legacy_model);
+            Expect(preset.offset_x >= -0.5f && preset.offset_x <= 0.5f &&
+                preset.offset_y >= -0.5f && preset.offset_y <= 0.5f,
+                "every visible preview slot must have a safe absolute default");
+            const auto effective_preset = EffectivePreset(
+                layout.definition, slot_index, layout.legacy_model);
+            const auto point = EffectiveOffsetToPreview(
+                layout.definition,
+                slot_index,
+                layout.legacy_model,
+                effective_preset.offset_x,
+                effective_preset.offset_y);
+            Expect(point.x >= 0.0f && point.x <= 1.0f && point.y >= 0.0f && point.y <= 1.0f,
+                "calibrated preset anchors must stay inside the weapon preview bounds");
+            const auto default_stored = DefaultStoredOffset(
+                layout.definition, slot_index, layout.legacy_model);
+            const auto default_effective = StoredToMaterialOffset(
+                layout.definition,
+                slot_index,
+                default_stored.x,
+                default_stored.y,
+                layout.legacy_model);
+            Expect(std::fabs(default_effective.x - effective_preset.offset_x) <= 0.00001f &&
+                std::fabs(default_effective.y - effective_preset.offset_y) <= 0.00001f,
+                "stored sticker deltas plus the material base must recover the preview preset");
+            if (HasNativePreset(layout.definition, slot_index, layout.legacy_model) ||
+                nskinzcs2::model::ResolveStickerAnchor(
+                    layout.definition, slot_index, layout.legacy_model).BorrowsAnotherSlot())
+            {
+                Expect(std::fabs(default_stored.x) <= 0.00001f &&
+                    std::fabs(default_stored.y) <= 0.00001f,
+                    "native sticker slots must serialize a zero default delta");
+            }
+
+            const auto surface = SurfaceForSlot(layout, slot_index);
+            if (surface.triangle_count == 0)
+            {
+                continue;
+            }
+            const auto& probe_triangle = kSurfaceTriangles[surface.first_triangle];
+            const nskinzcs2::ui::sticker_preview::PreviewPoint probe_effective {
+                (probe_triangle.offset[0].x + probe_triangle.offset[1].x +
+                    probe_triangle.offset[2].x) / 3.0f,
+                (probe_triangle.offset[0].y + probe_triangle.offset[1].y +
+                    probe_triangle.offset[2].y) / 3.0f,
+            };
+            const auto expected_stored = MaterialToStoredOffset(
+                layout.definition,
+                slot_index,
+                probe_effective.x,
+                probe_effective.y,
+                layout.legacy_model);
+            const auto probe_point = EffectiveOffsetToPreview(
+                layout.definition,
+                slot_index,
+                layout.legacy_model,
+                probe_effective.x,
+                probe_effective.y);
+            const auto probe_material_round_trip = PreviewToEffectiveOffset(
+                layout.definition,
+                slot_index,
+                layout.legacy_model,
+                probe_point.x,
+                probe_point.y,
+                &probe_effective);
+            const auto probe_stored_round_trip = MaterialToStoredOffset(
+                layout.definition,
+                slot_index,
+                probe_material_round_trip.x,
+                probe_material_round_trip.y,
+                layout.legacy_model);
+            if (std::fabs(probe_stored_round_trip.x - expected_stored.x) > 0.00002f ||
+                std::fabs(probe_stored_round_trip.y - expected_stored.y) > 0.00002f)
+            {
+                std::ostringstream issue;
+                issue << "sticker drag inverse mismatch: definition=" << layout.definition
+                    << " legacy=" << layout.legacy_model << " slot=" << slot_index
+                    << " expected=" << expected_stored.x << ',' << expected_stored.y
+                    << " actual=" << probe_stored_round_trip.x << ',' << probe_stored_round_trip.y;
+                throw std::runtime_error(issue.str());
+            }
+        }
+    }
+
+    const auto ak_slot_one = NativePreset(7, 0);
+    Expect(std::fabs(ak_slot_one.offset_x - 0.154f) <= 0.00001f,
+        "legacy AK-47 slot one must use its own StickerMarkup X");
+    Expect(std::fabs(ak_slot_one.offset_y + 0.438f) <= 0.00001f,
+        "legacy AK-47 slot one must use its own StickerMarkup Y");
+    const auto ak_hd_slot_one = NativePreset(7, 0, false);
+    Expect(std::fabs(ak_hd_slot_one.offset_x - 0.148f) <= 0.00001f &&
+        std::fabs(ak_hd_slot_one.offset_y + 0.434f) <= 0.00001f,
+        "HD AK-47 slot one must remain independent from the legacy mesh");
+    const auto ak_stored_default = DefaultStoredOffset(7, 0);
+    Expect(std::fabs(ak_stored_default.x) <= 0.00001f &&
+        std::fabs(ak_stored_default.y) <= 0.00001f,
+        "AK-47 slot one must store zero delta at its native material position");
+    const auto preview_point = OffsetToPreview(7, 0, ak_slot_one.offset_x, ak_slot_one.offset_y);
+    const auto round_trip = PreviewToOffset(7, 0, preview_point.x, preview_point.y);
+    Expect(std::fabs(round_trip.x - ak_slot_one.offset_x) <= 0.00001f &&
+        std::fabs(round_trip.y - ak_slot_one.offset_y) <= 0.00001f,
+        "preview dragging must invert the exact effective material-offset projection");
+    const auto ak_right_effective = StoredToMaterialOffset(7, 0, 0.05f, 0.0f);
+    const auto ak_down_effective = StoredToMaterialOffset(7, 0, 0.0f, 0.02f);
+    const auto ak_right = OffsetToPreview(7, 0, ak_right_effective.x, ak_right_effective.y);
+    const auto ak_down = OffsetToPreview(7, 0, ak_down_effective.x, ak_down_effective.y);
+    Expect(ak_right.x > preview_point.x,
+        "positive AK offset X must move toward the stock/right in the muzzle-left VMDL projection");
+    Expect(ak_down.y > preview_point.y,
+        "positive AK offset Y must move downward in the VMDL projection");
+    const auto missing = NativePreset(9999, 0);
+    Expect(missing.offset_x == 0.0f && missing.offset_y == 0.0f,
+        "unknown weapons must use a safe zero placement fallback");
+    Expect(!HasNativePreset(7, 4), "AK-47 material data must not pretend that its zero-scale fifth slot is native");
+    const auto ak_slot_five = EffectivePreset(7, 4, true);
+    Expect(std::fabs(ak_slot_five.offset_x - 0.19381461f) <= 0.00001f &&
+        std::fabs(ak_slot_five.offset_y + 0.39418539f) <= 0.00001f &&
+        std::fabs(ak_slot_five.authored_scale - 15.349997f) <= 0.00001f,
+        "AK-47 slot five must borrow slot two's authored home and scale");
+    const auto ak_fifth_anchor = nskinzcs2::model::ResolveStickerAnchor(7, 4, true);
+    Expect(ak_fifth_anchor.schema == 1 &&
+        std::fabs(ak_fifth_anchor.offset_x - 0.12881461f) <= 0.00001f &&
+        std::fabs(ak_fifth_anchor.offset_y - 0.03781461f) <= 0.00001f,
+        "legacy AK-47 slot five must serialize its measured borrowed anchor");
 }
 
 void TestCatalogStoreRoundTrip()
@@ -898,6 +1077,9 @@ void TestConfigRoundTrip()
     profile.custom_name = "movie prop";
     profile.stickers[0].kit_id = 3;
     profile.stickers[0].rotation = 90.0f;
+    profile.stickers[0].custom_position = true;
+    profile.stickers[0].offset_x = 0.175f;
+    profile.stickers[0].offset_y = -0.225f;
     document.profiles.push_back(profile);
     nskinzcs2::model::KnifeProfile knife_profile;
     knife_profile.explicit_vanilla_finish = true;
@@ -933,10 +1115,15 @@ void TestConfigRoundTrip()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 7, "config should round-trip version 7");
+    Expect(loaded.version == 9, "config should round-trip version 9");
     Expect(loaded.profiles.size() == 1, "config should contain one profile");
     Expect(loaded.profiles[0].name == "AK test", "profile name should round-trip");
     Expect(loaded.profiles[0].stickers[0].kit_id == 3, "sticker should round-trip");
+    Expect(loaded.profiles[0].stickers[0].custom_position, "sticker custom-position intent should round-trip");
+    Expect(std::fabs(loaded.profiles[0].stickers[0].offset_x - 0.175f) <= 0.00001f,
+        "sticker X offset should round-trip");
+    Expect(std::fabs(loaded.profiles[0].stickers[0].offset_y + 0.225f) <= 0.00001f,
+        "sticker Y offset should round-trip");
     Expect(loaded.profiles[0].explicit_vanilla_finish, "weapon vanilla intent should round-trip");
     Expect(loaded.knife_profiles[0].explicit_vanilla_finish, "knife vanilla intent should round-trip");
     Expect(loaded.glove_profiles[0].explicit_vanilla_finish, "glove vanilla intent should round-trip");
@@ -982,6 +1169,57 @@ void TestConfigRoundTrip()
     fs::remove(temp_path);
 
     {
+        std::ofstream legacy_sticker_stream(temp_path, std::ios::trunc);
+        legacy_sticker_stream << R"({
+            "version": 7,
+            "profiles": [{
+                "name": "AK legacy absolute sticker offset",
+                "base_item": 7,
+                "stickers": [{
+                    "kit_id": 3,
+                    "custom_position": true,
+                    "offset_x": 0.168,
+                    "offset_y": -0.444
+                }]
+            }]
+        })";
+    }
+    const auto migrated_sticker = nskinzcs2::ConfigStore::Load(temp_path);
+    Expect(migrated_sticker.version == 9, "v7 sticker config should migrate to version 9");
+    Expect(std::fabs(migrated_sticker.profiles[0].stickers[0].offset_x - 0.014f) <= 0.00001f,
+        "v7 absolute sticker X must migrate to a per-slot delta");
+    Expect(std::fabs(migrated_sticker.profiles[0].stickers[0].offset_y + 0.006f) <= 0.00001f,
+        "v7 absolute sticker Y must migrate to a per-slot delta");
+    fs::remove(temp_path);
+
+    {
+        std::ofstream version_eight_sticker_stream(temp_path, std::ios::trunc);
+        version_eight_sticker_stream << R"({
+            "version": 8,
+            "profiles": [{
+                "name": "AK synthesized fifth slot",
+                "base_item": 7,
+                "stickers": [{}, {}, {}, {}, {
+                    "kit_id": 76,
+                    "custom_position": true,
+                    "offset_x": 0.0229345,
+                    "offset_y": -0.352704
+                }]
+            }]
+        })";
+    }
+    const auto migrated_fifth_sticker = nskinzcs2::ConfigStore::Load(temp_path);
+    Expect(migrated_fifth_sticker.version == 9,
+        "v8 synthesized fifth sticker config should migrate to version 9");
+    Expect(std::fabs(
+        migrated_fifth_sticker.profiles[0].stickers[4].offset_x + 0.17088011f) <= 0.00002f,
+        "v8 AK fifth-slot X must preserve its effective position relative to the borrowed home");
+    Expect(std::fabs(
+        migrated_fifth_sticker.profiles[0].stickers[4].offset_y - 0.04148139f) <= 0.00002f,
+        "v8 AK fifth-slot Y must preserve its effective position relative to the borrowed home");
+    fs::remove(temp_path);
+
+    {
         std::ofstream legacy_stream(temp_path, std::ios::trunc);
         legacy_stream << R"({
             "version": 6,
@@ -995,7 +1233,7 @@ void TestConfigRoundTrip()
         })";
     }
     const auto migrated = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(migrated.version == 7, "v6 radar config should migrate to version 7");
+    Expect(migrated.version == 9, "v6 radar config should migrate to version 9");
     Expect(
         migrated.map_remap.radar_black_tolerance == 12 &&
             migrated.map_remap.radar_dark_detail_radius == 12,
@@ -1469,30 +1707,72 @@ void TestWorkshopMapDiscovery()
         }
         if (map_name == "de_mirage_water")
         {
-            nskinzcs2::runtime::RadarAlphaMaskSettings no_dark_recovery;
-            no_dark_recovery.dark_detail_radius = 0;
-            nskinzcs2::runtime::RadarAlphaOverlay no_dark_recovery_overlay;
-            const auto no_dark_recovery_outcome =
+            Expect(
+                map_overlay.used_map_reference_mask,
+                "Mirage Water should use its embedded audited alpha reference");
+            Expect(
+                map_overlay.width == 720 && map_overlay.height == 720 &&
+                    map_overlay.visible_pixels == 219890 &&
+                    map_overlay.transparent_pixels == 298510 &&
+                    map_overlay.softened_edge_pixels == 44755 &&
+                    map_overlay.recovered_detail_pixels == 0,
+                "Mirage Water should exactly preserve the approved 720x720 reference alpha coverage");
+
+            nskinzcs2::runtime::RadarAlphaMaskSettings low_recovery;
+            low_recovery.dark_detail_radius = 4;
+            nskinzcs2::runtime::RadarAlphaOverlay low_recovery_overlay;
+            const auto low_recovery_outcome =
                 nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
                     radar->virtual_path,
                     radar->bytes,
-                    no_dark_recovery_overlay,
+                    low_recovery_overlay,
                     radar_diagnostic,
-                    no_dark_recovery);
+                    low_recovery);
+            nskinzcs2::runtime::RadarAlphaMaskSettings maximum_recovery;
+            maximum_recovery.dark_detail_radius = 64;
+            nskinzcs2::runtime::RadarAlphaOverlay maximum_recovery_overlay;
+            const auto maximum_recovery_outcome =
+                nskinzcs2::runtime::BuildRadarAlphaOverlayFromVtex(
+                    radar->virtual_path,
+                    radar->bytes,
+                    maximum_recovery_overlay,
+                    radar_diagnostic,
+                    maximum_recovery);
             Expect(
-                no_dark_recovery_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
-                "Mirage Water should support disabling its map-specific dark-road recovery");
-            WriteRadarPreviewIfRequested(
-                "de_mirage_water-no-dark-recovery",
-                no_dark_recovery_overlay);
-            std::wcout << L"generic_radar_map=de_mirage_water road_recovery visible="
+                low_recovery_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated &&
+                    maximum_recovery_outcome == nskinzcs2::runtime::RadarAlphaFixOutcome::Generated,
+                "Mirage Water should generate its reference overlay at every legacy recovery setting");
+            Expect(
+                low_recovery_overlay.used_map_reference_mask &&
+                    maximum_recovery_overlay.used_map_reference_mask &&
+                    low_recovery_overlay.applied_dark_detail_radius == 0 &&
+                    maximum_recovery_overlay.applied_dark_detail_radius == 0 &&
+                    low_recovery_overlay.visible_pixels == map_overlay.visible_pixels &&
+                    maximum_recovery_overlay.visible_pixels == map_overlay.visible_pixels &&
+                    low_recovery_overlay.transparent_pixels == map_overlay.transparent_pixels &&
+                    maximum_recovery_overlay.transparent_pixels == map_overlay.transparent_pixels &&
+                    low_recovery_overlay.virtual_path == map_overlay.virtual_path &&
+                    maximum_recovery_overlay.virtual_path == map_overlay.virtual_path,
+                "Mirage Water should ignore heuristic recovery radii and remain pinned to the approved reference");
+            std::wcout << L"generic_radar_map=de_mirage_water reference_mask=1 visible="
                        << map_overlay.visible_pixels
-                       << L" no_recovery_visible=" << no_dark_recovery_overlay.visible_pixels
-                       << L" recovered=" << map_overlay.recovered_detail_pixels << L'\n';
+                       << L" transparent=" << map_overlay.transparent_pixels
+                       << L" antialiased_edge=" << map_overlay.softened_edge_pixels << L'\n';
+            auto steamapps = entry->item_directory;
+            for (int level = 0; level < 4; ++level)
+            {
+                steamapps = steamapps.parent_path();
+            }
+            const auto cs2_install_root = steamapps / L"common/Counter-Strike Global Offensive";
             Expect(
-                map_overlay.recovered_detail_pixels >= 50000 &&
-                    map_overlay.visible_pixels >= no_dark_recovery_overlay.visible_pixels + 45000,
-                "Mirage Water should restore its wide bounded roads without retaining the outside matte");
+                nskinzcs2::runtime::CompileRadarOverlayWithCs2(
+                    cs2_install_root,
+                    map_overlay,
+                    radar_diagnostic),
+                "Mirage Water reference-mask PNG should compile through CS2's native resourcecompiler");
+            Expect(
+                map_overlay.vtex_bytes.size() >= 64,
+                "Mirage Water reference-mask native VTEX should not be empty");
         }
         if (map_name == "de_ancient_night")
         {
@@ -1808,7 +2088,7 @@ void TestKeychainConfigAndMatching()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "keychain config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 7, "keychain config should round-trip version 7");
+    Expect(loaded.version == 9, "keychain config should round-trip version 9");
     const auto* ak_match = nskinzcs2::ConfigStore::FindMatchingKeychainProfile(loaded, 10, 7);
     Expect(ak_match != nullptr, "keychain profile lookup should find the configured weapon binding");
     Expect(ak_match->name == "AK Charm New", "duplicate keychain bindings should keep the last entry");
@@ -1872,7 +2152,7 @@ void TestGloveConfigAndMatching()
     Expect(nskinzcs2::ConfigStore::Save(temp_path, document), "glove config save should succeed");
     const auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
 
-    Expect(loaded.version == 7, "glove config should round-trip version 7");
+    Expect(loaded.version == 9, "glove config should round-trip version 9");
     Expect(!loaded.glove_profiles.empty(), "glove config should contain glove profiles");
     Expect(loaded.glove_profiles[0].mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish, "glove mode should round-trip");
     Expect(loaded.glove_profiles[0].model_definition == 5030, "glove model should round-trip");
@@ -1908,7 +2188,7 @@ void TestKnifeProfileConfigMigration()
     }
 
     auto loaded = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(loaded.version == 7, "legacy knife config should migrate to version 7");
+    Expect(loaded.version == 9, "legacy knife config should migrate to version 9");
     Expect(loaded.profiles.size() == 1, "legacy knife entries should be removed from weapon profiles");
     Expect(loaded.profiles[0].base_item == 7, "non-knife weapon entries should remain after migration");
     Expect(
@@ -1940,7 +2220,7 @@ void TestKnifeProfileConfigMigration()
     }
 
     loaded = nskinzcs2::ConfigStore::Load(temp_path);
-    Expect(loaded.version == 7, "explicit knife config should normalize to version 7");
+    Expect(loaded.version == 9, "explicit knife config should normalize to version 9");
     const auto* explicit_knife = nskinzcs2::ConfigStore::FindMatchingKnifeProfile(loaded, 20);
     Expect(explicit_knife != nullptr, "explicit knife profile should remain available");
     Expect(explicit_knife->name == "Explicit Knife", "explicit knife_profiles entry should beat legacy knife profiles");
@@ -5319,6 +5599,30 @@ void TestBuildWeaponRefreshAttributes()
 
     {
         nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        profile.stickers[0].kit_id = 76;
+        profile.stickers[0].wear = 0.2f;
+        profile.stickers[0].scale = 1.25f;
+        profile.stickers[0].rotation = 42.0f;
+        profile.stickers[0].custom_position = true;
+        profile.stickers[0].offset_x = 0.175f;
+        profile.stickers[0].offset_y = -0.225f;
+
+        const auto attributes = nskinzcs2::runtime::BuildWeaponRefreshAttributes(profile);
+        Expect(attributes.size() == 7, "custom sticker placement should emit the complete seven-attribute block");
+        Expect(ContainsRefreshAttribute(attributes, 113, std::bit_cast<float>(std::uint32_t {76})),
+            "custom placement should preserve the sticker kit integer union bits");
+        Expect(ContainsRefreshAttribute(attributes, 114, 0.2f), "custom placement should include sticker wear");
+        Expect(ContainsRefreshAttribute(attributes, 115, 1.25f), "custom placement should include sticker scale");
+        Expect(ContainsRefreshAttribute(attributes, 116, 42.0f), "custom placement should include sticker rotation");
+        Expect(ContainsRefreshAttribute(attributes, 278, 0.175f), "custom placement should include X offset");
+        Expect(ContainsRefreshAttribute(attributes, 279, -0.225f), "custom placement should include Y offset");
+        Expect(ContainsRefreshAttribute(attributes, 290, std::bit_cast<float>(std::uint32_t {0})),
+            "custom placement should include schema zero using integer union bits");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
         profile.base_item = 9;
         profile.paint_kit = 344;
         profile.seed = 0;
@@ -5398,6 +5702,24 @@ void TestBuildMissingWeaponAttributeDefinitionIndices()
         Expect(!ContainsDefinitionIndex(missing, 114), "missing attribute set should not request sticker wear");
         Expect(!ContainsDefinitionIndex(missing, 115), "missing attribute set should not request sticker scale");
         Expect(!ContainsDefinitionIndex(missing, 116), "missing attribute set should not request sticker rotation");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        profile.stickers[0].kit_id = 3;
+        profile.stickers[0].custom_position = true;
+        profile.stickers[0].offset_x = 0.1f;
+        profile.stickers[0].offset_y = -0.1f;
+
+        const auto missing =
+            nskinzcs2::runtime::BuildMissingWeaponAttributeDefinitionIndices(profile, {113, 114});
+        Expect(missing.size() == 5, "custom placement should request every absent transform, offset and schema field");
+        for (const auto definition : std::array<std::uint16_t, 5> {115, 116, 278, 279, 290})
+        {
+            Expect(ContainsDefinitionIndex(missing, definition),
+                "custom placement missing-field calculation should include the full modern field set");
+        }
     }
 
     {
@@ -5912,6 +6234,52 @@ void TestWeaponAppearanceModule()
 
     {
         nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        profile.stickers[0].kit_id = 76;
+        profile.stickers[0].wear = 0.2f;
+        profile.stickers[0].scale = 1.25f;
+        profile.stickers[0].rotation = 42.0f;
+        profile.stickers[0].custom_position = true;
+        profile.stickers[0].offset_x = 0.175f;
+        profile.stickers[0].offset_y = -0.225f;
+
+        const auto payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(payload.temporary_attributes.size() == 7,
+            "custom sticker-only appearance payload should contain seven fields");
+        Expect(payload.needs_refresh, "custom sticker placement should request a visual refresh");
+        Expect(ContainsRefreshAttribute(payload.temporary_attributes, 278, 0.175f),
+            "custom sticker payload should carry X offset");
+        Expect(ContainsRefreshAttribute(payload.temporary_attributes, 279, -0.225f),
+            "custom sticker payload should carry Y offset");
+        Expect(ContainsRefreshAttribute(payload.temporary_attributes, 290,
+            std::bit_cast<float>(std::uint32_t {0})),
+            "custom sticker payload should carry schema zero");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
+        profile.base_item = 7;
+        profile.stickers[4].kit_id = 76;
+        profile.stickers[4].custom_position = false;
+        profile.stickers[4].offset_x = 0.01f;
+        profile.stickers[4].offset_y = -0.02f;
+
+        const auto payload = BuildWeaponAppearancePayload(profile, 123u);
+        Expect(ContainsRefreshAttribute(payload.temporary_attributes, 286, 0.13881461f) &&
+            ContainsRefreshAttribute(payload.temporary_attributes, 287, 0.01781461f),
+            "legacy AK fifth sticker must add its borrowed-home shift to the live offsets");
+        Expect(ContainsRefreshAttribute(payload.temporary_attributes, 294,
+            std::bit_cast<float>(std::uint32_t {1})),
+            "legacy AK fifth sticker must select authored sticker home one");
+
+        const auto modern_payload = BuildWeaponAppearancePayload(profile, 123u, nullptr, false);
+        Expect(ContainsRefreshAttribute(modern_payload.temporary_attributes, 286, 0.15699425f) &&
+            ContainsRefreshAttribute(modern_payload.temporary_attributes, 287, 0.008994253f),
+            "modern AK fifth sticker must use the modern-mesh anchor calibration");
+    }
+
+    {
+        nskinzcs2::model::CosmeticProfile profile;
         const auto payload = BuildWeaponAppearancePayload(profile, 123u);
         Expect(payload.writes_custom_name, "default weapon names should be written");
         Expect(payload.custom_name == "nSkinz CS2", "an empty weapon name should resolve to the shared default name");
@@ -6219,6 +6587,7 @@ int RunAllTests()
         RunNamedTest("TestCatalogStoreRoundTrip", TestCatalogStoreRoundTrip);
         RunNamedTest("TestInstalledCompatibilityIfRequested", TestInstalledCompatibilityIfRequested);
         RunNamedTest("TestConfigRoundTrip", TestConfigRoundTrip);
+        RunNamedTest("TestStickerPreviewNativePlacement", TestStickerPreviewNativePlacement);
         RunNamedTest("TestWorkshopMapDiscovery", TestWorkshopMapDiscovery);
         RunNamedTest("TestCosmeticWearPolicy", TestCosmeticWearPolicy);
         RunNamedTest("TestProfileMatching", TestProfileMatching);

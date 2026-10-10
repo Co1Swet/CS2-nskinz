@@ -43,6 +43,15 @@ inline int NormalizeCosmeticSeed(const int seed) noexcept
     return std::clamp(seed, kMinimumCosmeticSeed, kMaximumCosmeticSeed);
 }
 
+inline float NormalizeStickerOffset(const float offset) noexcept
+{
+    // CS2 stores this as an unrestricted float. The +/-0.5 values declared by
+    // g_vStickerNOffset are Material Editor slider limits, not renderer limits;
+    // the actual legal placement boundary is the weapon's StickerMarkup
+    // surface, which can extend beyond that square.
+    return std::isfinite(offset) ? offset : 0.0f;
+}
+
 inline bool CosmeticWearMatchesExactly(const float actual, const float expected) noexcept
 {
     return std::bit_cast<std::uint32_t>(actual) == std::bit_cast<std::uint32_t>(expected);
@@ -54,6 +63,12 @@ struct StickerProfile
     float wear = 0.0000001f;
     float scale = 1.0f;
     float rotation = 0.0f;
+    // False preserves the demo's exact preset/free-placement data. Custom
+    // placement serializes CS2's modern per-slot offset deltas and schema.
+    // A zero delta keeps a native slot at its material-authored home.
+    bool custom_position = false;
+    float offset_x = 0.0f;
+    float offset_y = 0.0f;
 };
 
 struct CosmeticProfile
@@ -170,7 +185,7 @@ struct MapRemapProfile
 
 struct ConfigDocument
 {
-    int version = 7;
+    int version = 9;
     std::vector<CosmeticProfile> profiles;
     std::vector<KnifeProfile> knife_profiles;
     std::vector<GloveProfile> glove_profiles;

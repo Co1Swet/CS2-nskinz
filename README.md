@@ -21,15 +21,25 @@ Map-resource diagnostics were assisted by [Source 2 Viewer](https://s2v.app) ([V
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.8/Lyan_nskinz-v0.5.8-EN.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.8/Lyan_nskinz-v0.5.8-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.5.8"><img src="https://img.shields.io/badge/Release-v0.5.8-8250df?style=for-the-badge" alt="v0.5.8 release notes"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.0-beta/Lyan_nskinz-v0.6.0-beta-EN.dll"><img src="https://img.shields.io/badge/Download-English%20DLL-2ea043?style=for-the-badge" alt="Download English DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.0-beta/Lyan_nskinz-v0.6.0-beta-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="Download Chinese DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.6.0-beta"><img src="https://img.shields.io/badge/Beta-v0.6.0--beta-8250df?style=for-the-badge" alt="v0.6.0-beta release notes"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/Report%20an%20issue-f85149?style=for-the-badge" alt="Report an issue"></a>
 </p>
 
 > **Safety first:** nSkinzCS2 is intended only for offline demo playback started through HLAE with `-insecure`. Never load it on VAC-protected or online servers. The author does not guarantee account safety for use outside this scope.
 
-## What's new in v0.5.8
+## What's new in v0.6.0-beta
+
+- Added opt-in custom placement for all five firearm sticker slots while retaining preset placement as the default. Offset X/Y are stored as CS2 per-slot deltas.
+- Added a draggable live-preview canvas with the exact muzzle-left silhouette of all 34 supported firearm definitions. Projection and serialization share current VMDL/VMAT-derived transforms.
+- Updated stock CT/T glove rendering for CS2 `2000930` with byte-verified native refresh, HUD consumer and entity-root evidence.
+- Pinned `de_mirage_water` to the approved embedded `720×720` alpha mask. Its legal transparent voids and antialiased edges are reproduced exactly while RGB remains sourced from the installed Workshop texture.
+- Temporary Demo writes arbitrary missing legacy/modern sticker fields without hard-coded vector lengths and reparses every requested component before playback.
+
+See the [bilingual v0.6.0-beta release notes](docs/releases/v0.6.0-beta.md) for usage, validation and beta limitations.
+
+## What's new in v0.5.8 (previous stable)
 
 - Temporary Demo can now create a requested firearm sticker slot that is missing from the source demo, writing the complete ID/wear/scale/rotation group at the weapon's native preset position.
 - Existing stickers still replace only their kit ID and retain the demo's wear, scale, rotation and CS2 free-placement data.
@@ -104,7 +114,7 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Feature matrix
 
-| Area | Supported in v0.5.8 | Notes |
+| Area | Supported in v0.6.0-beta | Notes |
 | --- | --- | --- |
 | Weapons | Compatible finish list, seed, wear, quality, name tag and sticker replacement/creation | Temporary Demo can update stock and already-painted weapons. Existing stickers keep their transform/free placement; a requested missing logical slot is created at the weapon's native preset position. Exact weapon/paint checks still protect runtime writes and configs. |
 | Knives | Finish, seed and wear; experimental finish + model replacement | Finish-only hides model selection. Model/deploy/inspect replacement is active, but first-deploy, dropped-knife and HUD handoffs remain experimental. |
@@ -117,27 +127,27 @@ nSkinzCS2 is a Windows x64 DLL that edits the watched player's cosmetic appearan
 
 ## Quick start
 
-v0.5.8 embeds precompiled UI shaders, the independent demo rewriter, and retains `/MT`. No additional runtime installation is needed beyond Windows 10/11 x64, CS2 and HLAE. See [single-DLL loading and diagnostics](docs/portable-loading.md) for `LoadLibrary failed` troubleshooting.
+v0.6.0-beta embeds precompiled UI shaders, the independent demo rewriter, the audited Mirage Water radar mask, and retains `/MT`. No additional runtime installation is needed beyond Windows 10/11 x64, CS2 and HLAE. See [single-DLL loading and diagnostics](docs/portable-loading.md) for `LoadLibrary failed` troubleshooting.
 
 1. Start CS2 through HLAE with `-insecure`, then open an offline demo.
 2. Download one of the two Release DLLs. Release binaries use the static MSVC runtime (`/MT`), so no Visual C++ Redistributable, Python, SDK or compiler is required.
 3. In HLAE, load the DLL:
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.5.8-EN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.6.0-beta-EN.dll"
 ```
 
 For the Simplified Chinese UI:
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.5.8-zh-CN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.6.0-beta-zh-CN.dll"
 ```
 
 These examples require the DLL to be in the root of drive D. Use your actual full path. Paths without spaces need no quotes; if there are spaces, use exactly one pair of ASCII quotes, e.g. `mirv_loadlibrary "D:\My Tools\nSkinzCS2.dll"`. Never double-wrap the path or use typographic quotes.
 
 Press `Insert` to show the panel, choose a watched-player XUID and cosmetic profile, then press `Update`. Keep the DLL in a writable folder: the isolated panel and runtime share generated catalog/config sidecars there. Runtime diagnostics are written to `nSkinzCS2.log`; panel diagnostics to `nSkinzCS2.ui.log`.
 
-When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.5.8/Lyan_nskinz-v0.5.8-CS2-2000924-windows-x64.zip) contains both language options, game-version evidence, license/notices and loading instructions.
+When upgrading, restart HLAE/CS2 and load **only one** language DLL. Back up your existing config; do not inject the new DLL alongside an already loaded old version. The [Windows x64 ZIP](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.0-beta/Lyan_nskinz-v0.6.0-beta-CS2-2000930-windows-x64.zip) contains both language options, game-version evidence, license/notices and loading instructions.
 
 ## Workshop map and model replacement
 
@@ -166,12 +176,12 @@ For an nSkinz-generated demo, only live knife mutation is disabled to preserve t
 
 ## Compatibility baseline
 
-The current `v0.5.8` source/local build targets the checked baseline below. Temporary Demo can rewrite stock and already-painted firearm/glove carriers and create missing firearm sticker slots at native preset positions; map models/radars, knives, actions and cosmetic rendering remain acceptance items for each demo. See the [v0.5.8 release notes](docs/releases/v0.5.8.md) for the exact scope and test boundary.
+The current `v0.6.0-beta` source/local build targets the checked baseline below. Temporary Demo can rewrite stock and already-painted firearm/glove carriers, create missing sticker slots and materialize modern placement fields; map models/radars, knives, actions and cosmetic rendering remain acceptance items for each demo. See the [v0.6.0-beta release notes](docs/releases/v0.6.0-beta.md) for the exact scope and test boundary.
 
-- Steam app build ID `25687242`
-- CS2 Client/Server `2000924`, patch `1.41.8.8`, Source revision `11076591` (2026-10-02 14:45:21)
-- `client.dll` SHA-256 `D7DB25D48F1D10C5E0B0296E20ED803426EB9509DA41760DAEDA39DD35BA89B9`
-- `animationsystem.dll` SHA-256 `7B210F739C886381E6EA5697472868C11D26F02C0807094D8782C20530CCD7D3`
+- Steam app build ID `25815307`
+- CS2 Client/Server `2000930`, patch `1.41.9.0`, Source revision `11106093` (2026-10-08 14:54:05)
+- `client.dll` SHA-256 `44AF2AA0D2C64F90D273444CB393B8B679094F0B02136DBDB89D4EC82A560008`
+- `animationsystem.dll` SHA-256 `CA7697BB758200F35C9B3693820135BADF6BD1A63109E0CD775877920D087F03`
 - HLAE `2.192.6`; AfxHookSource2 `0.41.6`, SHA-256 `0E1378B81B5B82974EA8DD5C3E701E924D63C452927B50D64C1580F746D01F8B`
 - `Source2Client002`, `ResourceSystem013` and `VFileSystem017`
 
@@ -189,7 +199,7 @@ Select ReleaseZhCn | x64   # Simplified Chinese
 Build the solution
 ```
 
-Outputs are `build/Release/Lyan_nskinz v0.5.8 EN.dll`, `build/Release/Lyan_nskinz v0.5.8 zh-CN.dll` and `build/Release/nSkinzCS2.Tests.exe`. `run-build-and-tests.cmd` builds and runs the native regression suite; `run-tests.cmd` runs the existing test binary.
+Outputs are `build/Release/Lyan_nskinz v0.6.0-beta EN.dll`, `build/Release/Lyan_nskinz v0.6.0-beta zh-CN.dll` and `build/Release/nSkinzCS2.Tests.exe`. `run-build-and-tests.cmd` builds and runs the native regression suite; `run-tests.cmd` runs the existing test binary.
 
 </details>
 
@@ -231,7 +241,7 @@ Planned work includes a more complete vanilla-material reset, broader knife mode
 
 **Why can an old knife texture remain?** Some demo items carry a compiled first-person material that the current v0.4.5 vanilla path cannot always clear; this is the documented limitation above.
 
-**Which build should I use?** Download `Lyan_nskinz-v0.5.8-EN.dll` for English or `Lyan_nskinz-v0.5.8-zh-CN.dll` for the Chinese UI and catalog names. The combined ZIP retains the compiled filenames with spaces. Both DLLs target the same CS2 compatibility baseline.
+**Which build should I use?** Download `Lyan_nskinz-v0.6.0-beta-EN.dll` for English or `Lyan_nskinz-v0.6.0-beta-zh-CN.dll` for the Chinese UI and catalog names. The combined ZIP retains the compiled filenames with spaces. Both DLLs target the same CS2 compatibility baseline.
 
 **The repository opens, but its images show broken icons.** Some networks cannot reach GitHub's raw asset host. The README already uses GitHub-relative image paths; as a temporary Windows network workaround, open `C:\Windows\System32\drivers\etc\hosts` in Notepad **as Administrator** and add these lines:
 
@@ -257,7 +267,7 @@ If nSkinzCS2 is useful to your offline demo workflow, optional support is apprec
 
 ## Acknowledgements
 
-nSkinzCS2 v0.5.8 is released under [`AGPL-3.0-only`](LICENSE). Its map-remap implementation is adapted from and audited against [MulNX_CS2](https://github.com/Co1Swet/MulNX_CS2) commit `361008b208326d9e7916ff2cd58dd57a0492c400`, with the current CS2 GameSession compatibility delta synchronized from `f2466e18e26a8fc3daf4ac7945bc45220ba95993`; it does not use MulNX's file rewriter. The complete DLL Corresponding Source is released with the binaries. Preserve [`NOTICE.md`](NOTICE.md), the AGPL license, source availability and the component notices under `third_party/` when redistributing or modifying it.
+nSkinzCS2 v0.6.0-beta is released under [`AGPL-3.0-only`](LICENSE). Its map-remap implementation is adapted from and audited against [MulNX_CS2](https://github.com/Co1Swet/MulNX_CS2) commit `361008b208326d9e7916ff2cd58dd57a0492c400`, with the current CS2 GameSession compatibility delta synchronized from `f2466e18e26a8fc3daf4ac7945bc45220ba95993`; it does not use MulNX's file rewriter. The complete DLL Corresponding Source is released with the binaries. Preserve [`NOTICE.md`](NOTICE.md), the AGPL license, source availability and the component notices under `third_party/` when redistributing or modifying it.
 
 The temporary skin-demo implementation is nSkinz code built on the vendored open-source `source2-demo` parser/writer. Its MIT/Apache-2.0 notice and source are included under `third_party/source2-demo` and documented in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 

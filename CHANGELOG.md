@@ -1,5 +1,26 @@
 # Changelog / 更新记录
 
+## v0.6.0-beta — 2026-10-10
+
+- Added opt-in CS2 free sticker placement for firearm slots. Preset mode remains the default and preserves the demo's recorded transform; custom mode writes wear, scale, rotation, per-slot offset delta X/Y and schema together.
+- 新增可选的 CS2 枪械贴纸自由位置。默认仍为预设模式并保留 Demo 已记录的变换；自定义模式会整体写入磨损、缩放、旋转、相对槽位基准的 offset 增量 X/Y 与 schema。
+- Added a draggable two-dimensional placement guide with scale/rotation feedback and throttled live synchronization to the loaded demo. The game view remains authoritative; when a source slot lacks modern placement nodes, generate a Temporary Demo once to materialize them before using live preview.
+- 新增可拖拽的二维位置参考画布，可同步显示缩放／旋转，并以节流频率把调整实时发布到当前 Demo。最终效果以游戏画面为准；若源槽位缺少现代位置节点，需先生成一次临时换肤 Demo 补齐字段，再使用实时预览。
+- The Temporary Demo rewriter now understands CS2's legacy sticker, modern offset and schema attribute families (the five exposed nSkinz slots use `113–132`, `278–287` and `290–294`), can append any absent fields without hard-coded vector sizes, and reparses every requested component for exact 32-bit verification.
+- 临时 Demo 重写器现已识别 CS2 的 legacy 贴纸、现代偏移与 schema 属性族（nSkinz 当前公开的五个槽位使用 `113–132`、`278–287` 与 `290–294`），可在不写死向量长度的情况下补齐任意缺失字段，并在输出后二次解析，对每个请求字段执行精确 32 位校验。
+- The five-slot canvas now uses the exact selected firearm silhouette for all 34 supported definitions instead of a generic weapon-family drawing. AK-47, M4A4, M4A1-S and every other model are distinct, all silhouettes face muzzle-left, and selected/configured/unused slots remain yellow/white/dim respectively.
+- 五槽位画布现已为 34 个受支持 definition 显示当前具体枪械轮廓，不再使用步枪／手枪等通用大类图。AK-47、M4A4、M4A1-S 等型号均可区分，枪口统一朝左，选中／已配置／未使用槽位仍分别为黄色／白色／暗色。
+- Fixed a second placement mismatch revealed by live CS2 validation: Econ attributes 278-287 are per-slot deltas, while the material proxy adds the weapon's `g_vStickerNOffset`. The editor had written that base as though it were an absolute Econ value, so CS2 applied it twice and pushed stickers off the previewed point. The canvas now projects `material base + stored delta`, dragging subtracts the base before serialization, and version-7 development configs migrate once to delta storage.
+- 根据 CS2 实机验证修复第二处位置错位：Econ 属性 278–287 是相对槽位基准的增量，材质代理还会叠加枪械的 `g_vStickerNOffset`。此前编辑器把该基准当成绝对 Econ 值写入，导致游戏重复叠加并把贴纸推离预览点。现在画布投影“材质基准＋存储增量”，拖拽序列化前会减去基准，并将 version 7 开发配置一次性迁移为增量。
+- Replaced the still-drifting silhouette-anchor approximation with projection data derived from the current CS2 VMDLs. Every slot converts its effective material offset to UV1 (`0.5 + offset`), locates its real model projection triangle, and uses that triangle's UV1-to-muzzle-left side-projection matrix plus the exact inverse for dragging. This fixes the previously reversed X/Y movement and the severely understated per-weapon Y rate. Zero-scale material placeholders are not reported as native presets; a missing fifth preset is sampled from a real surface triangle on that weapon.
+- 将仍会错位的轮廓锚点近似方案替换为从当前 CS2 VMDL 模型生成的真实投影数据。每个槽位现在把叠加基准后的有效材质 offset 转为 UV1（`0.5 + offset`），定位其实际模型投影三角形，并使用该三角形到枪口朝左侧投影的矩阵及精确逆矩阵处理拖拽；由此修复此前 X／Y 移动方向均相反、且不同枪型纵向倍率被严重低估的问题。缩放为 0 的材质占位不再被标为原生预设；缺失的第 5 预设会从该枪型真实表面三角形采样起点。
+- Rebased the guarded stock-glove visual refresh on CS2 Steam Build `25815307`, Client/Server `2000930`, Patch `1.41.9.0`, Source revision `11106093`. The updated native callback, HUD consumer and identity-root evidence restores the generated-demo path for default CT/T glove carriers without weakening byte-level validation.
+- 将带保护的默认手套视觉刷新迁移到 CS2 Steam Build `25815307`、Client/Server `2000930`、Patch `1.41.9.0`、Source revision `11106093`；更新原生回调、HUD 消费者和实体标识根节点证据，在不降低字节级验证强度的前提下恢复默认 CT／T 手套的生成 Demo 路径。
+- Pinned `de_mirage_water` to an embedded, audited `720×720` alpha reference instead of guessing large enclosed dark regions. Its `298,510` fully transparent pixels and `44,755` antialiased edge pixels are reproduced exactly while RGB continues to come from the installed Workshop texture; the generic dark-road radius intentionally does not alter this map.
+- `de_mirage_water` 现固定使用内嵌并核验过的 `720×720` Alpha 基准，不再猜测大面积封闭暗区。基准图的 `298,510` 个完全透明像素和 `44,755` 个抗锯齿边缘像素被精确复现，RGB 仍取自本机安装的工坊纹理；通用暗色道路恢复半径不会再改变该地图。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.6.0-beta.md).
+
 ## v0.5.8 — 2026-10-03
 
 - Temporary Demo can now create requested firearm sticker slots that are absent from the source demo. The rewriter grows the Econ dynamic-attribute vector, writes the complete ID/wear/scale/rotation record at the weapon's native preset position, preserves existing CS2 free-placement data, and reparses the output to verify every requested slot.

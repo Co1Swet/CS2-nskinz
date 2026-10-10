@@ -24,7 +24,8 @@ struct RadarAlphaMaskSettings
     // Higher values remove more grid/matte but can hide very dark roads.
     int black_tolerance = 12;
     // Restores a dark run only when retained map pixels bound it on opposite
-    // sides. The maximum of 32 pixels can recover wider dark road sections;
+    // sides. The generic control accepts up to 64; known wide-road maps may
+    // calibrate that input up to a 96-pixel internal search radius.
     // unbounded exterior matte remains excluded.
     int dark_detail_radius = 12;
     // Alpha applied to pixels classified as the baked background. Zero gives
@@ -49,12 +50,19 @@ struct RadarAlphaOverlay
     std::size_t transparent_pixels = 0;
     std::size_t softened_edge_pixels = 0;
     std::size_t recovered_detail_pixels = 0;
+    // Effective radius after map-specific calibration. This is exposed for
+    // diagnostics so a changed slider value can never be silently ignored.
+    int applied_dark_detail_radius = 0;
     // Effective cutoff after the source texture's opaque neutral matte has
     // been sampled and the user's value has been applied as a signed offset.
     int applied_black_tolerance = 0;
     int detected_neutral_mode = 0;
     std::size_t detected_neutral_pixels = 0;
     std::size_t detected_neutral_mode_pixels = 0;
+    // True when an audited map-specific alpha reference replaced heuristic
+    // matte detection. The reference is embedded in the binary, so the same
+    // mask is used on every machine and does not depend on a local file.
+    bool used_map_reference_mask = false;
 };
 
 RadarAlphaFixOutcome BuildWorkshopRadarAlphaOverlay(

@@ -1,5 +1,6 @@
 #include "Core/Config.hpp"
 #include "Core/Log.hpp"
+#include "UI/StickerPreviewPlacement.generated.hpp"
 
 #include "json.hpp"
 
@@ -232,6 +233,55 @@ void NormalizeKnifeProfiles(
 
     document.knife_profiles = DeduplicateProfilesByXuidKeepLast(merged_knife_profiles);
 }
+
+void MigrateAbsoluteStickerOffsetsToDeltas(ConfigDocument& document)
+{
+    for (auto& profile : document.profiles)
+    {
+        for (std::size_t slot = 0; slot < profile.stickers.size(); ++slot)
+        {
+            auto& sticker = profile.stickers[slot];
+            if (!sticker.custom_position)
+            {
+                continue;
+            }
+
+            // Version 7 stored effective material coordinates. Convert them
+            // to user deltas from the correct authored (or borrowed) home.
+            const auto home = nskinzcs2::ui::sticker_preview::MaterialBaseOffset(
+                profile.base_item, slot, true);
+            sticker.offset_x = NormalizeStickerOffset(sticker.offset_x - home.x);
+            sticker.offset_y = NormalizeStickerOffset(sticker.offset_y - home.y);
+        }
+    }
+}
+
+void MigrateVersionEightFifthStickerOffsets(ConfigDocument& document)
+{
+    for (auto& profile : document.profiles)
+    {
+        constexpr std::size_t slot = 4;
+        auto& sticker = profile.stickers[slot];
+        if (!sticker.custom_position)
+        {
+            continue;
+        }
+
+        const auto placement = ResolveStickerAnchor(profile.base_item, slot, true);
+        if (!placement.BorrowsAnotherSlot())
+        {
+            continue;
+        }
+
+        // Version 8 had no schema/anchor support. A synthesized fifth slot was
+        // therefore stored as an effective absolute UV coordinate. Preserve
+        // its visible position while moving to the borrowed-home delta model.
+        const auto home = nskinzcs2::ui::sticker_preview::MaterialBaseOffset(
+            profile.base_item, slot, true);
+        sticker.offset_x = NormalizeStickerOffset(sticker.offset_x - home.x);
+        sticker.offset_y = NormalizeStickerOffset(sticker.offset_y - home.y);
+    }
+}
 }
 
 static void to_json(json& j, const StickerProfile& value)
@@ -241,6 +291,9 @@ static void to_json(json& j, const StickerProfile& value)
         {"wear", value.wear},
         {"scale", value.scale},
         {"rotation", value.rotation},
+        {"custom_position", value.custom_position},
+        {"offset_x", NormalizeStickerOffset(value.offset_x)},
+        {"offset_y", NormalizeStickerOffset(value.offset_y)},
     };
 }
 
@@ -250,6 +303,9 @@ static void from_json(const json& j, StickerProfile& value)
     value.wear = j.value("wear", 0.0000001f);
     value.scale = j.value("scale", 1.0f);
     value.rotation = j.value("rotation", 0.0f);
+    value.custom_position = j.value("custom_position", false);
+    value.offset_x = NormalizeStickerOffset(j.value("offset_x", 0.0f));
+    value.offset_y = NormalizeStickerOffset(j.value("offset_y", 0.0f));
 }
 
 static void to_json(json& j, const CosmeticProfile& value)
@@ -419,7 +475,7 @@ static void from_json(const json& j, MapRemapProfile& value)
     value.enabled = j.value("enabled", false);
     value.use_source_radar = j.value("use_source_radar", true);
     value.radar_black_tolerance = std::clamp(j.value("radar_black_tolerance", 12), 0, 96);
-    value.radar_dark_detail_radius = std::clamp(j.value("radar_dark_detail_radius", 12), 0, 32);
+    value.radar_dark_detail_radius = std::clamp(j.value("radar_dark_detail_radius", 12), 0, 64);
     value.radar_background_alpha_percent =
         std::clamp(j.value("radar_background_alpha_percent", 0), 0, 100);
     value.source_map_name = j.value("source_map_name", std::string {});
@@ -439,7 +495,7 @@ static void from_json(const json& j, MapRemapProfile& value)
 static void to_json(json& j, const ConfigDocument& value)
 {
     j = json {
-        {"version", 7},
+        {"version", 9},
         {"profiles", value.profiles},
         {"knife_profiles", value.knife_profiles},
         {"glove_profiles", value.glove_profiles},
@@ -525,7 +581,15 @@ nskinzcs2::model::ConfigDocument nskinzcs2::ConfigStore::Load(const std::filesys
             parsed.map_remap.radar_overlay_root_path.clear();
             parsed.map_remap.radar_overlay_file_path.clear();
         }
-        parsed.version = 7;
+        if (loaded_version <= 7)
+        {
+            model::MigrateAbsoluteStickerOffsetsToDeltas(parsed);
+        }
+        else if (loaded_version == 8)
+        {
+            model::MigrateVersionEightFifthStickerOffsets(parsed);
+        }
+        parsed.version = 9;
         return parsed;
     }
     catch (const std::exception&)
@@ -543,7 +607,7 @@ bool nskinzcs2::ConfigStore::Save(const std::filesystem::path& path, const model
     }
 
     auto normalized = document;
-    normalized.version = 7;
+    normalized.version = 9;
     normalized.knife_profiles = model::DeduplicateProfilesByXuidKeepLast(normalized.knife_profiles);
     normalized.keychain_profiles =
         model::DeduplicateKeychainProfilesKeepLast(normalized.keychain_profiles);

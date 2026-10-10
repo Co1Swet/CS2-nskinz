@@ -63,14 +63,14 @@
   <PropertyGroup>
     <IntDir>$(ProjectDir)build\$(Configuration)\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\$(Configuration)\</OutDir>
-    <TargetName>Lyan_nskinz v0.5.8 EN</TargetName>
+    <TargetName>Lyan_nskinz v0.6.0-beta EN</TargetName>
     <VCToolsVersion>14.44.35207</VCToolsVersion>
     <IncludePath>$(ProjectDir)src;$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;$(ProjectDir)third_party\json;$(ProjectDir)third_party\MinHook\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseZhCn|x64'">
     <IntDir>$(ProjectDir)build\ReleaseZhCn\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\Release\</OutDir>
-    <TargetName>Lyan_nskinz v0.5.8 zh-CN</TargetName>
+    <TargetName>Lyan_nskinz v0.6.0-beta zh-CN</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -101,6 +101,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
       <PrecompiledHeader />
       <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -109,7 +110,7 @@
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;windowscodecs.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -125,6 +126,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
       <PrecompiledHeader />
       <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_EXPORTS;NSKINZCS2_UI_LANG_ZH_CN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -133,7 +135,7 @@
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;user32.lib;gdi32.lib;shell32.lib;ole32.lib;windowscodecs.lib;advapi32.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -142,6 +144,7 @@
     <ClInclude Include="src\Core\BuildConfig.hpp" />
     <ClInclude Include="src\Core\Config.hpp" />
     <ClInclude Include="src\Core\Log.hpp" />
+    <ClInclude Include="src\Core\StickerPlacement.hpp" />
     <ClInclude Include="src\Cs2\Catalog.hpp" />
     <ClInclude Include="src\Cs2\CatalogStore.hpp" />
     <ClInclude Include="src\Cs2\Compatibility.hpp" />
@@ -172,7 +175,9 @@
     <ClInclude Include="src\Runtime\WorkshopMaps.hpp" />
     <ClInclude Include="src\UI\MainWindow.hpp" />
     <ClInclude Include="src\UI\ExternalUiHost.hpp" />
+    <ClInclude Include="src\UI\StickerPreviewPlacement.generated.hpp" />
     <ClInclude Include="src\UI\UiText.hpp" />
+    <ClInclude Include="src\UI\WeaponPreviewGeometry.generated.hpp" />
     <ClInclude Include="src\UI\Shaders\ImGuiVertex.generated.hpp" />
     <ClInclude Include="src\UI\Shaders\ImGuiPixel.generated.hpp" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_dx11.h" />
@@ -212,6 +217,10 @@
     <ClCompile Include="src\Runtime\RadarNativeCompiler.cpp" />
     <ClCompile Include="src\Runtime\WorkshopMaps.cpp" />
     <ClCompile Include="src\UI\MainWindow.cpp" />
+    <ClCompile Include="src\UI\StickerPreviewPlacement.generated.cpp">
+      <Optimization>Disabled</Optimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+    </ClCompile>
     <ClCompile Include="src\UI\ExternalUiHost.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_dx11.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_win32.cpp" />
@@ -231,6 +240,7 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="src\Resources\NskinDemoRewriter.rc" />
+    <ResourceCompile Include="src\Resources\RadarReferences.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

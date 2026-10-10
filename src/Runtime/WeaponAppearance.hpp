@@ -156,7 +156,8 @@ ResolvedWeaponAppearanceBinding ResolveWeaponAppearanceBinding(const WeaponAppea
 WeaponAppearancePayload BuildWeaponAppearancePayload(
     const nskinzcs2::model::CosmeticProfile& profile,
     std::uint32_t account_id,
-    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr);
+    const nskinzcs2::model::KeychainProfile* keychain_profile = nullptr,
+    bool legacy_model = true);
 bool WeaponAppearanceNeedsIndependentHudApply(
     bool hud_entity_present,
     int hud_entity_index,

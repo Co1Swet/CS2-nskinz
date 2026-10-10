@@ -75,6 +75,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>
+      <DebugInformationFormat>OldStyle</DebugInformationFormat>
       <PrecompiledHeader />
       <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;NSKINZCS2_TESTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -83,7 +84,7 @@
       <SubSystem>Console</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;ole32.lib;windowscodecs.lib;user32.lib;advapi32.lib;psapi.lib;version.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -96,6 +97,7 @@
     <ClInclude Include="src\Cs2\GlobalResourceSwapper.hpp" />
     <ClInclude Include="src\Cs2\Runtime.hpp" />
     <ClInclude Include="src\Core\Log.hpp" />
+    <ClInclude Include="src\Core\StickerPlacement.hpp" />
     <ClInclude Include="src\Runtime\GloveAppearance.hpp" />
     <ClInclude Include="src\Runtime\DemoSkinRewrite.hpp" />
     <ClInclude Include="src\Runtime\GloveVisualRefresh.hpp" />
@@ -118,6 +120,7 @@
     <ClInclude Include="src\Runtime\Shaders\RadarDecodePixel.generated.hpp" />
     <ClInclude Include="src\Runtime\Shaders\RadarDecodeVertex.generated.hpp" />
     <ClInclude Include="src\Runtime\WorkshopMaps.hpp" />
+    <ClInclude Include="src\UI\StickerPreviewPlacement.generated.hpp" />
     <ClInclude Include="third_party\MinHook\include\MinHook.h" />
     <ClInclude Include="third_party\json\json.hpp" />
   </ItemGroup>
@@ -152,11 +155,18 @@
     <ClCompile Include="src\Runtime\RadarNativeCompiler.cpp" />
     <ClCompile Include="src\Runtime\WorkshopMaps.cpp" />
     <ClCompile Include="src\Tests\Main.cpp" />
+    <ClCompile Include="src\UI\StickerPreviewPlacement.generated.cpp">
+      <Optimization>Disabled</Optimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+    </ClCompile>
     <ClCompile Include="third_party\MinHook\src\buffer.c" />
     <ClCompile Include="third_party\MinHook\src\hook.c" />
     <ClCompile Include="third_party\MinHook\src\trampoline.c" />
     <ClCompile Include="third_party\MinHook\src\hde\hde32.c" />
     <ClCompile Include="third_party\MinHook\src\hde\hde64.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\Resources\RadarReferences.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

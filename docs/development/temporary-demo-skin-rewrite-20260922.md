@@ -1,4 +1,4 @@
-# Temporary cosmetic demo workflow (updated 2026-10-03)
+# Temporary cosmetic demo workflow (updated 2026-10-06)
 
 ## Goal
 
@@ -41,17 +41,45 @@ as one transaction. The input demo is read-only. The output is a new file.
    resource. Default-glove EconItemView fields and the changed flag are
    materialized on each selected pawn. Default firearm records receive
    synthetic item identity, quality, paint, seed and normalized wear fields.
-   Existing sticker slots replace only their integer-union kit value, preserving
-   wear, scale, rotation and CS2 offset/schema fields. A requested missing
-   logical slot grows the same dynamic-attribute vector and receives the full
-   kit/wear/scale/rotation quartet at the weapon's native preset position. The
-   implementation is nSkinz code and does not require an external client,
-   Python module or service.
+   Sticker preset mode replaces only an existing slot's integer-union kit value,
+   preserving wear, scale, rotation and CS2 offset/schema fields. A requested
+   missing logical slot grows the same dynamic-attribute vector and receives the
+   full kit/wear/scale/rotation quartet at the weapon's native preset position.
+   Opt-in custom-position mode writes or appends the complete seven-component
+   set: kit, wear, scale, rotation, offset X/Y and schema. Offset X/Y are CS2
+   per-slot deltas; the material proxy adds them to the current weapon
+   material's `g_vStickerNOffset`. The implementation is nSkinz code and
+   does not require an external client, Python module or service.
 7. The final file is validated for the exact eight-byte `PBDEMS2\0` header and
    placed at `game/csgo/nskinz_temp/nskinz_skin_<source>_<time>.dem`.
 8. A local event asks the injected runtime to dispatch the generated
    `playdemo` command on `FRAME_RENDER_PASS`. The panel never calls CS2 engine
    interfaces directly.
+
+## Sticker placement editing and preview
+
+- Each sticker starts in **preset mode**. Changing the kit in this mode keeps
+  the source Demo's exact placement data; for a newly created slot, the game
+  resolves the weapon's native preset position.
+- Enable **Custom placement** to make the X/Y sliders and draggable preview
+  active. Native slots start at delta X/Y = 0, so switching modes does not move
+  the sticker; the preview adds the delta to that slot's material-authored base.
+  **Use preset position** disables custom placement and returns to preservation
+  mode.
+- The 2D canvas shows all five logical slots together over the exact selected
+  firearm silhouette. All 34 supported definitions have distinct geometry
+  (including separate AK-47, M4A4 and M4A1-S outlines), and the muzzle always
+  faces left. The selected slot is yellow, configured unselected slots are
+  white, and unused slots are dim. The canvas adds each stored delta to its
+  material-authored slot base, then previews the effective positions together
+  in one coordinate plane along with relative scale and rotation;
+  CS2 remains authoritative for the model's final 3D surface projection.
+- **Live game preview** publishes staged sticker changes at a throttled interval
+  while dragging or moving sliders. Live synchronization only updates fields
+  already present in the loaded Demo. If offset/schema nodes are absent, first
+  generate and load a Temporary Demo; that rewrite materializes the missing
+  nodes, after which further edits can synchronize without regenerating on
+  every slider step.
 
 ## Playback isolation
 
@@ -75,9 +103,10 @@ rebuilding the same first-person hands.
   nSkinz extensions for missing entity fields and string-table insertion.
 - Eligible firearm profiles are present in the request with team `ANY`. Paint
   attributes are reused in place when present and materialized when missing.
-  Sticker slots are handled independently from paint state: existing slots
-  preserve placement, while missing requested slots append only absent Econ
-  attributes and update the vector count.
+  Sticker slots are handled independently from paint state. Preset mode keeps
+  existing placement and appends only the legacy quartet for a missing logical
+  slot. Custom mode reuses or appends all absent placement components and
+  updates the vector count without assuming a fixed source length.
 - The complete MIT/Apache-2.0 component notices and modified source ship with
   the project. There is no external client authentication or runtime download.
 
@@ -89,11 +118,12 @@ rebuilding the same first-person hands.
   accepting an output.
 - The embedded helper runs outside CS2 with a ten-minute timeout and redirected log;
   failure text is returned to the panel.
-- An output is accepted only after required knife/glove records resolve, every
-  matched requested sticker slot reparses with exactly the requested kit, and
-  the demo header validates. A configured firearm that is absent from the
-  replay does not invalidate unrelated successful records. `playdemo` is never
-  queued for a failed result.
+- An output is accepted only after required knife/glove records resolve and
+  every requested sticker component reparses with its exact 32-bit value. This
+  includes integer-union kit/schema fields as well as float transform/offset
+  fields. The demo header must also validate. A configured firearm that is
+  absent from the replay does not invalidate unrelated successful records.
+  `playdemo` is never queued for a failed result.
 - The source demo is never deleted, renamed or overwritten.
 
 ## Continuous animation-table insertion (validated 2026-09-29)
@@ -119,6 +149,17 @@ rebuilding the same first-person hands.
 ## Verification
 
 - Release build and the complete native regression suite pass.
+- Sticker discovery follows CS2's legacy, offset and schema attribute families.
+  The five logical slots currently exposed by nSkinz use definitions
+  `113..132`, `278..287` and `290..294` respectively.
+- Rust regression covers an existing legacy slot that gains missing wear,
+  scale, rotation, offset X/Y and schema nodes. The post-write verifier compares
+  every requested component by its raw 32-bit representation.
+- The 310 MB real-demo custom-placement regression requested five transformed
+  slots across ten owned weapons (`50` total), including `7` logical slots
+  absent from the source. Rewrite and full output reparse completed with
+  `50` verified, `7` created and `0` missing slots; output SHA-256 is
+  `CE27A73079DEC20CD9323BBB9D0994FCBEA02DB3C98C29DA86F54DE486856EAC`.
 - `TestDemoSkinRewritePlan` verifies default T/CT knife and glove definitions,
   `ANY` firearm records, target definition/paint/seed/wear serialization, XUID
   grouping, finish-only exclusion and generated-demo detection.

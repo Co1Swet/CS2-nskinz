@@ -1,5 +1,6 @@
 #include "Runtime/RadarAlphaFix.hpp"
 
+#include "Resources/ResourceIds.h"
 #include "Runtime/WorkshopMaps.hpp"
 #include "Runtime/Shaders/RadarDecodePixel.generated.hpp"
 #include "Runtime/Shaders/RadarDecodeVertex.generated.hpp"
@@ -269,6 +270,174 @@ bool DecodeWithWic(
     return true;
 }
 
+bool LoadEmbeddedRadarReference(
+    const int resource_id,
+    std::uint16_t& width,
+    std::uint16_t& height,
+    std::vector<std::uint8_t>& rgba,
+    std::wstring& diagnostic)
+{
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&LoadEmbeddedRadarReference),
+            &module) || module == nullptr)
+    {
+        diagnostic = L"The radar reference module could not be resolved.";
+        return false;
+    }
+    const auto resource = FindResourceW(
+        module,
+        MAKEINTRESOURCEW(resource_id),
+        RT_RCDATA);
+    if (resource == nullptr)
+    {
+        diagnostic = L"The audited radar reference is missing from this binary.";
+        return false;
+    }
+    const auto loaded = LoadResource(module, resource);
+    const auto byte_count = SizeofResource(module, resource);
+    const auto* bytes = static_cast<const std::uint8_t*>(LockResource(loaded));
+    if (loaded == nullptr || bytes == nullptr || byte_count == 0)
+    {
+        diagnostic = L"The audited radar reference could not be loaded from this binary.";
+        return false;
+    }
+    return DecodeWithWic(bytes, byte_count, width, height, rgba, diagnostic);
+}
+
+bool IsMirageWaterRadar(const std::string_view virtual_path)
+{
+    return virtual_path.find("de_mirage_water_radar") != std::string_view::npos;
+}
+
+void SeedTransparentRadarRgb(
+    std::vector<std::uint8_t>& rgba,
+    const std::uint16_t width,
+    const std::uint16_t height)
+{
+    const auto pixel_count = static_cast<std::size_t>(width) * height;
+    std::vector<std::uint8_t> colour_assigned(pixel_count, 0);
+    std::vector<std::size_t> colour_queue;
+    colour_queue.reserve(pixel_count);
+    for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
+    {
+        if (rgba[pixel * 4 + 3] != 0)
+        {
+            colour_assigned[pixel] = 1;
+            colour_queue.push_back(pixel);
+        }
+    }
+    constexpr std::array<std::pair<int, int>, 4> kCardinalNeighbours {{
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+    }};
+    for (std::size_t cursor = 0; cursor < colour_queue.size(); ++cursor)
+    {
+        const auto source_pixel = colour_queue[cursor];
+        const auto source_x = static_cast<int>(source_pixel % width);
+        const auto source_y = static_cast<int>(source_pixel / width);
+        for (const auto [delta_x, delta_y] : kCardinalNeighbours)
+        {
+            const auto target_x = source_x + delta_x;
+            const auto target_y = source_y + delta_y;
+            if (target_x < 0 || target_y < 0 || target_x >= width || target_y >= height)
+            {
+                continue;
+            }
+            const auto target_pixel = static_cast<std::size_t>(target_y) * width + target_x;
+            if (colour_assigned[target_pixel])
+            {
+                continue;
+            }
+            const auto source_offset = source_pixel * 4;
+            const auto target_offset = target_pixel * 4;
+            rgba[target_offset] = rgba[source_offset];
+            rgba[target_offset + 1] = rgba[source_offset + 1];
+            rgba[target_offset + 2] = rgba[source_offset + 2];
+            colour_assigned[target_pixel] = 1;
+            colour_queue.push_back(target_pixel);
+        }
+    }
+}
+
+bool ApplyMirageWaterReference(
+    std::vector<std::uint8_t>& rgba,
+    const std::uint16_t width,
+    const std::uint16_t height,
+    std::size_t& visible_pixels,
+    std::size_t& transparent_pixels,
+    std::size_t& softened_edge_pixels,
+    bool& changed,
+    std::wstring& diagnostic,
+    const nskinzcs2::runtime::RadarAlphaMaskSettings& settings)
+{
+    std::uint16_t reference_width = 0;
+    std::uint16_t reference_height = 0;
+    std::vector<std::uint8_t> reference_rgba;
+    if (!LoadEmbeddedRadarReference(
+            IDR_NSKINZ_RADAR_REFERENCE_MIRAGE_WATER,
+            reference_width,
+            reference_height,
+            reference_rgba,
+            diagnostic))
+    {
+        return false;
+    }
+    if (reference_width != width || reference_height != height ||
+        reference_rgba.size() != rgba.size())
+    {
+        diagnostic = L"The Mirage Water radar no longer matches its audited 720x720 reference.";
+        return false;
+    }
+
+    const auto source_rgba = rgba;
+    const auto background_alpha_percent =
+        std::clamp(settings.background_alpha_percent, 0, 100);
+    visible_pixels = 0;
+    transparent_pixels = 0;
+    softened_edge_pixels = 0;
+    for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(width) * height; ++pixel)
+    {
+        const auto offset = pixel * 4;
+        const auto reference_alpha = reference_rgba[offset + 3];
+        auto& alpha = rgba[offset + 3];
+        if (reference_alpha != 0)
+        {
+            alpha = reference_alpha;
+        }
+        else if (background_alpha_percent > 0)
+        {
+            alpha = static_cast<std::uint8_t>(
+                (static_cast<unsigned int>(source_rgba[offset + 3]) *
+                    static_cast<unsigned int>(background_alpha_percent) + 50u) / 100u);
+        }
+        else
+        {
+            alpha = 0;
+        }
+        if (alpha == 0)
+        {
+            ++transparent_pixels;
+        }
+        else
+        {
+            ++visible_pixels;
+            if (alpha != 255)
+            {
+                ++softened_edge_pixels;
+            }
+        }
+    }
+    if (background_alpha_percent == 0)
+    {
+        SeedTransparentRadarRgb(rgba, width, height);
+    }
+    changed = true;
+    diagnostic.clear();
+    return true;
+}
+
 bool DecodeWithD3d11(
     const ParsedVtex& texture,
     const std::uint8_t* data,
@@ -521,7 +690,7 @@ bool ApplyRadarForegroundMask(
     // Wide dark corridors in water/night conversions can exceed the previous
     // six-pixel cap. Recovery still requires retained map pixels on opposite
     // sides and remains confined to the main map bounds.
-    const auto dark_detail_radius = std::clamp(settings.dark_detail_radius, 0, 32);
+    const auto dark_detail_radius = std::clamp(settings.dark_detail_radius, 0, 96);
     const auto background_alpha_percent =
         std::clamp(settings.background_alpha_percent, 0, 100);
     // Some Workshop overviews bake a neutral editor grid one or two values
@@ -902,70 +1071,65 @@ bool ApplyRadarForegroundMask(
 
     // A recovered gap was classified as background in the source image. Do
     // not retain its original near-black RGB: that recreated opaque black
-    // crumbs in Inferno Water even though the surrounding matte had become
-    // transparent. Preserve the recovered coverage, but borrow RGB from the
-    // nearest trusted foreground pixel. If no trusted neighbour exists, the
-    // candidate is not a safe road/detail recovery and remains background.
+    // crumbs. Multi-source propagation copies the nearest trusted foreground
+    // colour in linear time and can cover a recovered corridor without the
+    // old per-pixel search dropping its centre back to transparent.
+    std::vector<std::uint8_t> recovery_colour_assigned(pixel_count, 0);
+    queue.clear();
+    queue.reserve(pixel_count);
+    for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
+    {
+        if (foreground[pixel] && !recovered_detail[pixel] && !soften_edge[pixel] &&
+            rgba[pixel * 4 + 3] > 8)
+        {
+            recovery_colour_assigned[pixel] = 1;
+            queue.push_back(pixel);
+        }
+    }
+    constexpr std::array<std::pair<int, int>, 8> kRecoveryNeighbours {{
+        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+        {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
+    }};
+    for (std::size_t cursor = 0; cursor < queue.size(); ++cursor)
+    {
+        const auto source = queue[cursor];
+        const auto x = static_cast<int>(source % width);
+        const auto y = static_cast<int>(source / width);
+        for (const auto [delta_x, delta_y] : kRecoveryNeighbours)
+        {
+            const auto target_x = x + delta_x;
+            const auto target_y = y + delta_y;
+            if (target_x < 0 || target_y < 0 || target_x >= width || target_y >= height)
+            {
+                continue;
+            }
+            const auto target = static_cast<std::size_t>(target_y) * width + target_x;
+            if (!foreground[target] || !recovered_detail[target] ||
+                recovery_colour_assigned[target])
+            {
+                continue;
+            }
+            const auto source_offset = source * 4;
+            const auto target_offset = target * 4;
+            rgba[target_offset] = rgba[source_offset];
+            rgba[target_offset + 1] = rgba[source_offset + 1];
+            rgba[target_offset + 2] = rgba[source_offset + 2];
+            recovery_colour_assigned[target] = 1;
+            queue.push_back(target);
+            changed = true;
+        }
+    }
     for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
     {
         if (!recovered_detail[pixel])
         {
             continue;
         }
-        const auto x = static_cast<int>(pixel % width);
-        const auto y = static_cast<int>(pixel / width);
-        std::size_t reference_pixel = pixel;
-        bool found_reference = false;
-        for (int radius = 1; radius <= std::max(dark_detail_radius, 4) && !found_reference; ++radius)
-        {
-            int best_maximum = -1;
-            for (int delta_y = -radius; delta_y <= radius; ++delta_y)
-            {
-                for (int delta_x = -radius; delta_x <= radius; ++delta_x)
-                {
-                    if (std::max(std::abs(delta_x), std::abs(delta_y)) != radius ||
-                        x + delta_x < 0 || y + delta_y < 0 ||
-                        x + delta_x >= width || y + delta_y >= height)
-                    {
-                        continue;
-                    }
-                    const auto candidate =
-                        static_cast<std::size_t>(y + delta_y) * width + (x + delta_x);
-                    if (!foreground[candidate] || recovered_detail[candidate] || soften_edge[candidate] ||
-                        rgba[candidate * 4 + 3] <= 8)
-                    {
-                        continue;
-                    }
-                    const auto candidate_offset = candidate * 4;
-                    const auto candidate_maximum = static_cast<int>(std::max({
-                        rgba[candidate_offset],
-                        rgba[candidate_offset + 1],
-                        rgba[candidate_offset + 2]}));
-                    if (candidate_maximum > best_maximum)
-                    {
-                        best_maximum = candidate_maximum;
-                        reference_pixel = candidate;
-                        found_reference = true;
-                    }
-                }
-            }
-        }
-        if (!found_reference)
+        if (!recovery_colour_assigned[pixel])
         {
             foreground[pixel] = 0;
             recovered_detail[pixel] = 0;
             continue;
-        }
-        const auto offset = pixel * 4;
-        const auto reference_offset = reference_pixel * 4;
-        if (rgba[offset] != rgba[reference_offset] ||
-            rgba[offset + 1] != rgba[reference_offset + 1] ||
-            rgba[offset + 2] != rgba[reference_offset + 2])
-        {
-            rgba[offset] = rgba[reference_offset];
-            rgba[offset + 1] = rgba[reference_offset + 1];
-            rgba[offset + 2] = rgba[reference_offset + 2];
-            changed = true;
         }
         ++recovered_detail_pixels;
     }
@@ -1065,50 +1229,8 @@ bool ApplyRadarForegroundMask(
 
     // Transparent black RGB bleeds into an otherwise correct alpha edge when
     // ResourceCompiler builds mipmaps and compresses the image as BC7. Seed a
-    // nearest-colour expansion from every visible pixel while leaving alpha at
-    // zero. This changes no visible pixel, but filtered boundary samples no
-    // longer acquire a black saw-tooth halo in Panorama.
-    std::vector<std::uint8_t> colour_assigned(pixel_count, 0);
-    std::vector<std::size_t> colour_queue;
-    colour_queue.reserve(pixel_count);
-    for (std::size_t pixel = 0; pixel < pixel_count; ++pixel)
-    {
-        if (rgba[pixel * 4 + 3] != 0)
-        {
-            colour_assigned[pixel] = 1;
-            colour_queue.push_back(pixel);
-        }
-    }
-    constexpr std::array<std::pair<int, int>, 4> kCardinalNeighbours {{
-        {-1, 0}, {1, 0}, {0, -1}, {0, 1},
-    }};
-    for (std::size_t cursor = 0; cursor < colour_queue.size(); ++cursor)
-    {
-        const auto source_pixel = colour_queue[cursor];
-        const auto source_x = static_cast<int>(source_pixel % width);
-        const auto source_y = static_cast<int>(source_pixel / width);
-        for (const auto [delta_x, delta_y] : kCardinalNeighbours)
-        {
-            const auto target_x = source_x + delta_x;
-            const auto target_y = source_y + delta_y;
-            if (target_x < 0 || target_y < 0 || target_x >= width || target_y >= height)
-            {
-                continue;
-            }
-            const auto target_pixel = static_cast<std::size_t>(target_y) * width + target_x;
-            if (colour_assigned[target_pixel])
-            {
-                continue;
-            }
-            const auto source_offset = source_pixel * 4;
-            const auto target_offset = target_pixel * 4;
-            rgba[target_offset] = rgba[source_offset];
-            rgba[target_offset + 1] = rgba[source_offset + 1];
-            rgba[target_offset + 2] = rgba[source_offset + 2];
-            colour_assigned[target_pixel] = 1;
-            colour_queue.push_back(target_pixel);
-        }
-    }
+    // nearest-colour expansion while leaving alpha at zero.
+    SeedTransparentRadarRgb(rgba, width, height);
     return true;
 }
 
@@ -1203,16 +1325,8 @@ nskinzcs2::runtime::RadarAlphaMaskSettings ResolveRadarMaskSettings(
     const nskinzcs2::runtime::RadarAlphaMaskSettings& settings)
 {
     auto resolved = settings;
-    // Mirage Water contains legitimate dark road spans that are wider than
-    // the generic 12-pixel bridge. They remain bounded by retained floor
-    // pixels, so using the algorithm's existing 32-pixel safe maximum restores
-    // those roads without dilating the exterior matte. Radius zero remains an
-    // explicit opt-out for diagnostics and user control.
-    if (resolved.dark_detail_radius > 0 &&
-        virtual_path.find("de_mirage_water_radar") != std::string_view::npos)
-    {
-        resolved.dark_detail_radius = std::max(resolved.dark_detail_radius, 32);
-    }
+    resolved.dark_detail_radius = std::clamp(resolved.dark_detail_radius, 0, 64);
+    (void) virtual_path;
     return resolved;
 }
 
@@ -1241,23 +1355,46 @@ nskinzcs2::runtime::RadarAlphaFixOutcome nskinzcs2::runtime::BuildRadarAlphaOver
     }
     const auto resolved_settings = ResolveRadarMaskSettings(virtual_path, settings);
     bool changed = false;
-    if (!ApplyRadarForegroundMask(
-            rgba,
-            decoded_width,
-            decoded_height,
-            output.visible_pixels,
-            output.transparent_pixels,
-            output.softened_edge_pixels,
-            output.recovered_detail_pixels,
-            output.applied_black_tolerance,
-            output.detected_neutral_mode,
-            output.detected_neutral_pixels,
-            output.detected_neutral_mode_pixels,
-            changed,
-            diagnostic,
-            resolved_settings))
+    if (IsMirageWaterRadar(virtual_path))
     {
-        return RadarAlphaFixOutcome::Unsupported;
+        output.used_map_reference_mask = true;
+        output.applied_dark_detail_radius = 0;
+        output.applied_black_tolerance = 0;
+        if (!ApplyMirageWaterReference(
+                rgba,
+                decoded_width,
+                decoded_height,
+                output.visible_pixels,
+                output.transparent_pixels,
+                output.softened_edge_pixels,
+                changed,
+                diagnostic,
+                resolved_settings))
+        {
+            return RadarAlphaFixOutcome::Unsupported;
+        }
+    }
+    else
+    {
+        output.applied_dark_detail_radius = resolved_settings.dark_detail_radius;
+        if (!ApplyRadarForegroundMask(
+                rgba,
+                decoded_width,
+                decoded_height,
+                output.visible_pixels,
+                output.transparent_pixels,
+                output.softened_edge_pixels,
+                output.recovered_detail_pixels,
+                output.applied_black_tolerance,
+                output.detected_neutral_mode,
+                output.detected_neutral_pixels,
+                output.detected_neutral_mode_pixels,
+                changed,
+                diagnostic,
+                resolved_settings))
+        {
+            return RadarAlphaFixOutcome::Unsupported;
+        }
     }
     output.request_virtual_path = virtual_path;
     output.width = decoded_width;

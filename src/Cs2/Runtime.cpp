@@ -17090,6 +17090,9 @@ nskinzcs2::model::CosmeticProfile BuildHeuristicLinkedWeaponProfile(
         sticker.wear = 0.0000001f;
         sticker.scale = 1.0f;
         sticker.rotation = 0.0f;
+        sticker.custom_position = false;
+        sticker.offset_x = 0.0f;
+        sticker.offset_y = 0.0f;
     }
     return sanitized;
 }
@@ -17135,6 +17138,17 @@ std::uint64_t BuildProfileApplySignature(
     for (const auto& sticker : profile.stickers)
     {
         HashCombine(signature, static_cast<std::uint64_t>(std::max(0, sticker.kit_id)));
+        HashCombine(signature, static_cast<std::uint64_t>(sticker.custom_position ? 1 : 0));
+        if (sticker.custom_position)
+        {
+            HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.wear)));
+            HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.scale)));
+            HashCombine(signature, static_cast<std::uint64_t>(FloatBits(sticker.rotation)));
+            HashCombine(signature, static_cast<std::uint64_t>(FloatBits(
+                nskinzcs2::model::NormalizeStickerOffset(sticker.offset_x))));
+            HashCombine(signature, static_cast<std::uint64_t>(FloatBits(
+                nskinzcs2::model::NormalizeStickerOffset(sticker.offset_y))));
+        }
     }
 
     if (keychain_profile != nullptr)
@@ -51118,7 +51132,7 @@ nskinzcs2::runtime::ResolvedGloveRenderBinding ResolveGloveRenderBinding(
         binding.has_world_render = true;
     }
 
-    // The viewmodel does not consume m_hMyWearables directly. Build 2000922
+    // The viewmodel does not consume m_hMyWearables directly. The verified
     // resolves the native pawn glove component output at pawn+0x15F8 through a
     // separate client-only identity table. A runtime CEconWearable can have a
     // perfect model/finish readback while remaining invisible unless this exact
@@ -52446,11 +52460,32 @@ bool ApplyGloveProfileToWearable(
     return success;
 }
 
+bool ResolveProfileUsesLegacyStickerModel(
+    const nskinzcs2::model::CosmeticProfile& profile) noexcept
+{
+    const auto catalog = g_hook_state.app_state != nullptr
+        ? g_hook_state.app_state->SnapshotCatalogShared()
+        : nullptr;
+    if (catalog != nullptr)
+    {
+        const auto found = catalog->weapon_paint_uses_legacy_model.find(profile.paint_kit);
+        if (found != catalog->weapon_paint_uses_legacy_model.end())
+        {
+            return found->second;
+        }
+    }
+    return true;
+}
+
 std::vector<std::pair<std::uint16_t, float>> BuildWeaponRefreshAttributesImpl(
     const nskinzcs2::model::CosmeticProfile& profile,
     const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
-    return nskinzcs2::runtime::BuildWeaponAppearancePayload(profile, 0, keychain_profile).temporary_attributes;
+    return nskinzcs2::runtime::BuildWeaponAppearancePayload(
+        profile,
+        0,
+        keychain_profile,
+        ResolveProfileUsesLegacyStickerModel(profile)).temporary_attributes;
 }
 
 std::wstring DescribeWeaponRefreshAttributes(
@@ -58377,7 +58412,8 @@ bool TryApplyStandardWeaponAppearancePipeline(
         nskinzcs2::runtime::BuildWeaponAppearancePayload(
             profile,
             AccountIdFromXuid(xuid),
-            keychain_profile);
+            keychain_profile,
+            ResolveProfileUsesLegacyStickerModel(profile));
     const auto hud_requires_independent_apply =
         IsKnifeProfile(profile) &&
         nskinzcs2::runtime::WeaponAppearanceNeedsIndependentHudApply(
@@ -79995,8 +80031,8 @@ bool VerifyGloveVisualRefreshEvidence(const ModuleSpan& client)
 }
 
 // The pawn glove component does not publish its visual through the networked
-// client entity system. Mirror the exact build-2000922 native lookup rooted at
-// client+0x236A9E0. Client-only entries preserve the output generation while
+// client entity system. Mirror the verified native lookup rooted at
+// client+kGloveVisualEntityChunksRva. Client-only entries preserve the output generation while
 // storing the invalid-index sentinel in their identity handle.
 bool TryResolveGloveVisualOutputEntity(const ModuleSpan& client,
     const std::uint32_t handle, void*& entity, std::uint32_t& identity_handle)
@@ -80488,8 +80524,11 @@ bool EnsurePawnGloveVisualRefreshHookInstalled()
     }
 
     g_hook_state.pawn_glove_visual_refresh_hook_installed.store(true);
-    nskinzcs2::Logger::Info(
-        L"Pawn glove native callback hook installed at client+0xC65200; demo state is patched inside the original HUD update chain.");
+    std::wstringstream installed_log;
+    installed_log << L"Pawn glove native callback hook installed at client+0x"
+        << std::hex << std::uppercase << kGloveVisualRefreshRva
+        << L"; demo state is patched inside the original HUD update chain.";
+    nskinzcs2::Logger::Info(installed_log.str());
     return true;
 }
 
@@ -80545,8 +80584,11 @@ bool EnsurePawnGloveHudConsumerHookInstalled()
     }
 
     g_hook_state.pawn_glove_hud_consumer_hook_installed.store(true);
-    nskinzcs2::Logger::Info(
-        L"Pawn glove HUD consumer hook installed at client+0x10CC670; native output will be created immediately before HUD ownership.");
+    std::wstringstream installed_log;
+    installed_log << L"Pawn glove HUD consumer hook installed at client+0x"
+        << std::hex << std::uppercase << kGloveHudConsumerRva
+        << L"; native output will be created immediately before HUD ownership.";
+    nskinzcs2::Logger::Info(installed_log.str());
     return true;
 }
 
@@ -82957,7 +82999,7 @@ void PollGameThreadStateModern()
         // path. Only the knife transaction must remain fully isolated here.
         for (auto& profile : config.knife_profiles) profile.enabled = false;
         int reconstructed_firearm_profiles = 0;
-        int suppressed_glove_profiles = 0;
+        int reconstructed_glove_profiles = 0;
         // Reconstructed stock firearms need the established live path once per
         // newly created entity to turn their serialized EconItemView fields
         // into a native composite material.  The existing material-signature
@@ -82973,15 +83015,14 @@ void PollGameThreadStateModern()
                 ++reconstructed_firearm_profiles;
             }
         }
-        for (auto& profile : config.glove_profiles)
+        for (const auto& profile : config.glove_profiles)
         {
             if (profile.enabled &&
-                nskinzcs2::runtime::ShouldSuppressGeneratedDemoGloveProfile(
+                nskinzcs2::runtime::IsGeneratedDemoRewrittenGloveProfile(
                     current_demo_file_path,
                     profile.xuid))
             {
-                profile.enabled = false;
-                ++suppressed_glove_profiles;
+                ++reconstructed_glove_profiles;
             }
         }
         if (!g_hook_state.demo_skin_rewrite_skip_logged.exchange(true))
@@ -82990,8 +83031,8 @@ void PollGameThreadStateModern()
             stream << L"Generated temporary skin demo detected; live knife mutation is disabled, "
                 << reconstructed_firearm_profiles
                 << L" reconstructed firearm profile(s) remain live for one native material initialization per entity generation, and "
-                << suppressed_glove_profiles
-                << L" reconstructed glove profile(s) are stream-owned. Stable firearm entities reuse the completed material cache.";
+                << reconstructed_glove_profiles
+                << L" reconstructed glove profile(s) remain live only for one native visual refresh per Pawn generation. Stable entities reuse the completed refresh cache.";
             nskinzcs2::Logger::Info(stream.str());
         }
     }
@@ -85931,14 +85972,90 @@ void PollGameThreadStateModern()
                         xuid,
                         current_definition_index))
                 {
-                    // The PBDEMS2 stream already materialized the complete
-                    // stock-glove replacement.  Re-entering the live native
-                    // refresh path here toggles the same Pawn dirty state and
-                    // makes first-person hands intermittently rebuild.
-                    LogProfileDiagnosticOnce(
-                        glove_signature ^ 0x1Dull,
-                        L"Generated demo glove carrier already matches; live glove writes and refresh callbacks are suppressed for XUID " +
-                            std::to_wstring(xuid) + L".");
+                    // PBDEMS2 can serialize the EconItemView and its finish
+                    // attributes, but m_bNeedToReApplyGloves is a client-only
+                    // Schema field and has no demo field path. Keep the stream
+                    // data authoritative and issue exactly one native refresh
+                    // for each Pawn generation so the world/HUD glove models
+                    // are actually rebuilt from those fields.
+                    if (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish)
+                    {
+                        if (PollPawnGloveVisualRefresh(
+                                player_binding,
+                                entity_list,
+                                entity_cache,
+                                catalog,
+                                request,
+                                glove_signature,
+                                now))
+                        {
+                            glove_applied_xuids.insert(xuid);
+                            ++applied_gloves;
+                            continue;
+                        }
+
+                        const auto refresh_status =
+                            SnapshotPawnGloveVisualRefreshStatus(player_binding, glove_signature);
+                        if (refresh_status == PawnGloveVisualRefreshStatus::Idle)
+                        {
+                            const auto before_refresh = CapturePawnGloveRefreshSnapshot(
+                                player_binding.pawn_entity,
+                                g_hook_state.schema_offsets);
+                            TouchPawnGloveRefresh(
+                                player_binding.pawn_entity,
+                                g_hook_state.schema_offsets);
+                            const auto after_refresh = CapturePawnGloveRefreshSnapshot(
+                                player_binding.pawn_entity,
+                                g_hook_state.schema_offsets);
+                            if (!DidPawnGloveRefreshTrigger(before_refresh, after_refresh) ||
+                                !SchedulePawnGloveVisualRefreshAtNativeCallback(
+                                    player_binding,
+                                    request,
+                                    glove_signature))
+                            {
+                                WarnOnceForRuntimeSignature(
+                                    glove_signature ^ 0x1Dull,
+                                    L"Generated demo glove fields match, but the client-only native visual refresh could not be scheduled.");
+                                continue;
+                            }
+                            RememberAppliedSignature(
+                                g_hook_state.applied_glove_signatures,
+                                player_binding.pawn_entity_index,
+                                glove_signature);
+                            LogProfileDiagnosticOnce(
+                                glove_signature ^ 0x1Dull,
+                                L"Generated demo glove fields verified; queued the client-only native world/HUD visual rebuild for XUID " +
+                                    std::to_wstring(xuid) + L".");
+                        }
+                        continue;
+                    }
+
+                    if (!HasAppliedSignature(
+                            g_hook_state.applied_glove_signatures,
+                            player_binding.pawn_entity_index,
+                            glove_signature))
+                    {
+                        const auto before_refresh = CapturePawnGloveRefreshSnapshot(
+                            player_binding.pawn_entity,
+                            g_hook_state.schema_offsets);
+                        TouchPawnGloveRefresh(
+                            player_binding.pawn_entity,
+                            g_hook_state.schema_offsets);
+                        const auto after_refresh = CapturePawnGloveRefreshSnapshot(
+                            player_binding.pawn_entity,
+                            g_hook_state.schema_offsets);
+                        if (!DidPawnGloveRefreshTrigger(before_refresh, after_refresh))
+                        {
+                            WarnOnceForRuntimeSignature(
+                                glove_signature ^ 0x1Dull,
+                                L"Generated demo glove finish fields match, but the native finish refresh signal was not accepted.");
+                            continue;
+                        }
+                        RememberAppliedSignature(
+                            g_hook_state.applied_glove_signatures,
+                            player_binding.pawn_entity_index,
+                            glove_signature);
+                    }
                     glove_applied_xuids.insert(xuid);
                     ++applied_gloves;
                     continue;

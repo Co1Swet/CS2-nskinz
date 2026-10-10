@@ -55,14 +55,14 @@ std::optional<std::filesystem::path> ReadCurrentDemoPathSidecar(
 bool IsGeneratedDemoSkinPath(const std::filesystem::path& path) noexcept;
 
 // Generated demos can contain complete default-carrier firearm/glove records.
-// Reconstructed firearms remain live for one native material initialization
-// per entity generation; reconstructed gloves stay entirely stream-owned.
+// They remain live for one native material/model initialization per entity
+// generation because the corresponding CS2 refresh flags are not serialized.
 bool IsGeneratedDemoRewrittenWeaponProfile(
     const std::filesystem::path& generated_demo,
     std::uint64_t xuid,
     int base_item) noexcept;
 
-bool ShouldSuppressGeneratedDemoGloveProfile(
+bool IsGeneratedDemoRewrittenGloveProfile(
     const std::filesystem::path& generated_demo,
     std::uint64_t xuid) noexcept;
 

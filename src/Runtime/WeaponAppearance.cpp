@@ -1,5 +1,7 @@
 #include "Runtime/WeaponAppearance.hpp"
 
+#include "Core/StickerPlacement.hpp"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -13,6 +15,8 @@ constexpr std::uint16_t kAttributeWear = 8;
 constexpr std::uint16_t kAttributeStatTrak = 80;
 constexpr std::uint16_t kAttributeStickerKitBase = 113;
 constexpr std::uint16_t kAttributeStickerStride = 4;
+constexpr std::uint16_t kAttributeStickerOffsetBase = 278;
+constexpr std::uint16_t kAttributeStickerSchemaBase = 290;
 constexpr std::uint16_t kAttributeKeychainId = 299;
 constexpr std::uint16_t kAttributeKeychainOffsetX = 300;
 constexpr std::uint16_t kAttributeKeychainOffsetY = 301;
@@ -137,7 +141,8 @@ std::uint64_t nskinzcs2::runtime::ResolvePaintMeshGroupMask(
 nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppearancePayload(
     const nskinzcs2::model::CosmeticProfile& profile,
     const std::uint32_t account_id,
-    const nskinzcs2::model::KeychainProfile* keychain_profile)
+    const nskinzcs2::model::KeychainProfile* keychain_profile,
+    const bool legacy_model)
 {
     WeaponAppearancePayload payload {};
     const auto effective_wear =
@@ -152,7 +157,7 @@ nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppea
     payload.account_id = account_id;
     payload.writes_custom_name = true;
     payload.custom_name = nskinzcs2::model::ResolveCosmeticCustomName(profile.custom_name);
-    payload.temporary_attributes.reserve(32);
+    payload.temporary_attributes.reserve(48);
     const auto writes_finish =
         profile.paint_kit != 0 || profile.explicit_vanilla_finish;
 
@@ -203,17 +208,55 @@ nskinzcs2::runtime::WeaponAppearancePayload nskinzcs2::runtime::BuildWeaponAppea
             continue;
         }
 
-        // This path intentionally replaces only an already-recorded sticker
-        // kit. Omitting the neighboring wear/scale/rotation attributes keeps
-        // the demo's original transform, including CS2 free-placement data.
-        // The runtime attribute collector rejects this write when the kit
-        // attribute for the requested logical slot does not already exist.
+        // Preset mode intentionally replaces only an already-recorded sticker
+        // kit. Omitting every transform field preserves the demo's exact
+        // preset or free-placement data. Custom mode writes the full transform
+        // and modern placement triplet. Offset X/Y are per-slot deltas from
+        // the material-authored home; the live collector still rejects the
+        // transaction unless those nodes already exist, so missing placement
+        // nodes must first be materialized by Temporary Demo.
         const auto base = static_cast<std::uint16_t>(kAttributeStickerKitBase + slot * kAttributeStickerStride);
         // "sticker slot N id" is an integer Econ attribute. The networked
         // attribute node exposes its 32-bit union through a float field, so
         // preserve the integer bit pattern instead of numerically converting
         // (76.0f would be read by the native integer getter as 0x42980000).
         payload.temporary_attributes.emplace_back(base, EncodeStickerKitAttributeValue(sticker.kit_id));
+        const auto placement = nskinzcs2::model::ResolveStickerAnchor(
+            profile.base_item, slot, legacy_model);
+        if (sticker.custom_position || placement.BorrowsAnotherSlot())
+        {
+            payload.temporary_attributes.emplace_back(
+                static_cast<std::uint16_t>(base + 1),
+                std::clamp(sticker.wear, 0.0000001f, 1.0f));
+            payload.temporary_attributes.emplace_back(
+                static_cast<std::uint16_t>(base + 2),
+                std::clamp(sticker.scale, 0.1f, 5.0f));
+            payload.temporary_attributes.emplace_back(
+                static_cast<std::uint16_t>(base + 3),
+                std::clamp(sticker.rotation, 0.0f, 360.0f));
+            const auto offset_base = static_cast<std::uint16_t>(
+                kAttributeStickerOffsetBase + slot * 2);
+            payload.temporary_attributes.emplace_back(
+                offset_base,
+                nskinzcs2::model::ResolveSerializedStickerOffsetX(
+                    profile.base_item,
+                    slot,
+                    legacy_model,
+                    nskinzcs2::model::NormalizeStickerOffset(sticker.offset_x)));
+            payload.temporary_attributes.emplace_back(
+                static_cast<std::uint16_t>(offset_base + 1),
+                nskinzcs2::model::ResolveSerializedStickerOffsetY(
+                    profile.base_item,
+                    slot,
+                    legacy_model,
+                    nskinzcs2::model::NormalizeStickerOffset(sticker.offset_y)));
+            // items_game marks schema as stored_as_integer. It selects the
+            // authored material home used by this logical slot; schema zero
+            // means this slot's own home.
+            payload.temporary_attributes.emplace_back(
+                static_cast<std::uint16_t>(kAttributeStickerSchemaBase + slot),
+                std::bit_cast<float>(placement.schema));
+        }
     }
 
     if (keychain_profile != nullptr &&

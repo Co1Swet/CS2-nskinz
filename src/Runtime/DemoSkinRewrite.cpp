@@ -1,6 +1,7 @@
 #include "Runtime/DemoSkinRewrite.hpp"
 
 #include "Core/Log.hpp"
+#include "Core/StickerPlacement.hpp"
 #include "Cs2/Catalog.hpp"
 #include "Resources/ResourceIds.h"
 #include "json.hpp"
@@ -528,7 +529,8 @@ json BuildBatchItem(
     const bool preserve_source_definition = false,
     const std::optional<std::uint64_t> mesh_group_mask = std::nullopt,
     const std::string_view custom_name = {},
-    const std::array<nskinzcs2::model::StickerProfile, 5>* stickers = nullptr)
+    const std::array<nskinzcs2::model::StickerProfile, 5>* stickers = nullptr,
+    const bool legacy_model = true)
 {
     json item {
         {"item_id64", "0"},
@@ -556,13 +558,32 @@ json BuildBatchItem(
     {
         item["stickers"] = json::array();
         item["sticker_transforms"] = json::array();
-        for (const auto& sticker : *stickers)
+        for (std::size_t slot = 0; slot < stickers->size(); ++slot)
         {
+            const auto& sticker = (*stickers)[slot];
+            const auto placement = nskinzcs2::model::ResolveStickerAnchor(
+                source_definition, slot, legacy_model);
+            const bool writes_custom_position =
+                sticker.custom_position || placement.BorrowsAnotherSlot();
             item["stickers"].push_back(std::max(0, sticker.kit_id));
             item["sticker_transforms"].push_back({
                 {"wear", static_cast<double>(sticker.wear)},
                 {"scale", static_cast<double>(sticker.scale)},
                 {"rotation", static_cast<double>(sticker.rotation)},
+                {"custom_position", writes_custom_position},
+                {"offset_x", static_cast<double>(
+                    nskinzcs2::model::ResolveSerializedStickerOffsetX(
+                        source_definition,
+                        slot,
+                        legacy_model,
+                        nskinzcs2::model::NormalizeStickerOffset(sticker.offset_x)))},
+                {"offset_y", static_cast<double>(
+                    nskinzcs2::model::ResolveSerializedStickerOffsetY(
+                        source_definition,
+                        slot,
+                        legacy_model,
+                        nskinzcs2::model::NormalizeStickerOffset(sticker.offset_y)))},
+                {"schema", placement.schema},
             });
         }
     }
@@ -800,7 +821,7 @@ bool nskinzcs2::runtime::IsGeneratedDemoRewrittenWeaponProfile(
         g_cached_generated_manifest->rewritten_weapons.contains({xuid, base_item});
 }
 
-bool nskinzcs2::runtime::ShouldSuppressGeneratedDemoGloveProfile(
+bool nskinzcs2::runtime::IsGeneratedDemoRewrittenGloveProfile(
     const std::filesystem::path& generated_demo,
     const std::uint64_t xuid) noexcept
 {
@@ -861,7 +882,8 @@ DemoSkinRewritePlan nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(
             false,
             weapon_mesh_group_mask,
             profile.custom_name,
-            &profile.stickers));
+            &profile.stickers,
+            weapon_mesh_group_mask.value_or(2) == 2));
         ++result.weapon_item_count;
         result.sticker_slot_request_count += sticker_slot_count;
     }

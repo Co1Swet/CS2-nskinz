@@ -76,6 +76,9 @@ void RunDemoSkinRewriteTests()
     weapon.stickers[0].wear = 0.25f;
     weapon.stickers[0].scale = 1.4f;
     weapon.stickers[0].rotation = 37.0f;
+    weapon.stickers[0].custom_position = true;
+    weapon.stickers[0].offset_x = 0.175f;
+    weapon.stickers[0].offset_y = -0.225f;
     weapon.stickers[2].kit_id = 137;
     config.profiles.push_back(weapon);
 
@@ -107,6 +110,14 @@ void RunDemoSkinRewriteTests()
         "missing-slot sticker scale must be serialized");
     Check(std::abs(sticker_transforms.at(0).at("rotation").get<double>() - 37.0) < 0.000001,
         "missing-slot sticker rotation must be serialized");
+    Check(sticker_transforms.at(0).at("custom_position") == true,
+        "custom sticker placement intent must be serialized");
+    Check(std::abs(sticker_transforms.at(0).at("offset_x").get<double>() - 0.175) < 0.000001,
+        "custom sticker X offset must be serialized");
+    Check(std::abs(sticker_transforms.at(0).at("offset_y").get<double>() + 0.225) < 0.000001,
+        "custom sticker Y offset must be serialized");
+    Check(sticker_transforms.at(0).at("schema") == 0,
+        "custom sticker placement must serialize schema zero");
     Check(std::abs(items.at(7).at("wear").get<double>() - 0.19) < 0.000001,
         "firearm wear must be serialized");
     Check(items.at(7).at("mesh_group_mask") == 2,
@@ -155,11 +166,38 @@ void RunDemoSkinRewriteTests()
     const auto legacy_mesh_plan = runtime::BuildDefaultDemoSkinRewritePlan(config, &compatibility_catalog);
     Check(IndexItems(legacy_mesh_plan.passes.at(0)).at(7).at("mesh_group_mask") == 2,
         "legacy AK finishes must request mesh group two in the temporary demo");
+    auto fifth_slot_config = config;
+    auto& fifth_slot = fifth_slot_config.profiles[0].stickers[4];
+    fifth_slot.kit_id = 76;
+    fifth_slot.custom_position = false;
+    fifth_slot.offset_x = 0.01f;
+    fifth_slot.offset_y = -0.02f;
+    const auto legacy_fifth_plan = runtime::BuildDefaultDemoSkinRewritePlan(
+        fifth_slot_config, &compatibility_catalog);
+    const auto legacy_fifth_items = IndexItems(legacy_fifth_plan.passes.at(0));
+    const auto& legacy_fifth_transform =
+        legacy_fifth_items.at(7).at("sticker_transforms").at(4);
+    Check(legacy_fifth_transform.at("schema") == 1,
+        "legacy AK fifth slot must borrow authored sticker home one");
+    Check(legacy_fifth_transform.at("custom_position") == true,
+        "a borrowed fifth slot must materialize its complete placement fields automatically");
+    Check(std::abs(legacy_fifth_transform.at("offset_x").get<double>() - 0.13881461) < 0.000001 &&
+        std::abs(legacy_fifth_transform.at("offset_y").get<double>() - 0.01781461) < 0.000001,
+        "legacy AK fifth slot must add its calibrated anchor shift to the user delta");
     auto modern_mesh_catalog = compatibility_catalog;
     modern_mesh_catalog.weapon_paint_uses_legacy_model[302] = false;
     const auto modern_mesh_plan = runtime::BuildDefaultDemoSkinRewritePlan(config, &modern_mesh_catalog);
     Check(IndexItems(modern_mesh_plan.passes.at(0)).at(7).at("mesh_group_mask") == 1,
         "modern AK finishes must request mesh group one in the temporary demo");
+    const auto modern_fifth_plan = runtime::BuildDefaultDemoSkinRewritePlan(
+        fifth_slot_config, &modern_mesh_catalog);
+    const auto modern_fifth_items = IndexItems(modern_fifth_plan.passes.at(0));
+    const auto& modern_fifth_transform =
+        modern_fifth_items.at(7).at("sticker_transforms").at(4);
+    Check(modern_fifth_transform.at("schema") == 1 &&
+        std::abs(modern_fifth_transform.at("offset_x").get<double>() - 0.15699425) < 0.000001 &&
+        std::abs(modern_fifth_transform.at("offset_y").get<double>() - 0.008994253) < 0.000001,
+        "modern AK fifth slot must use the modern-mesh anchor calibration");
     auto non_ak_config = config;
     non_ak_config.profiles[0].base_item = 16;
     compatibility_catalog.weapon_paint_compatibility[16] = {302};
@@ -246,10 +284,10 @@ void RunDemoSkinRewriteTests()
         !runtime::IsGeneratedDemoRewrittenWeaponProfile(manifest_demo, knife.xuid, 9),
         "generated-demo manifests must not identify a different weapon definition");
     Check(
-        runtime::ShouldSuppressGeneratedDemoGloveProfile(manifest_demo, knife.xuid),
-        "generated-demo manifests must suppress an exact reconstructed glove profile");
+        runtime::IsGeneratedDemoRewrittenGloveProfile(manifest_demo, knife.xuid),
+        "generated-demo manifests must identify an exact reconstructed glove profile for one native visual refresh");
     Check(
-        !runtime::ShouldSuppressGeneratedDemoGloveProfile(manifest_demo, knife.xuid + 1),
+        !runtime::IsGeneratedDemoRewrittenGloveProfile(manifest_demo, knife.xuid + 1),
         "generated-demo manifests must keep unrelated glove profiles live");
     std::error_code ignored;
     fs::remove(manifest_path, ignored);

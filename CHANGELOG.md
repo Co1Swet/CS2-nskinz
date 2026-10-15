@@ -1,5 +1,18 @@
 # Changelog / 更新记录
 
+## v0.6.1 — 2026-10-15
+
+- Rebased all guarded current-CS2 native paths on Steam Build `25947352`, Client/Server `2000932`, Patch `1.41.9.1`, Source revision `11131657`. Knife serialization, model/material refresh, skeleton resources, animation graph/arms lifecycle and stock-glove visual refresh now use the October 14 client layout with exact call/RIP-window verification.
+- 将所有受保护的当前 CS2 原生路径迁移到 Steam Build `25947352`、Client/Server `2000932`、Patch `1.41.9.1`、Source revision `11131657`。刀具序列化、模型／材质刷新、骨架资源、动画图／手臂生命周期及默认手套视觉刷新均改用 10 月 14 日客户端布局，并保留精确的调用／RIP 指令窗验证。
+- Preserved the full v0.6.0 sticker feature set: five logical slots, creation of absent legacy/modern fields, model-derived placement preview, sliders, and throttled live synchronization. The installed 2026-10-15 catalog parses as 1,408 weapon finishes, 74 glove finishes, 11,642 stickers and 144 keychains.
+- 完整保留 v0.6.0 贴纸功能：五个逻辑槽、缺失 legacy／现代字段创建、模型投影位置预览、滑轨及节流实时同步。2026-10-15 本机目录解析结果为 1,408 个枪械涂装、74 个手套涂装、11,642 张贴纸和 144 个挂件。
+- Reduced runtime overhead without changing feature behavior: entity RTTI/classification is cached per generation instead of repeatedly scanned, and the isolated control panel reuses immutable catalog-derived UI lists instead of rebuilding them on every frame.
+- 在不改变功能行为的前提下降低运行开销：实体 RTTI／分类结果按代际缓存，避免重复扫描；独立控制面板复用不可变目录生成的 UI 列表，不再每帧重建。
+- Revalidated demo rewriting, firearm materials, stock gloves, knives, stickers and Workshop-map radar processing against the installed game. All 16 compatibility-manifest signatures matched exactly once; the full native suite, native radar VTEX compilation and portable-load gates pass. Rendered results in a specific demo remain an in-game acceptance boundary.
+- 已针对本机当前游戏重新验证 Demo 重写、枪械材质、默认手套、刀具、贴纸和创意工坊地图雷达处理。兼容清单 16 项签名均唯一匹配；完整原生回归、雷达原生 VTEX 编译及便携加载门禁通过。具体 Demo 的最终画面仍需游戏内验收。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.6.1.md).
+
 ## v0.6.0-beta — 2026-10-10
 
 - Added opt-in CS2 free sticker placement for firearm slots. Preset mode remains the default and preserves the demo's recorded transform; custom mode writes wear, scale, rotation, per-slot offset delta X/Y and schema together.

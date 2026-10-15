@@ -15,6 +15,7 @@
 #include "Runtime/WeaponAppearance.hpp"
 #include "Runtime/WeaponMaterialInit.hpp"
 #include "Runtime/WorkshopMaps.hpp"
+#include "UI/StickerPreviewMetrics.hpp"
 #include "UI/StickerPreviewPlacement.generated.hpp"
 
 #include <algorithm>
@@ -111,6 +112,19 @@ void TestStickerPreviewNativePlacement()
     using nskinzcs2::ui::sticker_preview::kPreviewLayouts;
     using nskinzcs2::ui::sticker_preview::kSurfaceTriangles;
     using nskinzcs2::ui::sticker_preview::kWeaponLayouts;
+
+    const auto ak_normal_half_extent =
+        nskinzcs2::ui::sticker_preview::ComputeStickerPreviewHalfExtent(1.0f, 15.349997f);
+    Expect(std::fabs(ak_normal_half_extent - (0.5f / 15.349997f)) <= 0.000001f,
+        "sticker preview must use the unit-wide CS2 decal plane instead of a doubled marker");
+    Expect(std::fabs(
+        nskinzcs2::ui::sticker_preview::ComputeStickerPreviewHalfExtent(2.0f, 15.349997f) -
+        ak_normal_half_extent * 2.0f) <= 0.000001f,
+        "sticker preview footprint must track the configured sticker scale");
+    Expect(std::fabs(
+        nskinzcs2::ui::sticker_preview::ComputeStickerPreviewHalfExtent(0.0f, 15.349997f) -
+        (0.05f / 15.349997f)) <= 0.000001f,
+        "sticker preview footprint must share the runtime scale clamp");
 
     Expect(std::fabs(nskinzcs2::model::NormalizeStickerOffset(0.901f) - 0.901f) <= 0.00001f,
         "sticker offsets outside the material editor slider range must not be truncated");

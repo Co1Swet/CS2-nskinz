@@ -7,6 +7,7 @@
 #include "Runtime/DemoSkinRewrite.hpp"
 #include "Runtime/WorkshopMaps.hpp"
 #include "UI/ExternalUiHost.hpp"
+#include "UI/StickerPreviewMetrics.hpp"
 #include "UI/StickerPreviewPlacement.generated.hpp"
 #include "UI/UiText.hpp"
 #include "UI/WeaponPreviewGeometry.generated.hpp"
@@ -30,6 +31,7 @@
 #include <filesystem>
 #include <future>
 #include <iomanip>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -1613,10 +1615,72 @@ private:
         }
     }
 
+    void EnsureCatalogUiCache(const std::shared_ptr<const Catalog>& catalog_snapshot)
+    {
+        if (cached_catalog_snapshot_.get() == catalog_snapshot.get())
+        {
+            return;
+        }
+
+        cached_catalog_snapshot_ = catalog_snapshot;
+        cached_visible_weapon_items_ = BuildVisibleWeaponItemList(*catalog_snapshot);
+        cached_selectable_knife_models_.clear();
+        cached_selectable_knife_models_.reserve(catalog_snapshot->knife_items.size() + 1);
+        cached_selectable_knife_models_.push_back(
+            NamedId {0, Ui(UiTextId::SelectKnifeModel)});
+        for (const auto& knife_item : catalog_snapshot->knife_items)
+        {
+            if (IsSelectableKnifeModelDefinition(*catalog_snapshot, knife_item.id))
+            {
+                cached_selectable_knife_models_.push_back(knife_item);
+            }
+        }
+        cached_weapon_paints_.clear();
+        cached_glove_paints_.clear();
+    }
+
+    const std::vector<NamedId>& CachedCompatibleWeaponPaints(
+        const Catalog& catalog,
+        const int definition_index)
+    {
+        const auto cached = cached_weapon_paints_.find(definition_index);
+        if (cached != cached_weapon_paints_.end())
+        {
+            return cached->second;
+        }
+
+        const auto [inserted, unused] = cached_weapon_paints_.try_emplace(
+            definition_index,
+            nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(
+                catalog,
+                definition_index));
+        static_cast<void>(unused);
+        return inserted->second;
+    }
+
+    const std::vector<NamedId>& CachedCompatibleGlovePaints(
+        const Catalog& catalog,
+        const int glove_item_id)
+    {
+        const auto cached = cached_glove_paints_.find(glove_item_id);
+        if (cached != cached_glove_paints_.end())
+        {
+            return cached->second;
+        }
+
+        const auto [inserted, unused] = cached_glove_paints_.try_emplace(
+            glove_item_id,
+            BuildVisibleGlovePaintList(catalog, glove_item_id));
+        static_cast<void>(unused);
+        return inserted->second;
+    }
+
     void DrawMainWindow()
     {
         auto status = state_.SnapshotStatus();
-        auto catalog = state_.SnapshotCatalog();
+        const auto catalog_snapshot = state_.SnapshotCatalogShared();
+        const auto& catalog = *catalog_snapshot;
+        EnsureCatalogUiCache(catalog_snapshot);
 
         ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize, ImGuiCond_Always);
@@ -1727,7 +1791,7 @@ private:
         }
 
         ImGui::Separator();
-        DrawActions();
+        DrawActions(catalog);
 
         ImGui::Separator();
         if (ImGui::CollapsingHeader(Ui(UiTextId::RuntimeDiagnostics)))
@@ -1889,8 +1953,7 @@ private:
             PushWorkingConfig();
         }
 
-        const auto visible_items = BuildVisibleWeaponItemList(catalog);
-        if (ComboById(Ui(UiTextId::Item), visible_items, profile.base_item, 8))
+        if (ComboById(Ui(UiTextId::Item), cached_visible_weapon_items_, profile.base_item, 8))
         {
             profile.override_item = 0;
             PushWorkingConfig();
@@ -1930,7 +1993,7 @@ private:
             PushWorkingConfig();
         }
 
-        const auto weapon_paints = nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(catalog, profile.base_item);
+        const auto& weapon_paints = CachedCompatibleWeaponPaints(catalog, profile.base_item);
         const auto paint_compatibility = nskinzcs2::CatalogBuilder::CheckWeaponPaintCompatibility(
             &catalog, profile.base_item, profile.paint_kit);
         const auto blocked_paint = paint_compatibility != nskinzcs2::WeaponPaintCompatibility::Compatible;
@@ -2061,17 +2124,11 @@ private:
 
         if (profile.mode == KnifeProfileMode::ModelAndFinish)
         {
-            std::vector<NamedId> knife_model_items;
-            knife_model_items.reserve(catalog.knife_items.size() + 1);
-            knife_model_items.push_back(NamedId {0, Ui(UiTextId::SelectKnifeModel)});
-            for (const auto& knife_item : catalog.knife_items)
-            {
-                if (IsSelectableKnifeModelDefinition(catalog, knife_item.id))
-                {
-                    knife_model_items.push_back(knife_item);
-                }
-            }
-            if (ComboById(Ui(UiTextId::KnifeModel), knife_model_items, profile.model_definition, 10))
+            if (ComboById(
+                    Ui(UiTextId::KnifeModel),
+                    cached_selectable_knife_models_,
+                    profile.model_definition,
+                    10))
             {
                 // The mode selector is authoritative. Selecting/clearing a
                 // model must never silently switch finish-only/model modes.
@@ -2080,10 +2137,9 @@ private:
             ImGui::TextWrapped("%s", Ui(UiTextId::KnifeTargetVanillaHint));
         }
 
-        const auto knife_paints =
+        const auto& knife_paints =
             profile.mode == KnifeProfileMode::ModelAndFinish && profile.model_definition > 0
-                ? nskinzcs2::CatalogBuilder::BuildCompatibleWeaponPaintList(
-                    catalog, profile.model_definition)
+                ? CachedCompatibleWeaponPaints(catalog, profile.model_definition)
                 : catalog.weapon_paint_kits;
         const auto knife_paint_compatibility =
             profile.mode == KnifeProfileMode::ModelAndFinish && profile.model_definition > 0
@@ -2305,7 +2361,7 @@ private:
             profile.mode == GloveProfileMode::ModelAndFinish
                 ? profile.model_definition
                 : 0;
-        const auto glove_paint_list = BuildVisibleGlovePaintList(catalog, glove_item_id);
+        const auto& glove_paint_list = CachedCompatibleGlovePaints(catalog, glove_item_id);
         if (ComboFinishByIntent(
                 Ui(UiTextId::PaintKit),
                 glove_paint_list,
@@ -2471,8 +2527,7 @@ private:
             PushWorkingConfig();
         }
 
-        const auto visible_items = BuildVisibleWeaponItemList(catalog);
-        if (ComboById(Ui(UiTextId::Weapon), visible_items, profile.base_item, 8))
+        if (ComboById(Ui(UiTextId::Weapon), cached_visible_weapon_items_, profile.base_item, 8))
         {
             PushWorkingConfig();
         }
@@ -3180,12 +3235,14 @@ private:
             const bool configured = sticker.kit_id > 0;
             const auto preset = nskinzcs2::ui::sticker_preview::EffectivePreset(
                 weapon_definition, slot, legacy_model);
-            const auto authored_scale = std::max(1.0f, preset.authored_scale);
-            // g_vStickerNScale is an inverse UV scale. The visible sticker
-            // island spans roughly +/-1/scale around its center; applying the
-            // exact VMDL Jacobian makes overlaps and perspective match the gun.
+            // Project the real unit-wide CS2 sticker plane instead of the old
+            // two-unit-wide editor marker.  This keeps the preview footprint
+            // close to the in-game decal while retaining the VMDL surface
+            // perspective below.
             const auto half_uv_extent =
-                std::clamp(sticker.scale, 0.1f, 5.0f) / authored_scale;
+                nskinzcs2::ui::sticker_preview::ComputeStickerPreviewHalfExtent(
+                    sticker.scale,
+                    preset.authored_scale);
             const auto radians = sticker.rotation * 3.14159265358979323846f / 180.0f;
             const auto cosine = std::cos(radians);
             const auto sine = std::sin(radians);
@@ -3360,26 +3417,53 @@ private:
         }
 
         ImGui::BeginDisabled(!sticker.custom_position);
-        if (ImGui::DragFloat(
-                Ui(UiTextId::StickerOffsetX),
-                &sticker.offset_x,
-                0.0001f,
-                0.0f,
-                0.0f,
-                "%.5f"))
+        const auto draw_offset_controls = [&] (
+            const UiTextId label,
+            const char* slider_id,
+            const char* exact_id,
+            float& value)
         {
+            bool changed = false;
+            ImGui::TextUnformatted(Ui(label));
+            const auto available = ImGui::GetContentRegionAvail().x;
+            const auto exact_width = std::clamp(available * 0.34f, 116.0f, 148.0f);
+            ImGui::SetNextItemWidth(std::max(80.0f, available - exact_width - ImGui::GetStyle().ItemSpacing.x));
+            changed |= ImGui::SliderFloat(
+                slider_id,
+                &value,
+                -nskinzcs2::ui::sticker_preview::kFineOffsetRailLimit,
+                nskinzcs2::ui::sticker_preview::kFineOffsetRailLimit,
+                "%.5f",
+                ImGuiSliderFlags_NoRoundToFormat);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(exact_width);
+            changed |= ImGui::InputFloat(
+                exact_id,
+                &value,
+                0.0001f,
+                0.001f,
+                "%.5f");
+            return changed;
+        };
+        if (draw_offset_controls(
+                UiTextId::StickerOffsetX,
+                "##StickerOffsetXSlider",
+                "##StickerOffsetXExact",
+                sticker.offset_x))
+        {
+            sticker.offset_x = nskinzcs2::model::NormalizeStickerOffset(sticker.offset_x);
             QueueStickerLivePreview();
         }
-        if (ImGui::DragFloat(
-                Ui(UiTextId::StickerOffsetY),
-                &sticker.offset_y,
-                0.0001f,
-                0.0f,
-                0.0f,
-                "%.5f"))
+        if (draw_offset_controls(
+                UiTextId::StickerOffsetY,
+                "##StickerOffsetYSlider",
+                "##StickerOffsetYExact",
+                sticker.offset_y))
         {
+            sticker.offset_y = nskinzcs2::model::NormalizeStickerOffset(sticker.offset_y);
             QueueStickerLivePreview();
         }
+        ImGui::TextDisabled("%s", Ui(UiTextId::StickerOffsetRailHelp));
         ImGui::EndDisabled();
 
         if (ImGui::Button(Ui(UiTextId::StickerResetPresetPosition), ImVec2(-1.0f, 0.0f)))
@@ -3436,10 +3520,9 @@ private:
         ImGui::PopID();
     }
 
-    void DrawActions()
+    void DrawActions(const Catalog& catalog)
     {
         const float width = ImGui::GetContentRegionAvail().x / 3.0f;
-        const auto catalog = state_.SnapshotCatalog();
         if (ImGui::Button(Ui(UiTextId::Update), ImVec2(width - 4.0f, 30.0f)))
         {
             PublishWorkingConfigUpdate(L"Update");
@@ -3576,7 +3659,8 @@ private:
 
     bool PublishWorkingConfigUpdate(const wchar_t* source)
     {
-        const auto catalog = state_.SnapshotCatalog();
+        const auto catalog_snapshot = state_.SnapshotCatalogShared();
+        const auto& catalog = *catalog_snapshot;
         const auto runtime_status = state_.SnapshotStatus();
         std::wstring validation_issue;
         if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
@@ -3726,6 +3810,11 @@ private:
     std::filesystem::path config_path_;
     DWORD external_runtime_process_id_ = 0;
     ConfigDocument working_config_;
+    std::shared_ptr<const Catalog> cached_catalog_snapshot_;
+    std::vector<NamedId> cached_visible_weapon_items_;
+    std::vector<NamedId> cached_selectable_knife_models_;
+    std::unordered_map<int, std::vector<NamedId>> cached_weapon_paints_;
+    std::unordered_map<int, std::vector<NamedId>> cached_glove_paints_;
     bool working_config_dirty_ = false;
     int selected_profile_ = 0;
     int selected_knife_profile_ = 0;

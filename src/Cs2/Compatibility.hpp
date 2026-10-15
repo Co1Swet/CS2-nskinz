@@ -11,9 +11,9 @@
 
 namespace nskinzcs2::compatibility
 {
-inline constexpr std::string_view kVerifiedClientVersion = "2000922";
-inline constexpr std::string_view kVerifiedPatchVersion = "1.41.8.8";
-inline constexpr std::string_view kVerifiedSourceRevision = "11064488";
+inline constexpr std::string_view kVerifiedClientVersion = "2000932";
+inline constexpr std::string_view kVerifiedPatchVersion = "1.41.9.1";
+inline constexpr std::string_view kVerifiedSourceRevision = "11131657";
 inline constexpr std::string_view kVerifiedHlaeVersion = "2.192.6.0";
 
 inline constexpr char kSource2ClientInterface[] = "Source2Client002";

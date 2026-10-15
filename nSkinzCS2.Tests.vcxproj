@@ -121,6 +121,7 @@
     <ClInclude Include="src\Runtime\Shaders\RadarDecodeVertex.generated.hpp" />
     <ClInclude Include="src\Runtime\WorkshopMaps.hpp" />
     <ClInclude Include="src\UI\StickerPreviewPlacement.generated.hpp" />
+    <ClInclude Include="src\UI\StickerPreviewMetrics.hpp" />
     <ClInclude Include="third_party\MinHook\include\MinHook.h" />
     <ClInclude Include="third_party\json\json.hpp" />
   </ItemGroup>

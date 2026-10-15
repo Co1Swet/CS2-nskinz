@@ -42,6 +42,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <set>
@@ -66,6 +67,7 @@ constexpr const wchar_t* kKeychainClientClassNameFallbackWide = L"CKeychainModul
 enum class RuntimePerfPhase : std::size_t
 {
     RenderCallback, OriginalCallback, PreOriginal, Factory, Poll, EntityScan,
+    PawnScan, ObserverResolution, WeaponApply, GloveApply, StatusPublish,
     Mesh, KnifeDiscovery, NativeRefresh, Count
 };
 struct RuntimePerfCounter
@@ -103,8 +105,11 @@ void FlushRuntimePerformanceTelemetry()
     const auto now = GetTickCount64();
     if (now - last_report < 5000) return;
     last_report = now;
-    constexpr std::array names {L"render_callback", L"engine_original", L"pre_original", L"factory",
-        L"poll", L"entity_scan", L"mesh", L"knife_discovery", L"native_refresh"};
+    constexpr std::array names {
+        L"render_callback", L"engine_original", L"pre_original", L"factory",
+        L"poll", L"entity_scan", L"pawn_scan", L"observer_resolution",
+        L"weapon_apply", L"glove_apply", L"status_publish", L"mesh",
+        L"knife_discovery", L"native_refresh"};
     std::wstringstream line;
     bool any = false;
     line << L"Runtime performance (5s window; nested phases, not FPS):";
@@ -2153,6 +2158,97 @@ std::wstring BuildRuntimeEntityRttiDescriptor(const void* object)
 
     stream << L", status=ok}";
     return stream.str();
+}
+
+// Entity RTTI is immutable for the lifetime of client.dll, while the runtime
+// asks for the same handful of class names from several cosmetic modules on
+// every maintenance poll. Building the full diagnostic descriptor performs
+// module lookups, path queries and stream formatting, so keep that slow path
+// for logs and cache the class name by vtable for normal classification.
+const std::wstring& ResolveRuntimeEntityRttiClassName(const void* object)
+{
+    static const std::wstring empty_class_name;
+    if (object == nullptr)
+    {
+        return empty_class_name;
+    }
+
+    void** vtable = nullptr;
+    if (!SafeReadValue(object, vtable) || vtable == nullptr)
+    {
+        return empty_class_name;
+    }
+
+    struct ThreadClassNameCacheEntry
+    {
+        const void* vtable = nullptr;
+        const std::wstring* class_name = nullptr;
+    };
+    constexpr std::size_t kThreadClassNameCacheSize = 128;
+    static thread_local std::array<ThreadClassNameCacheEntry, kThreadClassNameCacheSize>
+        thread_cache {};
+    const auto thread_cache_index =
+        (reinterpret_cast<std::uintptr_t>(vtable) >> 4) &
+        (kThreadClassNameCacheSize - 1);
+    auto& thread_cache_entry = thread_cache[thread_cache_index];
+    if (thread_cache_entry.vtable == vtable &&
+        thread_cache_entry.class_name != nullptr)
+    {
+        return *thread_cache_entry.class_name;
+    }
+
+    static std::mutex cache_mutex;
+    static std::unordered_map<const void*, std::unique_ptr<const std::wstring>>
+        class_names_by_vtable;
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        if (const auto cached = class_names_by_vtable.find(vtable);
+            cached != class_names_by_vtable.end())
+        {
+            thread_cache_entry = {vtable, cached->second.get()};
+            return *cached->second;
+        }
+    }
+
+    std::wstring class_name;
+    void* locator = nullptr;
+    if (SafeReadValue(vtable - 1, locator) && locator != nullptr)
+    {
+        const auto locator_module = GetModuleFromAddress(locator);
+        const auto locator_module_span = locator_module != nullptr
+            ? GetModuleSpan(locator_module)
+            : std::optional<ModuleSpan> {};
+        MsvcRttiCompleteObjectLocator complete_object_locator {};
+        if (locator_module_span.has_value() &&
+            SafeReadValue(locator, complete_object_locator) &&
+            complete_object_locator.type_descriptor_rva > 0 &&
+            static_cast<std::size_t>(complete_object_locator.type_descriptor_rva) <
+                locator_module_span->size)
+        {
+            const auto* type_descriptor =
+                locator_module_span->base +
+                static_cast<std::size_t>(complete_object_locator.type_descriptor_rva);
+            std::string raw_name;
+            if (SafeReadCString(
+                    reinterpret_cast<const char*>(type_descriptor) + sizeof(void*) * 2,
+                    raw_name,
+                    256))
+            {
+                class_name = NarrowToWide(SimplifyMsvcDecoratedTypeName(raw_name));
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mutex);
+        const auto [cached, inserted] =
+            class_names_by_vtable.try_emplace(
+                vtable,
+                std::make_unique<const std::wstring>(std::move(class_name)));
+        static_cast<void>(inserted);
+        thread_cache_entry = {vtable, cached->second.get()};
+        return *cached->second;
+    }
 }
 
 template <typename Result>
@@ -17964,50 +18060,12 @@ bool TryResolveRuntimeEntityFromHandle(
 
 std::wstring DescribeObservedPawnClassName(void* entity)
 {
-    if (entity == nullptr)
-    {
-        return {};
-    }
-
-    const auto rtti = BuildRuntimeEntityRttiDescriptor(entity);
-    const auto name_marker = rtti.find(L", name=");
-    if (name_marker != std::wstring::npos)
-    {
-        const auto start = name_marker + 7;
-        auto end = rtti.find(L", raw_name=", start);
-        if (end == std::wstring::npos)
-        {
-            end = rtti.find(L", status=", start);
-        }
-        if (end == std::wstring::npos)
-        {
-            end = rtti.find(L'}', start);
-        }
-        if (end != std::wstring::npos && end > start)
-        {
-            return rtti.substr(start, end - start);
-        }
-    }
-
-    if (rtti.find(L"ObserverPawn") != std::wstring::npos)
-    {
-        return L"C_CSObserverPawn";
-    }
-    if (rtti.find(L"CSPlayerPawn") != std::wstring::npos)
-    {
-        return L"C_CSPlayerPawn";
-    }
-    if (rtti.find(L"PlayerPawn") != std::wstring::npos)
-    {
-        return L"C_BasePlayerPawn";
-    }
-
-    return {};
+    return ResolveRuntimeEntityRttiClassName(entity);
 }
 
 bool RuntimeEntityLooksLikeObserverPawn(void* entity)
 {
-    const auto class_name = DescribeObservedPawnClassName(entity);
+    const auto& class_name = ResolveRuntimeEntityRttiClassName(entity);
     return class_name.find(L"ObserverPawn") != std::wstring::npos;
 }
 
@@ -18026,7 +18084,8 @@ void PopulateObservedPawnRuntimeInfo(
     }
 
     pawn_info.pawn_class_name = DescribeObservedPawnClassName(pawn_info.entity);
-    pawn_info.pawn_is_observer = RuntimeEntityLooksLikeObserverPawn(pawn_info.entity);
+    pawn_info.pawn_is_observer =
+        pawn_info.pawn_class_name.find(L"ObserverPawn") != std::wstring::npos;
 
     if (offsets.base_entity_health != 0)
     {
@@ -18523,15 +18582,9 @@ ObserverTargetResolution ResolveObserverFirstWatchedTarget(
     bool saw_observer_context = false;
 
     const auto entity_looks_like_observer_pawn =
-        [](void* entity) noexcept
+        [](void* entity)
         {
-            if (entity == nullptr)
-            {
-                return false;
-            }
-
-            const auto rtti = BuildRuntimeEntityRttiDescriptor(entity);
-            return rtti.find(L"ObserverPawn") != std::wstring::npos;
+            return RuntimeEntityLooksLikeObserverPawn(entity);
         };
 
     auto score_candidate =
@@ -18803,9 +18856,17 @@ ObserverTargetResolution ResolveObserverFirstWatchedTarget(
             continue;
         }
 
-        if (offsets.controller_observer_services != 0 ||
-            offsets.controller_observer_target != 0 ||
-            offsets.controller_observer_mode != 0)
+        const auto& class_name = ResolveRuntimeEntityRttiClassName(entity);
+        const auto class_name_known = !class_name.empty();
+        const auto class_is_player_controller =
+            class_name.find(L"PlayerController") != std::wstring::npos;
+        const auto class_is_observer_pawn =
+            class_name.find(L"ObserverPawn") != std::wstring::npos;
+
+        if ((!class_name_known || class_is_player_controller) &&
+            (offsets.controller_observer_services != 0 ||
+             offsets.controller_observer_target != 0 ||
+             offsets.controller_observer_mode != 0))
         {
             bool controller_like = false;
             if (offsets.controller_steam_id != 0)
@@ -18868,7 +18929,8 @@ ObserverTargetResolution ResolveObserverFirstWatchedTarget(
             }
         }
 
-        if (offsets.pawn_observer_services != 0)
+        if (offsets.pawn_observer_services != 0 &&
+            (!class_name_known || class_is_observer_pawn))
         {
             void* observer_services = nullptr;
             if (SafeReadField(entity, offsets.pawn_observer_services, observer_services) &&
@@ -81786,8 +81848,8 @@ IndependentKnifeFinishResult RefreshIndependentKnifeFinish(const nskinzcs2::runt
     const auto& binding = g_hook_state.weapon_skin_refresh;
     if (binding.offset_patched || binding.standard_material_owner_offset != 0x610 ||
         binding.original_offset != 0xAB0 || binding.original_companion_offset != 0xAC8 ||
-        reinterpret_cast<std::uintptr_t>(binding.standard_clear_materials) != context.client + 0x14E3C60 ||
-        reinterpret_cast<std::uintptr_t>(binding.standard_generate_materials) != context.client + 0x803ED0)
+        reinterpret_cast<std::uintptr_t>(binding.standard_clear_materials) != context.client + 0x14E7AA0 ||
+        reinterpret_cast<std::uintptr_t>(binding.standard_generate_materials) != context.client + 0x802950)
         return fail(L"Native knife material clear/generate binding does not match the verified client.");
     auto* world = reinterpret_cast<void*>(context.binding.world.address);
     auto* hud = reinterpret_cast<void*>(context.binding.hud_weapon.address);
@@ -82935,6 +82997,67 @@ void PollIndependentKnifeModel(
     }
 }
 
+struct RuntimeCatalogDefinitionIndexCache
+{
+    std::shared_ptr<const nskinzcs2::model::Catalog> catalog;
+    std::unordered_set<int> knife_definition_indices;
+    std::unordered_set<int> glove_definition_indices;
+    std::unordered_set<int> known_definition_indices;
+};
+
+const RuntimeCatalogDefinitionIndexCache& ResolveRuntimeCatalogDefinitionIndex(
+    std::shared_ptr<const nskinzcs2::model::Catalog> catalog)
+{
+    // PollGameThreadStateModern runs on the captured game thread. Retaining the
+    // immutable catalog snapshot makes pointer identity a safe invalidation key
+    // and removes three hash-table allocations plus a full catalog walk from
+    // every weapon/glove/knife/keychain maintenance pass.
+    static RuntimeCatalogDefinitionIndexCache cache;
+    if (cache.catalog.get() == catalog.get())
+    {
+        return cache;
+    }
+
+    RuntimeCatalogDefinitionIndexCache replacement;
+    replacement.catalog = std::move(catalog);
+    if (replacement.catalog != nullptr)
+    {
+        replacement.knife_definition_indices.reserve(replacement.catalog->knife_items.size());
+        replacement.glove_definition_indices.reserve(replacement.catalog->glove_items.size());
+        replacement.known_definition_indices.reserve(
+            replacement.catalog->base_items.size() +
+            replacement.catalog->knife_items.size() +
+            replacement.catalog->glove_items.size());
+
+        for (const auto& item : replacement.catalog->base_items)
+        {
+            if (item.id > 0)
+            {
+                replacement.known_definition_indices.insert(item.id);
+            }
+        }
+        for (const auto& item : replacement.catalog->knife_items)
+        {
+            if (item.id > 0)
+            {
+                replacement.knife_definition_indices.insert(item.id);
+                replacement.known_definition_indices.insert(item.id);
+            }
+        }
+        for (const auto& item : replacement.catalog->glove_items)
+        {
+            if (item.id > 0)
+            {
+                replacement.glove_definition_indices.insert(item.id);
+                replacement.known_definition_indices.insert(item.id);
+            }
+        }
+    }
+
+    cache = std::move(replacement);
+    return cache;
+}
+
 void PollGameThreadStateModern()
 {
     const auto now = GetTickCount64();
@@ -83437,41 +83560,14 @@ void PollGameThreadStateModern()
     g_hook_state.next_runtime_poll_millis.store(now + runtime_poll_interval_ms);
     trace.Step(L"Enabled profiles detected; resolving live entity scan ceiling.");
 
-    std::unordered_set<int> knife_definition_indices;
-    std::unordered_set<int> glove_definition_indices;
-    std::unordered_set<int> known_definition_indices;
-    knife_definition_indices.reserve(catalog.knife_items.size());
-    glove_definition_indices.reserve(catalog.glove_items.size());
-    known_definition_indices.reserve(
-        catalog.base_items.size() +
-        catalog.knife_items.size() +
-        catalog.glove_items.size());
-
-    for (const auto& item : catalog.base_items)
-    {
-        if (item.id > 0)
-        {
-            known_definition_indices.insert(item.id);
-        }
-    }
-
-    for (const auto& item : catalog.knife_items)
-    {
-        if (item.id > 0)
-        {
-            knife_definition_indices.insert(item.id);
-            known_definition_indices.insert(item.id);
-        }
-    }
-
-    for (const auto& item : catalog.glove_items)
-    {
-        if (item.id > 0)
-        {
-            glove_definition_indices.insert(item.id);
-            known_definition_indices.insert(item.id);
-        }
-    }
+    const auto& catalog_definition_index =
+        ResolveRuntimeCatalogDefinitionIndex(catalog_snapshot);
+    const auto& knife_definition_indices =
+        catalog_definition_index.knife_definition_indices;
+    const auto& glove_definition_indices =
+        catalog_definition_index.glove_definition_indices;
+    const auto& known_definition_indices =
+        catalog_definition_index.known_definition_indices;
 
     std::vector<void*> entity_cache;
     std::wstring ceiling_issue;
@@ -83622,8 +83718,10 @@ void PollGameThreadStateModern()
         }
     }
 
-    for (int entity_index = 0; entity_index <= highest_live_entity_index; ++entity_index)
     {
+        RuntimePerfScope pawn_scan_performance(RuntimePerfPhase::PawnScan);
+        for (int entity_index = 0; entity_index <= highest_live_entity_index; ++entity_index)
+        {
         void* entity = entity_cache[static_cast<std::size_t>(entity_index)];
         if (entity == nullptr)
         {
@@ -83662,11 +83760,11 @@ void PollGameThreadStateModern()
         ++player_controllers;
         pawn_xuids[pawn_entity_index] = xuid;
         pawn_handles[pawn_entity_index] = pawn_handle;
-        pawn_controller_indices[pawn_entity_index] = entity_index;
-    }
+            pawn_controller_indices[pawn_entity_index] = entity_index;
+        }
 
-    for (const auto& [pawn_entity_index, xuid] : pawn_xuids)
-    {
+        for (const auto& [pawn_entity_index, xuid] : pawn_xuids)
+        {
         if (!LooksLikeSteamXuid(xuid) ||
             pawn_entity_index < 0 ||
             pawn_entity_index > highest_live_entity_index)
@@ -83710,9 +83808,10 @@ void PollGameThreadStateModern()
             knife_definition_indices,
             glove_definition_indices,
             pawn_info);
-        if (pawn_info.active_weapon_entity_index >= 0)
-        {
-            ++active_weapons;
+            if (pawn_info.active_weapon_entity_index >= 0)
+            {
+                ++active_weapons;
+            }
         }
     }
 
@@ -83746,31 +83845,37 @@ void PollGameThreadStateModern()
         trace.Step(stream.str());
     }
 
-    const auto preferred_knife_target_xuid = ResolvePreferredKnifeTargetXuid(config, pawn_xuids);
-    const auto heuristic_watched_xuid = ResolveWatchedXuid(
-        entity_list,
-        pawn_xuids,
-        target_xuids_by_account,
-        entity_cache,
-        knife_definition_indices,
-        preferred_knife_target_xuid,
-        g_hook_state.schema_offsets);
-    const auto observer_resolution =
-        ResolveObserverFirstWatchedTarget(
+    std::uint64_t preferred_knife_target_xuid = 0;
+    std::uint64_t heuristic_watched_xuid = 0;
+    ObserverTargetResolution observer_resolution {};
+    ObserverRealViewmodelResolution observer_real_viewmodel_resolution {};
+    HeuristicXuidBridgeResolution bridge_resolution {};
+    ObserverRealViewmodelResolution bridge_real_viewmodel_resolution {};
+    WatchedXuidResolution watched_resolution {};
+    {
+        RuntimePerfScope observer_performance(RuntimePerfPhase::ObserverResolution);
+        preferred_knife_target_xuid = ResolvePreferredKnifeTargetXuid(config, pawn_xuids);
+        heuristic_watched_xuid = ResolveWatchedXuid(
+            entity_list,
+            pawn_xuids,
+            target_xuids_by_account,
+            entity_cache,
+            knife_definition_indices,
+            preferred_knife_target_xuid,
+            g_hook_state.schema_offsets);
+        observer_resolution = ResolveObserverFirstWatchedTarget(
             entity_list,
             entity_cache,
             pawn_xuids,
             knife_definition_indices,
             glove_definition_indices,
             g_hook_state.schema_offsets);
-    const auto observer_real_viewmodel_resolution =
-        ResolveObserverFirstRealViewmodel(
+        observer_real_viewmodel_resolution = ResolveObserverFirstRealViewmodel(
             entity_list,
             entity_cache,
             observer_resolution,
             g_hook_state.schema_offsets);
-    const auto bridge_resolution =
-        ResolveHeuristicXuidBridge(
+        bridge_resolution = ResolveHeuristicXuidBridge(
             entity_list,
             entity_cache,
             pawn_runtime,
@@ -83780,17 +83885,16 @@ void PollGameThreadStateModern()
             known_definition_indices,
             knife_definition_indices,
             glove_definition_indices);
-    const auto bridge_real_viewmodel_resolution =
-        ResolveHeuristicXuidBridgeRealViewmodel(
+        bridge_real_viewmodel_resolution = ResolveHeuristicXuidBridgeRealViewmodel(
             entity_list,
             entity_cache,
             bridge_resolution,
             g_hook_state.schema_offsets);
-    const auto watched_resolution =
-        ResolveWatchedXuidFromObserverOrBridge(
+        watched_resolution = ResolveWatchedXuidFromObserverOrBridge(
             observer_resolution,
             bridge_resolution,
             heuristic_watched_xuid);
+    }
     const auto resolved_watched_xuid = watched_resolution.watched_xuid;
     // A single enabled/live knife profile is an explicit target selection.
     // Observer and HUD evidence can disappear or briefly point at another
@@ -84317,10 +84421,12 @@ void PollGameThreadStateModern()
         }
     }
 
-    if (has_weapon_profile)
     {
-        for (auto& [xuid, player_binding] : runtime_entities.players_by_xuid)
+        RuntimePerfScope weapon_apply_performance(RuntimePerfPhase::WeaponApply);
+        if (has_weapon_profile)
         {
+            for (auto& [xuid, player_binding] : runtime_entities.players_by_xuid)
+            {
             if (target_xuids.find(xuid) == target_xuids.end())
             {
                 continue;
@@ -85613,12 +85719,13 @@ void PollGameThreadStateModern()
 
             }
         }
-    }
+        }
 
-    if (!pending_weapon_refresh_requests.empty())
-    {
-        trace.Step(L"Processing pending weapon refresh requests.");
-        TryProcessPendingWeaponRefreshRequests(g_hook_state.schema_offsets, pending_weapon_refresh_requests);
+        if (!pending_weapon_refresh_requests.empty())
+        {
+            trace.Step(L"Processing pending weapon refresh requests.");
+            TryProcessPendingWeaponRefreshRequests(g_hook_state.schema_offsets, pending_weapon_refresh_requests);
+        }
     }
 
     const auto watched_knife_state_still_matches_live_target =
@@ -85764,6 +85871,7 @@ void PollGameThreadStateModern()
 
     if (has_glove_profile)
     {
+        RuntimePerfScope glove_apply_performance(RuntimePerfPhase::GloveApply);
         trace.Step(L"Entering glove apply path.");
         for (auto& [xuid, player_binding] : runtime_entities.players_by_xuid)
         {
@@ -87391,6 +87499,7 @@ void PollGameThreadStateModern()
         }
     }
 
+    RuntimePerfScope status_publish_performance(RuntimePerfPhase::StatusPublish);
     if (!target_knife_model_swap_requested)
     {
         ClearKnifeModelPathSwapState(true);
@@ -87527,15 +87636,27 @@ bool TryPollGameThreadStateGuarded()
     }
 }
 
-void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(const int cur_stage);
-void SuspendKnifeAnimationHookBeforeLikelyDemoSeek(const int cur_stage);
+void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(
+    const int cur_stage,
+    const bool has_runtime_mutations);
+void SuspendKnifeAnimationHookBeforeLikelyDemoSeek(
+    const int cur_stage,
+    const bool has_runtime_mutations);
 
 bool TryRunFrameStagePreOriginalPhaseGuarded(const int cur_stage, const std::uint64_t frame_count)
 {
     __try
     {
-        SuspendKnifeAnimationHookBeforeLikelyDemoSeek(cur_stage);
-        ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(cur_stage);
+        const auto has_runtime_mutations = HasDemoSeekSensitiveRuntimeMutations();
+        if (has_runtime_mutations)
+        {
+            SuspendKnifeAnimationHookBeforeLikelyDemoSeek(
+                cur_stage,
+                has_runtime_mutations);
+            ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(
+                cur_stage,
+                has_runtime_mutations);
+        }
 
         if (cur_stage == kCs2FrameRenderPass &&
             !g_hook_state.pending_runtime_reset_after_seek.load())
@@ -87602,9 +87723,15 @@ DemoSafetyPrepareReason ResolveDemoSafetyPrepareReason(
     return DemoSafetyPrepareReason::None;
 }
 
-void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(const int cur_stage)
+void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(
+    const int cur_stage,
+    const bool has_runtime_mutations)
 {
-    const auto has_runtime_mutations = HasDemoSeekSensitiveRuntimeMutations();
+    if (!has_runtime_mutations)
+    {
+        return;
+    }
+
     std::size_t binding_count = 0;
     {
         std::lock_guard<std::mutex> lock(g_hook_state.runtime_owned_attribute_mutex);
@@ -87622,11 +87749,6 @@ void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(const int cur_stage)
         std::scoped_lock lock(g_hook_state.resource_handle_query_mutex);
         active_knife_swap_state = g_hook_state.knife_model_path_swap_state.enabled ? 1 : 0;
         active_knife_published_bridge = g_hook_state.published_knife_model_path_swap_bridge.valid ? 1 : 0;
-    }
-
-    if (!has_runtime_mutations)
-    {
-        return;
     }
 
     bool demo_playing = false;
@@ -87695,8 +87817,15 @@ void ReleaseRuntimeOwnedGloveBindingsBeforeLikelyDemoSeek(const int cur_stage)
     g_hook_state.demo_tick.store(demo_tick);
 }
 
-void SuspendKnifeAnimationHookBeforeLikelyDemoSeek(const int cur_stage)
+void SuspendKnifeAnimationHookBeforeLikelyDemoSeek(
+    const int cur_stage,
+    const bool has_runtime_mutations)
 {
+    if (!has_runtime_mutations)
+    {
+        return;
+    }
+
     bool demo_playing = false;
     bool demo_paused = false;
     int demo_tick = -1;
@@ -87716,7 +87845,6 @@ void SuspendKnifeAnimationHookBeforeLikelyDemoSeek(const int cur_stage)
         return;
     }
 
-    const auto has_runtime_mutations = HasDemoSeekSensitiveRuntimeMutations();
     const auto prepare_reason =
         ResolveDemoSafetyPrepareReason(
             cur_stage,
@@ -87874,7 +88002,9 @@ void HookedClientFrameStageNotify(void* this_ptr, int cur_stage)
 
     const auto pre_original_succeeded = [&]()
     {
-        RuntimePerfScope performance(RuntimePerfPhase::PreOriginal);
+        RuntimePerfScope performance(
+            RuntimePerfPhase::PreOriginal,
+            cur_stage == kCs2FrameRenderPass);
         return TryRunFrameStagePreOriginalPhaseGuarded(cur_stage, frame_count);
     }();
     if (!pre_original_succeeded)

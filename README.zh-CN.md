@@ -21,23 +21,23 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.0-beta/Lyan_nskinz-v0.6.0-beta-EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.0-beta/Lyan_nskinz-v0.6.0-beta-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
-  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.6.0-beta"><img src="https://img.shields.io/badge/测试版-v0.6.0--beta-8250df?style=for-the-badge" alt="v0.6.0-beta 发布说明"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.1/Lyan_nskinz-v0.6.1-EN.dll"><img src="https://img.shields.io/badge/下载-英文%20DLL-2ea043?style=for-the-badge" alt="下载英文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.1/Lyan_nskinz-v0.6.1-zh-CN.dll"><img src="https://img.shields.io/badge/下载-中文%20DLL-0969da?style=for-the-badge" alt="下载中文 DLL"></a>
+  <a href="https://github.com/Lyan-edit/CS2-nskinz/releases/tag/v0.6.1"><img src="https://img.shields.io/badge/正式版-v0.6.1-8250df?style=for-the-badge" alt="v0.6.1 发布说明"></a>
   <a href="https://github.com/Lyan-edit/CS2-nskinz/issues/new/choose"><img src="https://img.shields.io/badge/提交问题-f85149?style=for-the-badge" alt="提交问题"></a>
 </p>
 
 > **安全提示：** nSkinzCS2 只用于通过 HLAE、带 `-insecure` 启动的离线 Demo 回放。请勿加载到 VAC 保护服务器或任何联机服务器。超出此范围使用造成的账号风险由使用者自行承担。
 
-## v0.6.0-beta 更新
+## v0.6.1 更新
 
-- 新增五个枪械贴纸槽位的可选自定义位置，默认仍为预设位置；offset X／Y 按 CS2 每槽位增量保存。
-- 新增可拖拽实时预览画布，34 个受支持枪械 definition 均显示各自枪口朝左的真实轮廓；预览和写入共用当前 VMDL／VMAT 生成的投影数据。
-- 按 CS2 `2000930` 更新默认 CT／T 手套的原生视觉刷新、HUD 消费者和实体根节点字节证据。
-- `de_mirage_water` 固定使用用户确认的内嵌 `720×720` Alpha 蒙版，合法透明空洞与抗锯齿边缘逐像素一致，RGB 仍取自本机工坊纹理，不再通过大面积暗区推断。
-- 临时 Demo 可在不写死字段向量长度的情况下补齐 legacy／现代贴纸字段，并在加载前重新解析验证每一个请求字段。
+- 将受保护的刀具、默认手套、枪械材质、动画和资源路径迁移到 CS2 `2000932`／Patch `1.41.9.1`（Steam Build `25947352`）。
+- 今日更新后继续保留五槽位贴纸创建、自定义位置、滑轨、具体枪型预览与节流实时同步。
+- 通过按实体代际缓存分类结果和复用不可变目录 UI 列表，降低帧回调与独立控制面板开销。
+- 重新验证本机完整饰品目录、任意字段数量 Demo 重写、枪皮材质、创意工坊雷达遮罩及 CS2 原生雷达编译。
+- 已验证 HLAE 基线更新到 `2.192.7`／AfxHookSource2 `0.41.7`。
 
-使用方法、验证结果与测试版边界见[中英双语 v0.6.0-beta 发布说明](docs/releases/v0.6.0-beta.md)。
+精确兼容证据、验证结果与限制见[中英双语 v0.6.1 发布说明](docs/releases/v0.6.1.md)。
 
 ## v0.5.8 更新（上一稳定版）
 
@@ -127,7 +127,7 @@ nSkinzCS2 是一个 Windows x64 DLL，用于在观看 Counter-Strike 2 Demo 时�
 
 ## 功能矩阵
 
-| 模块 | v0.6.0-beta 支持情况 | 说明 |
+| 模块 | v0.6.1 支持情况 | 说明 |
 | --- | --- | --- |
 | 枪械 | 按枪型筛选的涂装、种子、磨损、品质、名称标签及贴纸替换／创建 | 临时 Demo 可更新原皮和已有涂装枪械。已有贴纸保留变换／自由摆放数据；请求的缺失逻辑槽会创建到武器原生预设位置。运行时及导入配置仍会校验兼容性。 |
 | 刀 | 饰面、种子和磨损；实验性饰面＋模型替换 | 仅饰面隐藏模型选项；模型/切刀/检视替换已接入，但首次重建、拾取刀和 HUD 交接仍属实验功能。 |
@@ -140,27 +140,27 @@ nSkinzCS2 是一个 Windows x64 DLL，用于在观看 Counter-Strike 2 Demo 时�
 
 ## 快速开始
 
-v0.6.0-beta 已内嵌预编译面板着色器、独立 Demo 重写器、核验过的 Mirage Water 雷达蒙版并保留 `/MT`。除 Windows 10/11 x64、CS2 和 HLAE 外不需要其它运行库。`LoadLibrary failed` 排查见[单 DLL 加载说明](docs/portable-loading.md)。
+v0.6.1 已内嵌预编译面板着色器、独立 Demo 重写器、核验过的 Mirage Water 雷达蒙版并保留 `/MT`。除 Windows 10/11 x64、CS2 和 HLAE 外不需要其它运行库。`LoadLibrary failed` 排查见[单 DLL 加载说明](docs/portable-loading.md)。
 
 1. 使用 HLAE、带 `-insecure` 启动 CS2，然后打开离线 Demo。
 2. 下载一个 Release DLL。发布版使用 MSVC 静态运行库（`/MT`），不需要另装 Visual C++ Redistributable、Python、SDK 或 Visual Studio。
 3. 在 HLAE 中加载 DLL：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.6.0-beta-zh-CN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.6.1-zh-CN.dll"
 ```
 
 英文版：
 
 ```text
-mirv_loadlibrary "D:\Lyan_nskinz-v0.6.0-beta-EN.dll"
+mirv_loadlibrary "D:\Lyan_nskinz-v0.6.1-EN.dll"
 ```
 
 上述示例要求 DLL 位于 D 盘根目录，请改成实际完整路径。ZIP 内 DLL 文件名包含空格，加载时必须使用一对英文半角双引号；不要叠加两对引号或使用中文弯引号。
 
 按 `Insert` 显示面板，选择观战玩家 XUID 和外观配置，点击“更新”（`Update`）。请把 DLL 放在可写文件夹，独立面板与运行时需要在此生成和共享目录/配置文件。运行日志为 `nSkinzCS2.log`，面板日志为 `nSkinzCS2.ui.log`。
 
-升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 发布包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.0-beta/Lyan_nskinz-v0.6.0-beta-CS2-2000930-windows-x64.zip)含中英文 DLL、游戏版本、许可证／声明与加载说明。
+升级时请重启 HLAE/CS2，只加载**一个语言版本**的 DLL；先备份旧配置，不要在旧 DLL 已加载时叠加注入新版。[Windows x64 发布包](https://github.com/Lyan-edit/CS2-nskinz/releases/download/v0.6.1/Lyan_nskinz-v0.6.1-CS2-2000932-windows-x64.zip)含中英文 DLL、游戏版本、许可证／声明与加载说明。
 
 ## 创意工坊地图与模型替换
 
@@ -189,10 +189,10 @@ mirv_loadlibrary "D:\Lyan_nskinz-v0.6.0-beta-EN.dll"
 
 ## 兼容基线
 
-当前 `v0.6.0-beta` 源码／本地构建对应以下已检查基线。临时 Demo 可重写原皮和已有涂装的枪械／手套，创建缺失贴纸槽并补齐现代位置字段；地图模型／雷达、刀模、动作和外观效果仍需按 Demo 画面验收。精确功能范围与测试边界见 [v0.6.0-beta 发布说明](docs/releases/v0.6.0-beta.md)。
+当前 `v0.6.1` 源码／本地构建对应以下已检查基线。临时 Demo 可重写原皮和已有涂装的枪械／手套，创建缺失贴纸槽并补齐现代位置字段；地图模型／雷达、刀模、动作和外观效果仍需按 Demo 画面验收。精确功能范围与测试边界见 [v0.6.1 发布说明](docs/releases/v0.6.1.md)。
 
-- Steam app build ID `25815307`
-- CS2 Client/Server `2000930`、Patch `1.41.9.0`、Source revision `11106093`（2026-10-08 14:54:05）
+- Steam app build ID `25947352`
+- CS2 Client/Server `2000932`、Patch `1.41.9.1`、Source revision `11131657`（2026-10-14 16:57:53）
 - `client.dll` SHA-256：`44AF2AA0D2C64F90D273444CB393B8B679094F0B02136DBDB89D4EC82A560008`
 - `animationsystem.dll` SHA-256：`CA7697BB758200F35C9B3693820135BADF6BD1A63109E0CD775877920D087F03`
 - HLAE `2.192.6`；AfxHookSource2 `0.41.6`，SHA-256：`0E1378B81B5B82974EA8DD5C3E701E924D63C452927B50D64C1580F746D01F8B`
@@ -212,7 +212,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 生成解决方案
 ```
 
-输出文件为 `build/Release/Lyan_nskinz v0.6.0-beta EN.dll`、`build/Release/Lyan_nskinz v0.6.0-beta zh-CN.dll` 和 `build/Release/nSkinzCS2.Tests.exe`。`run-build-and-tests.cmd` 会构建并运行原生回归测试，`run-tests.cmd` 只运行现有测试程序。
+输出文件为 `build/Release/Lyan_nskinz v0.6.1 EN.dll`、`build/Release/Lyan_nskinz v0.6.1 zh-CN.dll` 和 `build/Release/nSkinzCS2.Tests.exe`。`run-build-and-tests.cmd` 会构建并运行原生回归测试，`run-tests.cmd` 只运行现有测试程序。
 
 </details>
 
@@ -238,7 +238,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 - 如果 Demo 中的刀已经拥有编译后的自定义材质，选择 `原皮（无涂装）` 后第一人称视角仍可能显示旧材质。正数刀涂装已验证；该旧材质清理问题不在 v0.4.5 的已修复声明内。
 - 当前优先读取已安装的 CS2 游戏数据，尚未完全改为实时物品 Schema 遍历。
 
-后续计划包括：完善原皮材质清理、扩大刀模/动画覆盖、支持空挂件模块创建，以及跟随 CS2 更新维护兼容性。
+后续计划包括：完善原皮材质清理、扩大刀模/动画覆盖、支持空挂件模块创建，以及跟随 CS2 更新维护兼容性。贴纸完成范围、挂件结构差异及推荐的 Demo 重建／运行时混合方案见[贴纸与挂件功能检查点](docs/development/sticker-keychain-checkpoint-20261010.md)。
 
 ## 常见问题
 
@@ -254,7 +254,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 **为什么刀上仍有旧材质？** 部分 Demo 物品带有编译后的第一人称材质，当前 v0.4.5 原皮路径无法保证全部清除，详见上面的已知限制。
 
-**应该下载哪个 DLL？** 单独下载时，英文界面使用 `Lyan_nskinz-v0.6.0-beta-EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz-v0.6.0-beta-zh-CN.dll`；双语 ZIP 内保留带空格编译文件名。两者兼容同一套 CS2 基线。
+**应该下载哪个 DLL？** 单独下载时，英文界面使用 `Lyan_nskinz-v0.6.1-EN.dll`，中文界面和中文目录名称使用 `Lyan_nskinz-v0.6.1-zh-CN.dll`；双语 ZIP 内保留带空格编译文件名。两者兼容同一套 CS2 基线。
 
 **仓库能打开，但图片显示破图标怎么办？** 某些网络无法访问 GitHub 的 raw 图片域名。本 README 已使用 GitHub 推荐的相对图片路径；如果仍然加载失败，可临时用管理员身份打开记事本，编辑 `C:\Windows\System32\drivers\etc\hosts`，追加：
 
@@ -280,7 +280,7 @@ CS2 更新可能改变内存布局。DLL 会记录检测到的版本，并在签
 
 ## 致谢与授权说明
 
-nSkinzCS2 v0.6.0-beta 以 [`AGPL-3.0-only`](LICENSE) 发布。地图更换实现移植并核对自 [MulNX_CS2](https://github.com/Co1Swet/MulNX_CS2) 提交 `361008b208326d9e7916ff2cd58dd57a0492c400`，并从 `f2466e18e26a8fc3daf4ac7945bc45220ba95993` 同步当前 CS2 的 GameSession 兼容变更；本项目不使用 MulNX 文件改写器。发布附件同时提供 DLL 对应的完整源码。再分发或修改时必须保留 [`NOTICE.md`](NOTICE.md)、AGPL 许可证、源码提供义务和 `third_party/` 内各组件声明。
+nSkinzCS2 v0.6.1 以 [`AGPL-3.0-only`](LICENSE) 发布。地图更换实现移植并核对自 [MulNX_CS2](https://github.com/Co1Swet/MulNX_CS2) 提交 `361008b208326d9e7916ff2cd58dd57a0492c400`，并从 `f2466e18e26a8fc3daf4ac7945bc45220ba95993` 同步当前 CS2 的 GameSession 兼容变更；本项目不使用 MulNX 文件改写器。发布附件同时提供 DLL 对应的完整源码。再分发或修改时必须保留 [`NOTICE.md`](NOTICE.md)、AGPL 许可证、源码提供义务和 `third_party/` 内各组件声明。
 
 临时换肤 Demo 由 nSkinz 自有代码和随源码提供的开源 `source2-demo` 解析／写入器实现。其 MIT／Apache-2.0 声明和源码位于 `third_party/source2-demo`，并记录在 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 

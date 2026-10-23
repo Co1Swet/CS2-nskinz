@@ -137,6 +137,17 @@ bool StartsWithInsensitive(const std::wstring_view value, const std::wstring_vie
         });
 }
 
+bool IsCompilerVpkDependency(const std::filesystem::path& path) noexcept
+{
+    if (_wcsicmp(path.extension().c_str(), L".vpk") != 0)
+    {
+        return false;
+    }
+    const auto filename = path.filename().wstring();
+    return StartsWithInsensitive(filename, L"shaders_pc") ||
+        _wcsicmp(filename.c_str(), L"pak01_dir.vpk") == 0;
+}
+
 bool LinkCompilerDependency(
     const std::filesystem::path& source,
     const std::filesystem::path& destination,
@@ -268,11 +279,13 @@ bool nskinzcs2::runtime::CompileRadarOverlayWithCs2(
                 continue;
             }
             const auto filename = entry.path().filename().wstring();
-            if (StartsWithInsensitive(filename, L"shaders_pc") &&
-                _wcsicmp(entry.path().extension().c_str(), L".vpk") == 0)
+            if (IsCompilerVpkDependency(entry.path()))
             {
                 HashPathMetadata(environment_hash, entry.path());
-                ++shader_packages;
+                if (StartsWithInsensitive(filename, L"shaders_pc"))
+                {
+                    ++shader_packages;
+                }
             }
         }
         if (iterator_error)
@@ -340,8 +353,7 @@ bool nskinzcs2::runtime::CompileRadarOverlayWithCs2(
                 continue;
             }
             const auto filename = entry.path().filename().wstring();
-            if (StartsWithInsensitive(filename, L"shaders_pc") &&
-                _wcsicmp(entry.path().extension().c_str(), L".vpk") == 0 &&
+            if (IsCompilerVpkDependency(entry.path()) &&
                 !LinkCompilerDependency(entry.path(), destination_root / entry.path().filename(), diagnostic))
             {
                 return false;

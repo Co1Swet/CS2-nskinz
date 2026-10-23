@@ -146,7 +146,8 @@ void RunDemoSkinRewriteTests()
         Check(item.at("replacement_definition_index") == 5031, "glove target definition must be serialized");
         Check(item.at("paint_kit") == 10037, "glove paint kit must be serialized");
         Check(item.at("custom_name") == "nSkinz CS2", "default glove name must be serialized");
-        Check(item.at("quality") == glove.quality, "glove quality must be serialized");
+        Check(item.at("quality") == 3,
+            "painted glove demo rebuilds must normalize the editor's zero default to unusual quality");
         Check(item.at("pattern_seed") == 123.0, "glove seed must be serialized");
         Check(std::abs(item.at("wear").get<double>() - 0.14) < 0.000001,
             "glove wear must be serialized");
@@ -285,7 +286,7 @@ void RunDemoSkinRewriteTests()
         "generated-demo manifests must not identify a different weapon definition");
     Check(
         runtime::IsGeneratedDemoRewrittenGloveProfile(manifest_demo, knife.xuid),
-        "generated-demo manifests must identify an exact reconstructed glove profile for one native visual refresh");
+        "generated-demo manifests must identify an exact reconstructed glove profile whose serialized transaction is authoritative");
     Check(
         !runtime::IsGeneratedDemoRewrittenGloveProfile(manifest_demo, knife.xuid + 1),
         "generated-demo manifests must keep unrelated glove profiles live");

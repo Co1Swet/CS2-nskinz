@@ -1815,6 +1815,64 @@ std::uint8_t* FindUniquePattern(const ModuleSpan& span, const char* pattern)
     return match_count == 1 ? only_match : nullptr;
 }
 
+std::uint8_t* FindUniqueWearableDefinitionRefreshThunk(const ModuleSpan& text)
+{
+    constexpr std::size_t kThunkSize = 27;
+    constexpr std::array<std::uint8_t, 3> kExpectedBaseNoOp {0xC2, 0x00, 0x00};
+    constexpr std::array<std::uint8_t, 10> kExpectedRefreshPrologue {
+        0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20};
+    if (text.base == nullptr || text.size < kThunkSize)
+    {
+        return nullptr;
+    }
+
+    const auto contains_range = [&text](const void* pointer, const std::size_t size)
+    {
+        const auto value = reinterpret_cast<std::uintptr_t>(pointer);
+        const auto begin = reinterpret_cast<std::uintptr_t>(text.base);
+        const auto end = begin + text.size;
+        return value >= begin && value <= end && size <= end - value;
+    };
+
+    std::uint8_t* only_match = nullptr;
+    std::size_t match_count = 0;
+    for (std::size_t offset = 0; offset + kThunkSize <= text.size; ++offset)
+    {
+        auto* const thunk = text.base + offset;
+        if (!nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk(thunk, kThunkSize))
+        {
+            continue;
+        }
+
+        std::int32_t base_displacement = 0;
+        std::int32_t refresh_displacement = 0;
+        std::memcpy(&base_displacement, thunk + 10, sizeof(base_displacement));
+        std::memcpy(&refresh_displacement, thunk + 23, sizeof(refresh_displacement));
+        auto* const base_client_think = thunk + 14 + base_displacement;
+        auto* const definition_refresh = thunk + 27 + refresh_displacement;
+        if (!contains_range(base_client_think, kExpectedBaseNoOp.size()) ||
+            !contains_range(definition_refresh, kExpectedRefreshPrologue.size()) ||
+            !std::equal(
+                kExpectedBaseNoOp.begin(),
+                kExpectedBaseNoOp.end(),
+                base_client_think) ||
+            !std::equal(
+                kExpectedRefreshPrologue.begin(),
+                kExpectedRefreshPrologue.end(),
+                definition_refresh))
+        {
+            continue;
+        }
+
+        only_match = thunk;
+        if (++match_count > 1)
+        {
+            return nullptr;
+        }
+    }
+    return match_count == 1 ? only_match : nullptr;
+}
+
 template <typename T>
 bool SafeReadValue(const void* address, T& out)
 {
@@ -8763,7 +8821,8 @@ bool TryResolveWearableClientEntitySystemFactory(
     }
 
     std::string schema_class_name_value;
-    constexpr std::uint32_t kExpectedWearableSchemaClassSize = 0x16F8;
+    constexpr auto kExpectedWearableSchemaClassSize =
+        nskinzcs2::compatibility::kWearableSchemaClassSize;
     if (!SafeReadCString(schema_class_name, schema_class_name_value, 128) ||
         schema_class_name_value != "C_EconWearable" ||
         schema_class_size != kExpectedWearableSchemaClassSize ||
@@ -8813,11 +8872,11 @@ struct WearableAllocatorCodeIdentity
 bool TryExtractWearableAllocatorCodeIdentity(
     HMODULE client_module,
     void* allocator,
+    const std::uint32_t expected_allocation_size,
     WearableAllocatorCodeIdentity& identity,
     std::wstring& issue)
 {
     constexpr std::size_t kProbeBytes = 0x180;
-    constexpr std::uint32_t kExpectedAllocationSize = 0x16F8;
     identity = {};
     issue.clear();
 
@@ -8848,7 +8907,7 @@ bool TryExtractWearableAllocatorCodeIdentity(
         {
             std::uint32_t immediate = 0;
             if (SafeReadValue(code + offset + 1, immediate) &&
-                immediate == kExpectedAllocationSize)
+                immediate == expected_allocation_size)
             {
                 allocation_size_seen = true;
             }
@@ -8894,7 +8953,7 @@ bool TryExtractWearableAllocatorCodeIdentity(
         }
 
         constructor_candidates.push_back({
-            kExpectedAllocationSize,
+            expected_allocation_size,
             constructor,
             primary_vtable,
         });
@@ -8904,7 +8963,7 @@ bool TryExtractWearableAllocatorCodeIdentity(
     {
         std::wstringstream stream;
         stream << L"The wearable allocator did not expose one unique 0x"
-            << std::hex << std::uppercase << kExpectedAllocationSize
+            << std::hex << std::uppercase << expected_allocation_size
             << std::dec << std::nouppercase
             << L" allocation/constructor/vtable identity (size_marker="
             << (allocation_size_seen ? 1 : 0)
@@ -8961,11 +9020,13 @@ bool TryResolveWearableEntityFactoryWithSchemaEvidenceAtFrameRenderPass(
     if (!TryExtractWearableAllocatorCodeIdentity(
             client_module,
             schema_evidence.schema_reflection_allocator_fn,
+            entity_factory.schema_class_size,
             reflection_identity,
             reflection_identity_issue) ||
         !TryExtractWearableAllocatorCodeIdentity(
             client_module,
             entity_factory.schema_allocator_fn,
+            entity_factory.schema_class_size,
             entity_identity,
             entity_identity_issue))
     {
@@ -9068,6 +9129,7 @@ bool TryResolveWearableClientClassFactoryWithSchemaEvidenceAtFrameRenderPass(
     if (!TryExtractWearableAllocatorCodeIdentity(
             client_module,
             schema_evidence.schema_reflection_allocator_fn,
+            nskinzcs2::compatibility::kWearableSchemaClassSize,
             reflection_identity,
             reflection_identity_issue))
     {
@@ -36732,6 +36794,8 @@ bool TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
     const std::uint64_t xuid)
 {
     constexpr std::size_t kClientThinkVtableSlot = 0x478 / sizeof(void*);
+    constexpr std::size_t kPerEntityClientThinkOffset = 0x318;
+    constexpr std::size_t kDispatcherSize = 16;
     constexpr std::size_t kThunkSize = 27;
     constexpr std::size_t kBaseCallDisplacementOffset = 10;
     constexpr std::size_t kBaseCallNextInstructionOffset = 14;
@@ -36756,24 +36820,23 @@ bool TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
     }
 
     void** primary_vtable = nullptr;
-    void* client_think = nullptr;
+    void* client_think_entry = nullptr;
     const auto client_module = GetModuleHandleW(L"client.dll");
     const auto client_span = GetModuleSpan(client_module);
-    std::array<std::uint8_t, kThunkSize> thunk_bytes {};
+    const auto client_text = GetTextSectionSpan(client_module);
+    std::array<std::uint8_t, kThunkSize> entry_bytes {};
     if (!SafeReadValue(entity, primary_vtable) ||
         primary_vtable == nullptr ||
         primary_vtable != reinterpret_cast<void**>(expected_primary_vtable) ||
-        !SafeReadValue(primary_vtable + kClientThinkVtableSlot, client_think) ||
-        client_think == nullptr ||
+        !SafeReadValue(primary_vtable + kClientThinkVtableSlot, client_think_entry) ||
+        client_think_entry == nullptr ||
         client_module == nullptr ||
         !client_span.has_value() ||
+        !client_text.has_value() ||
         !PointerInModule(*client_span, primary_vtable) ||
-        !PointerInModule(*client_span, client_think) ||
-        !IsExecutablePointer(client_think) ||
-        !SafeReadBytes(client_think, thunk_bytes.data(), thunk_bytes.size()) ||
-        !nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk(
-            thunk_bytes.data(),
-            thunk_bytes.size()))
+        !PointerInModule(*client_span, client_think_entry) ||
+        !IsExecutablePointer(client_think_entry) ||
+        !SafeReadBytes(client_think_entry, entry_bytes.data(), entry_bytes.size()))
     {
         std::wstringstream stream;
         stream << L"CEconWearable definition refresh rejected for XUID " << xuid
@@ -36781,9 +36844,96 @@ bool TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
             << L", entity_pointer=" << FormatPointer(entity)
             << L", vtable=" << FormatPointer(primary_vtable)
             << L", expected_vtable=" << FormatPointer(expected_primary_vtable)
-            << L", client_think=" << FormatClientRelativeCodePointer(client_think)
-            << L", reason=untrusted_client_think_identity.";
+            << L", client_think_entry=" << FormatClientRelativeCodePointer(client_think_entry)
+            << L", reason=unreadable_client_think_identity.";
         WarnOnceForRuntimeSignature(attempt_signature ^ 0x01ull, stream.str());
+        return false;
+    }
+
+    void* definition_refresh_thunk = nullptr;
+    bool per_entity_dispatcher = false;
+    bool installed_per_entity_handler = false;
+    if (nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk(
+            entry_bytes.data(),
+            entry_bytes.size()))
+    {
+        definition_refresh_thunk = client_think_entry;
+    }
+    else if (nskinzcs2::runtime::MatchesWearableDefinitionRefreshDispatcher(
+                 entry_bytes.data(),
+                 kDispatcherSize))
+    {
+        per_entity_dispatcher = true;
+        auto* const verified_thunk =
+            FindUniqueWearableDefinitionRefreshThunk(*client_text);
+        void* installed_handler = nullptr;
+        auto* const handler_slot =
+            static_cast<std::uint8_t*>(entity) + kPerEntityClientThinkOffset;
+        if (verified_thunk == nullptr ||
+            !SafeReadValue(handler_slot, installed_handler) ||
+            (installed_handler != nullptr && installed_handler != verified_thunk))
+        {
+            std::wstringstream stream;
+            stream << L"CEconWearable definition refresh rejected for XUID " << xuid
+                << L": entity=" << entity_index
+                << L", dispatcher=" << FormatClientRelativeCodePointer(client_think_entry)
+                << L", handler_slot=" << FormatPointer(handler_slot)
+                << L", installed_handler=" << FormatClientRelativeCodePointer(installed_handler)
+                << L", verified_handler=" << FormatClientRelativeCodePointer(verified_thunk)
+                << L", reason=per_entity_handler_identity_mismatch.";
+            WarnOnceForRuntimeSignature(attempt_signature ^ 0x11ull, stream.str());
+            return false;
+        }
+
+        if (installed_handler == nullptr)
+        {
+            void* handler_readback = nullptr;
+            if (!SafeWriteValue(handler_slot, static_cast<void*>(verified_thunk)) ||
+                !SafeReadValue(handler_slot, handler_readback) ||
+                handler_readback != verified_thunk)
+            {
+                std::wstringstream stream;
+                stream << L"CEconWearable definition refresh rejected for XUID " << xuid
+                    << L": entity=" << entity_index
+                    << L", dispatcher=" << FormatClientRelativeCodePointer(client_think_entry)
+                    << L", handler_slot=" << FormatPointer(handler_slot)
+                    << L", verified_handler=" << FormatClientRelativeCodePointer(verified_thunk)
+                    << L", readback=" << FormatClientRelativeCodePointer(handler_readback)
+                    << L", reason=per_entity_handler_publish_failed.";
+                WarnOnceForRuntimeSignature(attempt_signature ^ 0x12ull, stream.str());
+                return false;
+            }
+            installed_per_entity_handler = true;
+        }
+        definition_refresh_thunk = verified_thunk;
+    }
+    else
+    {
+        std::wstringstream stream;
+        stream << L"CEconWearable definition refresh rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", client_think_entry=" << FormatClientRelativeCodePointer(client_think_entry)
+            << L", bytes=[" << FormatByteSequence(entry_bytes.data(), kDispatcherSize)
+            << L"], reason=untrusted_client_think_identity.";
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x13ull, stream.str());
+        return false;
+    }
+
+    std::array<std::uint8_t, kThunkSize> thunk_bytes {};
+    if (definition_refresh_thunk == nullptr ||
+        !SafeReadBytes(definition_refresh_thunk, thunk_bytes.data(), thunk_bytes.size()) ||
+        !nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk(
+            thunk_bytes.data(),
+            thunk_bytes.size()))
+    {
+        std::wstringstream stream;
+        stream << L"CEconWearable definition refresh rejected for XUID " << xuid
+            << L": entity=" << entity_index
+            << L", client_think_entry=" << FormatClientRelativeCodePointer(client_think_entry)
+            << L", definition_refresh_thunk="
+            << FormatClientRelativeCodePointer(definition_refresh_thunk)
+            << L", reason=untrusted_definition_refresh_thunk.";
+        WarnOnceForRuntimeSignature(attempt_signature ^ 0x14ull, stream.str());
         return false;
     }
 
@@ -36797,7 +36947,7 @@ bool TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
         &refresh_jump_displacement,
         thunk_bytes.data() + kRefreshJumpDisplacementOffset,
         sizeof(refresh_jump_displacement));
-    auto* const thunk = static_cast<std::uint8_t*>(client_think);
+    auto* const thunk = static_cast<std::uint8_t*>(definition_refresh_thunk);
     void* const base_client_think =
         thunk + kBaseCallNextInstructionOffset + base_call_displacement;
     void* const definition_refresh =
@@ -36822,7 +36972,9 @@ bool TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
         std::wstringstream stream;
         stream << L"CEconWearable definition refresh rejected for XUID " << xuid
             << L": entity=" << entity_index
-            << L", client_think=" << FormatClientRelativeCodePointer(client_think)
+            << L", client_think_entry=" << FormatClientRelativeCodePointer(client_think_entry)
+            << L", definition_refresh_thunk="
+            << FormatClientRelativeCodePointer(definition_refresh_thunk)
             << L", base=" << FormatClientRelativeCodePointer(base_client_think)
             << L", refresh=" << FormatClientRelativeCodePointer(definition_refresh)
             << L", reason=client_think_target_shape_mismatch.";
@@ -36833,16 +36985,20 @@ bool TryInvokeWearableDefinitionRefreshAtFrameRenderPass(
     // Poison before invocation. Even an SEH-contained failure can leave a
     // partially transitioned entity; never retry the same entity/profile.
     g_hook_state.attempted_wearable_definition_refresh_signatures.insert(attempt_signature);
-    const auto invoked = SafeInvokeVoidFunctionPointer(client_think, entity);
+    const auto invoked = SafeInvokeVoidFunctionPointer(client_think_entry, entity);
 
     std::wstringstream stream;
     stream << L"CEconWearable definition refresh client-think for XUID " << xuid
         << L": entity=" << entity_index
         << L", entity_pointer=" << FormatPointer(entity)
         << L", vtable=" << FormatPointer(primary_vtable)
-        << L", client_think=" << FormatClientRelativeCodePointer(client_think)
+        << L", client_think_entry=" << FormatClientRelativeCodePointer(client_think_entry)
+        << L", definition_refresh_thunk="
+        << FormatClientRelativeCodePointer(definition_refresh_thunk)
         << L", base=" << FormatClientRelativeCodePointer(base_client_think)
         << L", refresh=" << FormatClientRelativeCodePointer(definition_refresh)
+        << L", per_entity_dispatcher=" << (per_entity_dispatcher ? 1 : 0)
+        << L", installed_per_entity_handler=" << (installed_per_entity_handler ? 1 : 0)
         << L", invoked=" << (invoked ? 1 : 0)
         << L", one_shot=1.";
     if (invoked)
@@ -80311,6 +80467,20 @@ void ObservePawnGloveNativeHookResult(const PawnGloveNativeHookDispatch& dispatc
         TryResolveGloveVisualOutputEntity(*client, output, entity, identity);
     const bool model_read = output_resolved &&
         TryReadEntityModelNameString(entity, g_hook_state.schema_offsets, model);
+    const bool native_output_verified = output_resolved &&
+        GloveVisualIdentityMatchesOutputHandle(output, identity) &&
+        model_read && IsLikelyGloveModelPath(model);
+    const auto state_it = g_hook_state.pawn_glove_visual_refresh_by_xuid.find(dispatch.xuid);
+    if (state_it != g_hook_state.pawn_glove_visual_refresh_by_xuid.end())
+    {
+        auto& state = state_it->second;
+        if (state.key.signature == dispatch.signature &&
+            state.key.pawn == reinterpret_cast<std::uintptr_t>(dispatch.pawn) &&
+            state.latch.Matches(state.key))
+        {
+            state.output = output;
+        }
+    }
     std::wstringstream log;
     log << L"Pawn glove native callback returned to HUD chain: xuid=" << dispatch.xuid
         << L", definition=" << dispatch.definition << L", paint=" << dispatch.paint
@@ -80318,6 +80488,7 @@ void ObservePawnGloveNativeHookResult(const PawnGloveNativeHookDispatch& dispatc
         << L", output_resolved=" << output_resolved
         << L", model_read=" << model_read
         << L", output_model=" << NarrowToWide(model)
+        << L", native_output_verified=" << native_output_verified
         << L", native_callback_order_verified=1.";
     nskinzcs2::Logger::Info(log.str());
 }
@@ -80772,8 +80943,10 @@ PawnGloveVisualRefreshStatus SnapshotPawnGloveVisualRefreshStatus(
 // m_EconGloves alone (especially an initially empty slot) is not visual proof.
 // The detour patches m_EconGloves only when CS2 itself enters the native glove
 // updater. Demo state has already been decoded at that point, and the original
-// updater plus HUD/scene consumers remain in their stock call order. No
-// CEconWearable factory or out-of-chain native invocation is used.
+// updater plus HUD/scene consumers remain in their stock call order. For
+// model-and-finish requests the item view now comes from the durable wearable
+// already published through m_hMyWearables; no out-of-chain native invocation
+// is used here.
 bool PollPawnGloveVisualRefresh(const RuntimePlayerBinding& player, void* entity_list,
     const std::vector<void*>& entities, const nskinzcs2::model::Catalog& catalog,
     const nskinzcs2::runtime::GloveAppearanceRequest& request, std::uint64_t signature,
@@ -80805,13 +80978,12 @@ bool PollPawnGloveVisualRefresh(const RuntimePlayerBinding& player, void* entity
         state_it->second.awaiting_native_callback || !state_it->second.latch.Matches(key))
         return false;
     auto& state = state_it->second;
+    // Completion is only valid after durable world/HUD readback below. A
+    // transient native output consumed by the stock HUD chain is diagnostic
+    // evidence, not proof that a first-person wearable was bound.
+    if (state.latch.Completed()) return true;
     std::uint32_t output = kInvalidEntityHandle;
     if (!SafeReadField(resolved_pawn, kGloveVisualComponentOffset, output)) return false;
-    if (state.latch.Completed() && output != state.output)
-    {
-        state = {};
-        return false; // Engine replaced/removed the output; schedule a fresh request on the next poll.
-    }
     if (state.latch.Failed()) return false;
     void* world = nullptr;
     std::uint32_t identity_handle = kInvalidEntityHandle;
@@ -83119,7 +83291,10 @@ void PollGameThreadStateModern()
         // subclass/VData, model and animation transaction. Firearms and gloves
         // are routed per source item: default carriers are materialized in the
         // generated stream, while already-painted carriers stay on the live
-        // path. Only the knife transaction must remain fully isolated here.
+        // path. A reconstructed glove whose complete serialized item view
+        // matches the request is authoritative too; replaying the live native
+        // refresh over it can retire the HUD model that Source 2 created while
+        // decoding the demo.
         for (auto& profile : config.knife_profiles) profile.enabled = false;
         int reconstructed_firearm_profiles = 0;
         int reconstructed_glove_profiles = 0;
@@ -83155,7 +83330,7 @@ void PollGameThreadStateModern()
                 << reconstructed_firearm_profiles
                 << L" reconstructed firearm profile(s) remain live for one native material initialization per entity generation, and "
                 << reconstructed_glove_profiles
-                << L" reconstructed glove profile(s) remain live only for one native visual refresh per Pawn generation. Stable entities reuse the completed refresh cache.";
+                << L" reconstructed glove profile(s) use the serialized Pawn item view without a second live write/refresh; only non-matching glove carriers use the guarded live fallback.";
             nskinzcs2::Logger::Info(stream.str());
         }
     }
@@ -86009,7 +86184,10 @@ void PollGameThreadStateModern()
                     direct_pawn_glove_definition_known,
                     requested_pawn_glove_definition_known);
             if (!direct_pawn_glove_valid &&
-                request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish)
+                nskinzcs2::runtime::ShouldAttemptRuntimeGloveWearableCreation(
+                    request.mode,
+                    direct_pawn_glove_definition_readable,
+                    direct_pawn_glove_definition_index))
             {
                 // No valid embedded glove item view was found. Keep the
                 // existing wearable path as a compatibility fallback.
@@ -86080,90 +86258,24 @@ void PollGameThreadStateModern()
                         xuid,
                         current_definition_index))
                 {
-                    // PBDEMS2 can serialize the EconItemView and its finish
-                    // attributes, but m_bNeedToReApplyGloves is a client-only
-                    // Schema field and has no demo field path. Keep the stream
-                    // data authoritative and issue exactly one native refresh
-                    // for each Pawn generation so the world/HUD glove models
-                    // are actually rebuilt from those fields.
-                    if (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish)
-                    {
-                        if (PollPawnGloveVisualRefresh(
-                                player_binding,
-                                entity_list,
-                                entity_cache,
-                                catalog,
-                                request,
-                                glove_signature,
-                                now))
-                        {
-                            glove_applied_xuids.insert(xuid);
-                            ++applied_gloves;
-                            continue;
-                        }
-
-                        const auto refresh_status =
-                            SnapshotPawnGloveVisualRefreshStatus(player_binding, glove_signature);
-                        if (refresh_status == PawnGloveVisualRefreshStatus::Idle)
-                        {
-                            const auto before_refresh = CapturePawnGloveRefreshSnapshot(
-                                player_binding.pawn_entity,
-                                g_hook_state.schema_offsets);
-                            TouchPawnGloveRefresh(
-                                player_binding.pawn_entity,
-                                g_hook_state.schema_offsets);
-                            const auto after_refresh = CapturePawnGloveRefreshSnapshot(
-                                player_binding.pawn_entity,
-                                g_hook_state.schema_offsets);
-                            if (!DidPawnGloveRefreshTrigger(before_refresh, after_refresh) ||
-                                !SchedulePawnGloveVisualRefreshAtNativeCallback(
-                                    player_binding,
-                                    request,
-                                    glove_signature))
-                            {
-                                WarnOnceForRuntimeSignature(
-                                    glove_signature ^ 0x1Dull,
-                                    L"Generated demo glove fields match, but the client-only native visual refresh could not be scheduled.");
-                                continue;
-                            }
-                            RememberAppliedSignature(
-                                g_hook_state.applied_glove_signatures,
-                                player_binding.pawn_entity_index,
-                                glove_signature);
-                            LogProfileDiagnosticOnce(
-                                glove_signature ^ 0x1Dull,
-                                L"Generated demo glove fields verified; queued the client-only native world/HUD visual rebuild for XUID " +
-                                    std::to_wstring(xuid) + L".");
-                        }
-                        continue;
-                    }
-
-                    if (!HasAppliedSignature(
-                            g_hook_state.applied_glove_signatures,
-                            player_binding.pawn_entity_index,
-                            glove_signature))
-                    {
-                        const auto before_refresh = CapturePawnGloveRefreshSnapshot(
-                            player_binding.pawn_entity,
-                            g_hook_state.schema_offsets);
-                        TouchPawnGloveRefresh(
-                            player_binding.pawn_entity,
-                            g_hook_state.schema_offsets);
-                        const auto after_refresh = CapturePawnGloveRefreshSnapshot(
-                            player_binding.pawn_entity,
-                            g_hook_state.schema_offsets);
-                        if (!DidPawnGloveRefreshTrigger(before_refresh, after_refresh))
-                        {
-                            WarnOnceForRuntimeSignature(
-                                glove_signature ^ 0x1Dull,
-                                L"Generated demo glove finish fields match, but the native finish refresh signal was not accepted.");
-                            continue;
-                        }
-                        RememberAppliedSignature(
-                            g_hook_state.applied_glove_signatures,
-                            player_binding.pawn_entity_index,
-                            glove_signature);
-                    }
+                    // The temporary demo already published the complete Pawn
+                    // EconItemView, changed counter and bodygroup before CS2
+                    // decoded this entity. Treat that serialized transaction as
+                    // complete. The previous v0.6.2 candidate touched the
+                    // client-only dirty flag and manually replayed the native
+                    // HUD chain here; live evidence showed the correct glove
+                    // model was created only transiently and then retired.
+                    // Never layer that second transaction over an exact
+                    // generated-demo match.
+                    g_hook_state.pawn_glove_visual_refresh_by_xuid.erase(xuid);
+                    RememberAppliedSignature(
+                        g_hook_state.applied_glove_signatures,
+                        player_binding.pawn_entity_index,
+                        glove_signature);
+                    LogProfileDiagnosticOnce(
+                        glove_signature ^ 0x1Dull,
+                        L"Generated demo glove transaction verified and accepted without a second live write/refresh for XUID " +
+                            std::to_wstring(xuid) + L".");
                     glove_applied_xuids.insert(xuid);
                     ++applied_gloves;
                     continue;
@@ -86356,12 +86468,27 @@ void PollGameThreadStateModern()
             void* glove_item_view = nullptr;
             void* pawn_glove_item_view = nullptr;
             int pawn_glove_definition_index = 0;
-            const auto pawn_glove_valid =
+            const auto pawn_glove_definition_readable =
                 TryResolvePawnGloveSlotCarrier(
                     player_binding.pawn_entity,
                     g_hook_state.schema_offsets,
                     pawn_glove_item_view,
                     pawn_glove_definition_index);
+            const auto legacy_pawn_glove_definition_known =
+                pawn_glove_definition_readable &&
+                pawn_glove_definition_index > 0 &&
+                glove_definition_indices.contains(pawn_glove_definition_index);
+            const auto legacy_requested_pawn_glove_definition_known =
+                request.model_definition > 0 &&
+                glove_definition_indices.contains(request.model_definition);
+            const auto pawn_glove_valid =
+                pawn_glove_item_view != nullptr &&
+                nskinzcs2::runtime::CanUsePawnEconGlovesCarrier(
+                    request.mode,
+                    pawn_glove_definition_readable,
+                    pawn_glove_definition_index,
+                    legacy_pawn_glove_definition_known,
+                    legacy_requested_pawn_glove_definition_known);
 
             if (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish)
             {
@@ -86418,8 +86545,13 @@ void PollGameThreadStateModern()
 
             std::uint32_t runtime_glove_handle = player_binding.runtime_glove_handle;
             bool created_runtime_glove = false;
+            const auto runtime_wearable_creation_allowed =
+                nskinzcs2::runtime::ShouldAttemptRuntimeGloveWearableCreation(
+                    request.mode,
+                    pawn_glove_definition_readable,
+                    pawn_glove_definition_index);
             if (!carrier.valid &&
-                request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish)
+                runtime_wearable_creation_allowed)
             {
                 int runtime_glove_entity_index = -1;
                 void* runtime_glove_entity = nullptr;
@@ -86595,11 +86727,14 @@ void PollGameThreadStateModern()
                 }
             }
 
-            // A special model-and-finish request always needs a concrete
-            // wearable. The Pawn item view is mirrored below because the
-            // native first-person builder consumes it, but it is not a model
-            // carrier. This materialises an item-id-0/default T or CT slot at
-            // runtime without touching the demo file.
+            // A model-and-finish request may use Pawn m_EconGloves only when
+            // the demo/network stream already materialized a known, non-zero
+            // glove definition. Never turn the stock definition-zero slot
+            // into a runtime-owned attribute container: client.dll destroys
+            // that embedded slot as network state during demo unload, and a
+            // runtime-owned attribute binding there corrupts the destructor
+            // path. Default gloves must be materialized by the temporary-demo
+            // rewrite before playback instead.
             const auto preliminary_carrier_kind =
                 nskinzcs2::runtime::ResolveCanonicalGloveCarrierKind(
                     request.mode,
@@ -86657,6 +86792,9 @@ void PollGameThreadStateModern()
                 << L", item_view=" << FormatPointer(pawn_glove_item_view)
                 << L", current_definition=" << pawn_glove_definition_index
                 << L", requested_definition=" << ResolveRequestedGloveDefinitionIndex(request, pawn_glove_definition_index)
+                << L", definition_readable=" << (pawn_glove_definition_readable ? 1 : 0)
+                << L", current_definition_known=" << (legacy_pawn_glove_definition_known ? 1 : 0)
+                << L", requested_definition_known=" << (legacy_requested_pawn_glove_definition_known ? 1 : 0)
                 << L", valid=" << (pawn_glove_valid ? 1 : 0)
                 << L", selected=" << (using_pawn_render_fallback ? 1 : 0);
             LogProfileDiagnosticOnce(glove_signature ^ 0x111ull, pawn_fallback_stream.str());
@@ -86664,7 +86802,14 @@ void PollGameThreadStateModern()
             if (!carrier.valid && !using_pawn_render_fallback)
             {
                 std::wstringstream stream;
-                if (runtime_entities.client_entity_factory != RuntimeFeatureAvailability::Available)
+                if (request.mode == nskinzcs2::runtime::GloveSlotMode::ModelAndFinish &&
+                    pawn_glove_definition_readable &&
+                    pawn_glove_definition_index == 0)
+                {
+                    stream << L"temporary_demo_rewrite_required for XUID " << xuid
+                        << L": the source Pawn m_EconGloves definition is zero; live writes and wearable creation are blocked to keep demo-unload destruction safe";
+                }
+                else if (runtime_entities.client_entity_factory != RuntimeFeatureAvailability::Available)
                 {
                     stream << L"wearable_factory_unavailable for XUID " << xuid
                         << L": Pawn m_EconGloves was unavailable and the compatibility fallback requires a validated CEconWearable factory";
@@ -88238,6 +88383,20 @@ bool nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk(
     return std::equal(kPrefix.begin(), kPrefix.end(), bytes) &&
         bytes[9] == 0xE8 &&
         std::equal(kSuffix.begin(), kSuffix.end(), bytes + 14);
+}
+
+bool nskinzcs2::runtime::MatchesWearableDefinitionRefreshDispatcher(
+    const std::uint8_t* bytes,
+    const std::size_t size) noexcept
+{
+    constexpr std::array<std::uint8_t, 16> kDispatcher {
+        0x48, 0x8B, 0x81, 0x18, 0x03, 0x00, 0x00,
+        0x48, 0x85, 0xC0,
+        0x74, 0x03,
+        0x48, 0xFF, 0xE0,
+        0xC3};
+    return bytes != nullptr && size >= kDispatcher.size() &&
+        std::equal(kDispatcher.begin(), kDispatcher.end(), bytes);
 }
 
 nskinzcs2::runtime::GloveApplyMode nskinzcs2::runtime::ResolveGloveApplyMode(
@@ -90974,7 +91133,7 @@ bool nskinzcs2::RuntimeController::TryInstallRuntimeHook(runtime::Status& status
     if (!hook_attempted_.exchange(true))
     {
         Logger::Info(
-            L"Installing Source2Client002 FrameStageNotify hook for HLAE 2.192.6 using validated vtable index " +
+            L"Installing Source2Client002 FrameStageNotify hook for HLAE 2.192.8 using validated vtable index " +
             std::to_wstring(nskinzcs2::compatibility::kFrameStageNotifyVtableIndex) + L".");
     }
 

@@ -9,12 +9,12 @@
 
 namespace nskinzcs2::runtime
 {
-inline constexpr std::uintptr_t kKnifeNativeUpdateRva = 0x9121C0;
-inline constexpr std::uintptr_t kKnifeNativeUpdateCall1Rva = 0x10D37DE;
-inline constexpr std::uintptr_t kKnifeNativeUpdateCall2Rva = 0x10D3802;
-inline constexpr std::uintptr_t kKnifeNativeGraphEvaluationCallRva = 0x10D389F;
-inline constexpr std::uintptr_t kKnifeArmsUpdateRva = 0x10D36E0;
-inline constexpr std::uintptr_t kKnifeArmsUpdateCallRva = 0x10D3646;
+inline constexpr std::uintptr_t kKnifeNativeUpdateRva = 0x912FF0;
+inline constexpr std::uintptr_t kKnifeNativeUpdateCall1Rva = 0x10D5A0E;
+inline constexpr std::uintptr_t kKnifeNativeUpdateCall2Rva = 0x10D5A32;
+inline constexpr std::uintptr_t kKnifeNativeGraphEvaluationCallRva = 0x10D5ACF;
+inline constexpr std::uintptr_t kKnifeArmsUpdateRva = 0x10D5910;
+inline constexpr std::uintptr_t kKnifeArmsUpdateCallRva = 0x10D5876;
 bool MatchesKnifeArmsUpdateEvidence(std::span<const std::uint8_t> entry, std::span<const std::uint8_t> call) noexcept;
 bool MatchesKnifeUpdateCallEvidence(std::span<const std::uint8_t> entry,
     std::span<const std::uint8_t> call1, std::span<const std::uint8_t> call2,

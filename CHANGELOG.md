@@ -1,5 +1,21 @@
 # Changelog / 更新记录
 
+## v0.6.2 — 2026-10-23
+
+- Rebased every guarded current-CS2 native path on Steam Build `26144732`, Client/Server `2000935`, Patch `1.41.9.2`, Source revision `11162119`. Knife serialization, model/material refresh, skeleton resources, animation graph/arms lifecycle, stock-glove refresh and HUD consumers now use the October 22 client layout with exact call/RIP-window verification.
+- 将所有受保护的当前 CS2 原生路径迁移到 Steam Build `26144732`、Client/Server `2000935`、Patch `1.41.9.2`、Source revision `11162119`。刀具序列化、模型／材质刷新、骨架资源、动画图／手臂生命周期、默认手套刷新及 HUD 消费者均改用 10 月 22 日客户端布局，并保留精确调用／RIP 指令窗验证。
+
+- Fixed the evidence-confirmed stock/default CT and T glove failure first isolated on CS2 `2000934`. The Temporary Demo serializes and verifies the complete Pawn `m_EconGloves` definition, identity, finish, changed counter and bodygroup fields; runtime readback confirmed `definition=5030 / paint=10048`. An exact generated-demo match is now accepted as the authoritative transaction without a second live field write or HUD/native refresh. This removes the discarded development path that created the correct `glove_sporty.vmdl` only transiently and then let the HUD chain retire it. Non-generated or non-matching carriers still use the guarded live fallback.
+- 修复最初在 CS2 `2000934` 上定位、并由运行日志确认的默认 CT／T 原皮手套失效。临时 Demo 已完整序列化并验证 Pawn `m_EconGloves` 的定义、身份、涂装、变更计数和 bodygroup 字段，运行时实读也确认为 `definition=5030 / paint=10048`。现在对完全匹配的重建 Demo 载体直接认定序列化事务完成，不再叠加第二次实时字段写入或 HUD／原生刷新。这移除了开发阶段“瞬时创建正确 `glove_sporty.vmdl`、随后又被 HUD 链退役”的冲突路径。非重建 Demo 或字段不匹配的载体仍使用受保护的实时兜底。
+- Fixed the subsequent demo-reload access violation using the captured `cs2_2026_1022_203619_0_accessviolation.mdmp` and runtime log. The fault occurred in `client.dll` while destroying the old Pawn, after the previous DLL had attached runtime-owned attributes to its readable definition-zero `m_EconGloves` slot. The runtime now treats that exact stock slot as rewrite-only: it neither writes the embedded item view nor creates/mirrors a live `CEconWearable`; only a known non-zero glove already materialized by the generated demo may enter the Pawn carrier path.
+- 根据实取的 `cs2_2026_1022_203619_0_accessviolation.mdmp` 与运行日志修复随后出现的 Demo 重载访问冲突。故障发生在 `client.dll` 销毁旧 Pawn 时；此前 DLL 曾向可读但 definition=0 的 `m_EconGloves` 空槽挂接运行时属性。现在该默认空槽被严格设为“仅允许临时 Demo 重写”：不再实时写入嵌入 ItemView，也不再创建／镜像实时 `CEconWearable`；只有生成 Demo 已物化的已知非零手套定义才能进入 Pawn 载体路径。
+- Adapted the isolated Workshop-radar compiler to the updated CS2 toolchain, which now requires the mounted `core/pak01_dir.vpk` index. The cache links the installed directory indexes read-only and includes them in its environment fingerprint; it never copies or edits the large game archives.
+- 适配今日 CS2 工具链新增的创意工坊雷达编译依赖：`resourcecompiler` 现在启动时要求挂载 `core/pak01_dir.vpk` 索引。隔离缓存会只读硬链接本机目录索引并纳入环境指纹，不复制或修改大型游戏资源包。
+- Revalidated HLAE `2.192.8` / AfxHookSource2 `0.41.8`, all 17 installed-client signatures, the complete native suite, 37 installed Workshop-map entries, native radar VTEX compilation, 14 demo-rewriter tests, a real 97.7 MB glove rewrite, six isolated DLL-loading cases and the WARP render gate. The current installed catalog contains 1,408 weapon finishes, 74 glove finishes, 11,642 stickers and 144 keychains.
+- 已重新验证 HLAE `2.192.8` / AfxHookSource2 `0.41.8`、17 项客户端签名、完整原生回归、37 个已安装工坊地图条目、雷达原生 VTEX 编译、14 项 Demo 重写器测试、97.7 MB 真实 Demo 手套重写、6 项隔离 DLL 加载及 WARP 渲染门禁。本机当前目录包含 1,408 个枪械涂装、74 个手套涂装、11,642 张贴纸和 144 个挂件。
+
+See [full bilingual release notes / 完整中英发布说明](docs/releases/v0.6.2.md).
+
 ## v0.6.1 — 2026-10-15
 
 - Rebased all guarded current-CS2 native paths on Steam Build `25947352`, Client/Server `2000932`, Patch `1.41.9.1`, Source revision `11131657`. Knife serialization, model/material refresh, skeleton resources, animation graph/arms lifecycle and stock-glove visual refresh now use the October 14 client layout with exact call/RIP-window verification.

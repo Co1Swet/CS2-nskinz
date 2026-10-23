@@ -227,15 +227,23 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     GloveSlotMode mode,
     bool stable_wearable_available,
     bool pawn_glove_available) noexcept;
-// Build 2000918 materialises model-and-finish visuals from Pawn m_EconGloves.
-// A published CEconWearable is only a fallback when that embedded view cannot
-// be read; installing both carriers for one Pawn creates conflicting lifetimes.
+// Finish-only can use Pawn m_EconGloves. Model-and-finish may also use it when
+// the demo/network stream has already materialized a known glove definition;
+// an empty definition-zero stock slot remains ineligible.
 bool CanUsePawnEconGlovesCarrier(
     GloveSlotMode mode,
     bool definition_readable,
     int current_definition_index,
     bool current_definition_is_glove,
     bool requested_definition_is_glove) noexcept;
+// A readable definition-zero Pawn slot is owned by the demo/network stream.
+// Writing runtime-owned glove attributes or creating/mirroring a Wearable over
+// it leaves invalid client-only state behind when CS2 destroys the old Pawn on
+// demo reload. Such a slot must be materialized by the temporary-demo rewrite.
+bool ShouldAttemptRuntimeGloveWearableCreation(
+    GloveSlotMode mode,
+    bool pawn_definition_readable,
+    int pawn_definition_index) noexcept;
 // Identifies one safe CEconWearable creation attempt. A Source2Client provider
 // may outlive several demo pawn instances, so provider generation alone must
 // not suppress recreation after the pawn's full handle/pointer changes.
@@ -245,6 +253,10 @@ std::uint64_t BuildGloveWearableCreationEpoch(
     std::uintptr_t pawn_identity) noexcept;
 std::uint64_t GloveWearableRetryDelayMillis(std::uint32_t failure_count) noexcept;
 GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::GloveProfile& profile) noexcept;
+// Special painted gloves are native unusual-quality items. The editor's
+// historical zero default must not serialize a normal-quality glove because
+// CS2 will not materialize that state like a real equipped glove.
+int ResolveCanonicalGloveQuality(int requested_quality, int paint_kit) noexcept;
 // CS2 team numbers: 2 = Terrorists, 3 = Counter-Terrorists. A glove paint kit
 // of zero means restore the stock team glove, not keep a special glove model
 // with an empty paint kit.

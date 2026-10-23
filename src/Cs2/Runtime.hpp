@@ -153,10 +153,16 @@ RuntimeGloveBindingChoice EvaluateGloveBindingChoice(const RuntimeGloveBindingIn
 WearableFactoryConfirmationResult EvaluateWearableFactoryConfirmation(
     const WearableFactoryConfirmationInputs& inputs) noexcept;
 bool IsWearableModelSourceTypeReady(std::uint8_t model_type) noexcept;
-// Matches the current CEconWearable client-think override shape without
-// accepting a generic executable pointer. Runtime additionally validates both
-// relative targets and the exact reflected CEconWearable primary vtable.
+// Matches the concrete CEconWearable definition callback without accepting a
+// generic executable pointer. Runtime additionally validates both relative
+// targets, the exact reflected primary vtable, and the build-specific indirect
+// dispatcher before publishing this callback into a runtime-created entity.
 bool MatchesWearableDefinitionRefreshThunk(
+    const std::uint8_t* bytes,
+    std::size_t size) noexcept;
+// Build 2000935 stores a per-entity client-think callback at entity+0x318 and
+// exposes this exact indirect dispatcher through the CEconWearable vtable.
+bool MatchesWearableDefinitionRefreshDispatcher(
     const std::uint8_t* bytes,
     std::size_t size) noexcept;
 GloveApplyMode ResolveGloveApplyMode(const nskinzcs2::model::CosmeticProfile& profile) noexcept;

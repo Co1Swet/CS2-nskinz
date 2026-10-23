@@ -60,14 +60,19 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
     case GloveSlotMode::FinishOnly:
         return pawn_glove_available ? GloveCarrierKind::PawnEconGloves : GloveCarrierKind::None;
     case GloveSlotMode::ModelAndFinish:
-        // Build 2000918's native visual updater reads pawn m_EconGloves at
-        // +0x1770 and materialises its own client-only output at +0x15F8. It
-        // never reads m_hMyWearables. Prefer that single authoritative input
-        // even for an initially empty stock T/CT slot; retain a published
-        // wearable only as a compatibility fallback when the Pawn view is
-        // genuinely unavailable.
-        if (pawn_glove_available) return GloveCarrierKind::PawnEconGloves;
-        return stable_wearable_available ? GloveCarrierKind::Wearable : GloveCarrierKind::None;
+        // A rewritten demo publishes the complete m_EconGloves item view on
+        // the Pawn before playback constructs its visual output. Prefer a
+        // real wearable when one already exists, but otherwise keep that
+        // engine-owned Pawn item as the native reconstruction carrier. An
+        // empty/default slot is filtered by CanUsePawnEconGlovesCarrier and
+        // still falls through to the compatibility entity factory.
+        if (stable_wearable_available)
+        {
+            return GloveCarrierKind::Wearable;
+        }
+        return pawn_glove_available
+            ? GloveCarrierKind::PawnEconGlovesRenderFallback
+            : GloveCarrierKind::None;
     case GloveSlotMode::None:
     default:
         return GloveCarrierKind::None;
@@ -93,14 +98,35 @@ bool CanUsePawnEconGlovesCarrier(
 
     if (mode == GloveSlotMode::ModelAndFinish)
     {
-        // The embedded view may be definition 0 for recorded stock hands.
-        // Only replace that empty value or an existing glove definition; a
-        // positive non-glove definition indicates the wrong schema object.
-        return requested_definition_is_glove &&
-            (current_definition_index == 0 || current_definition_is_glove);
+        // Only accept an item definition that was already materialized by the
+        // demo/network stream. In particular, definition zero must never be
+        // treated as a usable model carrier: that is the stock/default slot
+        // and still needs the guarded CEconWearable fallback. Requiring both
+        // definitions to be known glove definitions also prevents an
+        // unrelated positive item from suppressing the fallback.
+        return current_definition_index > 0 &&
+            current_definition_is_glove &&
+            requested_definition_is_glove;
     }
 
     return false;
+}
+
+bool ShouldAttemptRuntimeGloveWearableCreation(
+    const GloveSlotMode mode,
+    const bool pawn_definition_readable,
+    const int pawn_definition_index) noexcept
+{
+    if (mode != GloveSlotMode::ModelAndFinish)
+    {
+        return false;
+    }
+
+    // This exact state is the stock/default glove slot observed in demos.
+    // Its embedded item view is serialized network storage, not a safe owner
+    // for runtime-created attributes. The rewrite path must publish the glove
+    // before CS2 constructs the Pawn instead.
+    return !pawn_definition_readable || pawn_definition_index != 0;
 }
 
 std::uint64_t BuildGloveWearableCreationEpoch(
@@ -141,11 +167,17 @@ GloveAppearanceRequest BuildGloveAppearanceRequest(const nskinzcs2::model::Glove
     request.model_definition = profile.model_definition;
     request.paint_kit = profile.paint_kit;
     request.explicit_vanilla_finish = profile.explicit_vanilla_finish;
-    request.quality = profile.quality;
+    request.quality = ResolveCanonicalGloveQuality(profile.quality, profile.paint_kit);
     request.seed = profile.seed;
     request.wear = nskinzcs2::model::NormalizeCosmeticWear(profile.wear);
     request.custom_name = nskinzcs2::model::ResolveCosmeticCustomName(profile.custom_name);
     return request;
+}
+
+int ResolveCanonicalGloveQuality(const int requested_quality, const int paint_kit) noexcept
+{
+    constexpr int unusual_quality = 3;
+    return paint_kit > 0 && requested_quality == 0 ? unusual_quality : requested_quality;
 }
 
 int ResolveDefaultGloveDefinitionForTeam(const int team_number) noexcept

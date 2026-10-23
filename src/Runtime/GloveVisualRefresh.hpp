@@ -6,17 +6,17 @@
 
 namespace nskinzcs2::runtime
 {
-// client.dll PE timestamp 0x6AD01314 (2026-10-15 local install): the native pawn glove
+// client.dll PE timestamp 0x6ADA7340 (2026-10-23 local install): the native pawn glove
 // component's output is consumed by HUD. This is NOT m_hMyWearables or a
 // fabricated CEconWearable.
-inline constexpr std::uintptr_t kGloveVisualRefreshRva = 0xC65330;
+inline constexpr std::uintptr_t kGloveVisualRefreshRva = 0xC66210;
 // The continuously reached HUD glove assembly consumer. It
 // resolves the observed Pawn from this+0x520, then consumes Pawn+0x15F8.
-inline constexpr std::uintptr_t kGloveHudConsumerRva = 0x10D38D0;
+inline constexpr std::uintptr_t kGloveHudConsumerRva = 0x10D5B00;
 inline constexpr std::ptrdiff_t kGloveHudConsumerPawnHandleOffset = 0x520;
 // The native glove updater resolves its output handle through this client-only
 // identity chunk root, not the networked client entity system.
-inline constexpr std::uintptr_t kGloveVisualEntityChunksRva = 0x236FA70;
+inline constexpr std::uintptr_t kGloveVisualEntityChunksRva = 0x2371A70;
 inline constexpr std::ptrdiff_t kGloveVisualComponentOffset = 0x15F8;
 inline constexpr std::ptrdiff_t kGloveVisualComponentOwnerOffset = 0xB0;
 struct GloveVisualEvidenceWindow
@@ -29,6 +29,11 @@ const std::array<GloveVisualEvidenceWindow, 7>& GloveVisualEvidenceWindows() noe
 // an exact full-handle match. Sentinel index values represent a freed slot.
 bool GloveVisualIdentityMatchesOutputHandle(
     std::uint32_t output_handle, std::uint32_t identity_handle) noexcept;
+// The native output is transient: the stock HUD consumer can retire its
+// client-only identity before the next FRAME_RENDER_PASS poll. Treat a
+// verified output that was synchronously consumed with the dirty flag cleared
+// as the authoritative completion point instead of requiring that temporary
+// identity to remain live for another frame.
 struct GloveVisualRefreshKey
 {
     std::uint64_t scene = 0, xuid = 0, signature = 0;

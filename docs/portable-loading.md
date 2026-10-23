@@ -9,7 +9,7 @@ v0.5.4（2026-09-30）沿用单 DLL 加载与枪械换肤方案，基线为 CS2 
 - Windows 10/11 x64、正常工作的 CS2 和 HLAE；仅限 `-insecure` 离线 Demo。
 - 不需要额外安装 Visual C++ Redistributable、DirectX SDK / June 2010 运行库、.NET、Python 或 Visual Studio。
 - 每次只选择一个语言 DLL，放在可写文件夹。目录、配置和日志由 DLL 自动生成，不是需要单独下载的依赖。
-- 当前源码／本地测试 DLL 兼容基线：HLAE 2.192.6；Steam Build 25537370；CS2 Client/Server 2000918 / Patch 1.41.8.5 / Source revision 11039926。已通过当前客户端二进制只读检查、刀／手套严格 PE 证据和完整回归；不代表地图模型、刀模、动作与默认载体已在所有 Demo 中画面验收。
+- 当前 v0.6.2 兼容基线：HLAE 2.192.8 / AfxHookSource2 0.41.8；Steam Build 26144732；CS2 Client/Server 2000935 / Patch 1.41.9.2 / Source revision 11162119。已通过当前客户端二进制只读检查、刀／手套严格 PE 证据、完整回归及隔离加载／渲染门禁；不代表地图模型、刀模、动作与默认载体已在所有 Demo 中画面验收。
 
 关闭并重新启动 HLAE/CS2，不要向已有旧 DLL 的进程重复加载新版。把中文版放在 `C:\nSkinzCS2\Lyan_nskinz v0.5.4 zh-CN.dll` 后，在游戏控制台输入：
 
@@ -70,7 +70,7 @@ v0.5.4 (2026-09-30) retains the single-DLL and firearm paths on the CS2 2000919 
 
 Only Windows 10/11 x64, CS2 and HLAE are required. No separate VC++ redistributable, legacy DirectX runtime/SDK, .NET, Python or compiler installation is needed. Use one language DLL, extracted into a writable folder, with HLAE `-insecure` offline demos only. Restart HLAE/CS2 before upgrading. Generated catalog/config/log files are not additional downloads.
 
-The current source/local-test baseline is HLAE 2.192.6, Steam Build 25537370, CS2 Client/Server 2000918 / Patch 1.41.8.5 / Source revision 11039926. It passes current-client read-only signatures, strict knife/glove PE evidence and the full regression suite; this is not exhaustive visual certification of every map/knife/glove/demo transition.
+The current v0.6.2 baseline is HLAE 2.192.8 / AfxHookSource2 0.41.8, Steam Build 26144732, CS2 Client/Server 2000935 / Patch 1.41.9.2 / Source revision 11162119. It passes current-client read-only signatures, strict knife/glove PE evidence, the full regression suite and isolated loader/render gates; this is not exhaustive visual certification of every map/knife/glove/demo transition.
 
 ```text
 mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.5.4 EN.dll"

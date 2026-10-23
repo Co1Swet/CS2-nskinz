@@ -6,9 +6,9 @@
 
 namespace nskinzcs2::runtime
 {
-// Evidence for the installed 2000932 binary, not callable function addresses.
+// Evidence for the installed 2000935 binary, not callable function addresses.
 // Production must match these instruction windows AND the named Schema fields.
-inline constexpr std::uintptr_t kKnifeWeaponTypeUpdateRva = 0x9122DA;
+inline constexpr std::uintptr_t kKnifeWeaponTypeUpdateRva = 0x91310A;
 inline constexpr std::uintptr_t kKnifeGraphNodeDestructionRva = 0x390B69;
 inline constexpr std::uintptr_t kKnifeIdNodeConstructionRva = 0x4613D0;
 inline constexpr std::uintptr_t kKnifeIdNodeVtableRva = 0x6A4298;
@@ -21,15 +21,15 @@ bool MatchesKnifeGraphLayoutEvidence(std::span<const std::uint8_t> weapon_update
 // Its +0 owner is the body controller; +8 is the actual graph instance.
 inline constexpr std::size_t kKnifeBodyGraphOwnerOffset = 0x448;
 inline constexpr std::size_t kKnifeBodyGraphPointerOffset = 0x450;
-inline constexpr std::uintptr_t kKnifeBodyGraphConstructionRva = 0x9272D0;
+inline constexpr std::uintptr_t kKnifeBodyGraphConstructionRva = 0x928100;
 inline constexpr std::size_t kKnifeBodyGraphConstructionSize = 14;
-inline constexpr std::uintptr_t kKnifeBodyGraphUseRva = 0x38A098;
+inline constexpr std::uintptr_t kKnifeBodyGraphUseRva = 0x38AE98;
 inline constexpr std::size_t kKnifeBodyGraphUseSize = 15;
 bool MatchesKnifeBodyGraphLayoutEvidence(std::span<const std::uint8_t> construction,
     std::span<const std::uint8_t> use) noexcept;
-inline constexpr std::uintptr_t kKnifeSecondaryHandleAppendRva = 0x96563C;
+inline constexpr std::uintptr_t kKnifeSecondaryHandleAppendRva = 0x96646C;
 inline constexpr std::size_t kKnifeSecondaryHandleAppendSize = 19;
-inline constexpr std::uintptr_t kKnifeSecondarySlotAppendRva = 0x9656FA;
+inline constexpr std::uintptr_t kKnifeSecondarySlotAppendRva = 0x96652A;
 inline constexpr std::size_t kKnifeSecondarySlotAppendSize = 16;
 bool MatchesKnifeSecondaryLayoutEvidence(std::span<const std::uint8_t> handle_append,
     std::span<const std::uint8_t> slot_append) noexcept;

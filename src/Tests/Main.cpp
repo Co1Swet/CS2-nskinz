@@ -368,20 +368,23 @@ void TestCatalogStoreRoundTrip()
 void TestCompatibilityManifest()
 {
     using namespace nskinzcs2::compatibility;
-    Expect(kFrameStageNotifyVtableIndex == 36, "HLAE 2.192.6 FrameStageNotify slot should remain explicit");
-    Expect(kFrameStartStage == 0, "HLAE 2.192.6 FRAME_START value should remain explicit");
-    Expect(kFrameRenderPassStage == 12, "HLAE 2.192.6 FRAME_RENDER_PASS value should remain explicit");
-    Expect(kEngineIsPlayingDemoVtableIndex == 42, "HLAE 2.192.6 IsPlayingDemo slot should remain explicit");
-    Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.192.6 GetDemoFilePath slot should remain explicit");
-    Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.192.6 GetLevelNameShort slot should remain explicit");
-    Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.192.6 GetDemoFile slot should remain explicit");
-    Expect(kEngineExecuteClientCmdVtableIndex == 51, "HLAE 2.192.6 ExecuteClientCmd slot should remain explicit");
-    Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.192.6 demo tick slot should remain explicit");
-    Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.192.6 IDemoFile IsPlayingDemo slot should remain explicit");
-    Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.192.6 IDemoFile IsDemoPaused slot should remain explicit");
+    Expect(kFrameStageNotifyVtableIndex == 36, "HLAE 2.192.8 FrameStageNotify slot should remain explicit");
+    Expect(kFrameStartStage == 0, "HLAE 2.192.8 FRAME_START value should remain explicit");
+    Expect(kFrameRenderPassStage == 12, "HLAE 2.192.8 FRAME_RENDER_PASS value should remain explicit");
+    Expect(kEngineIsPlayingDemoVtableIndex == 42, "HLAE 2.192.8 IsPlayingDemo slot should remain explicit");
+    Expect(kEngineGetDemoFilePathVtableIndex == 43, "HLAE 2.192.8 GetDemoFilePath slot should remain explicit");
+    Expect(kEngineGetLevelNameShortVtableIndex == 65, "HLAE 2.192.8 GetLevelNameShort slot should remain explicit");
+    Expect(kEngineGetDemoFileVtableIndex == 69, "HLAE 2.192.8 GetDemoFile slot should remain explicit");
+    Expect(kEngineExecuteClientCmdVtableIndex == 51, "HLAE 2.192.8 ExecuteClientCmd slot should remain explicit");
+    Expect(kDemoFileGetTickVtableIndex == 3, "HLAE 2.192.8 demo tick slot should remain explicit");
+    Expect(kDemoFileIsPlayingVtableIndex == 11, "HLAE 2.192.8 IDemoFile IsPlayingDemo slot should remain explicit");
+    Expect(kDemoFileIsPausedVtableIndex == 12, "HLAE 2.192.8 IDemoFile IsDemoPaused slot should remain explicit");
+    Expect(
+        kWearableSchemaClassSize == 0x1920,
+        "CS2 2000935 C_EconWearable Schema size must remain explicit");
     Expect(
         IsHlae21911InterfaceCombination("Source2Client002", "ResourceSystem013", "VFileSystem017"),
-        "verified HLAE 2.192.6 interfaces should be accepted");
+        "verified HLAE 2.192.8 interfaces should be accepted");
     Expect(
         !IsHlae21911InterfaceCombination("Source2Client001", "ResourceSystem013", "VFileSystem017"),
         "an unverified Source2Client interface should be rejected");
@@ -425,6 +428,9 @@ void TestCompatibilityManifest()
     Expect(
         has_required_signature("wearable_definition_refresh_thunk"),
         "the current CEconWearable definition refresh thunk must be required");
+    Expect(
+        has_required_signature("wearable_definition_refresh_dispatcher"),
+        "the current per-entity CEconWearable definition refresh dispatcher must be required");
     Expect(
         has_required_signature("base_model_entity_set_model"),
         "the current client C_BaseModelEntity::SetModel wrapper must be required");
@@ -3487,6 +3493,7 @@ void TestWearableFactoryConfirmation()
 {
     using nskinzcs2::runtime::EvaluateWearableFactoryConfirmation;
     using nskinzcs2::runtime::IsWearableModelSourceTypeReady;
+    using nskinzcs2::runtime::MatchesWearableDefinitionRefreshDispatcher;
     using nskinzcs2::runtime::MatchesWearableDefinitionRefreshThunk;
 
     const auto first_candidate = EvaluateWearableFactoryConfirmation({true, false, 0, 0});
@@ -3571,6 +3578,30 @@ void TestWearableFactoryConfirmation()
     Expect(
         !MatchesWearableDefinitionRefreshThunk(refresh_thunk.data(), refresh_thunk.size() - 1),
         "a truncated CEconWearable client-think body must fail closed");
+
+    const std::array<std::uint8_t, 16> refresh_dispatcher {
+        0x48, 0x8B, 0x81, 0x18, 0x03, 0x00, 0x00,
+        0x48, 0x85, 0xC0,
+        0x74, 0x03,
+        0x48, 0xFF, 0xE0,
+        0xC3};
+    Expect(
+        MatchesWearableDefinitionRefreshDispatcher(
+            refresh_dispatcher.data(),
+            refresh_dispatcher.size()),
+        "the CS2 2000935 per-entity client-think dispatcher should be accepted");
+    auto wrong_dispatcher_offset = refresh_dispatcher;
+    wrong_dispatcher_offset[3] = 0x20;
+    Expect(
+        !MatchesWearableDefinitionRefreshDispatcher(
+            wrong_dispatcher_offset.data(),
+            wrong_dispatcher_offset.size()),
+        "a dispatcher reading a different entity field must fail closed");
+    Expect(
+        !MatchesWearableDefinitionRefreshDispatcher(
+            refresh_dispatcher.data(),
+            refresh_dispatcher.size() - 1),
+        "a truncated client-think dispatcher must fail closed");
 }
 
 void TestKnifeAppearanceModule()
@@ -5021,14 +5052,21 @@ void TestGloveAppearanceModule()
         Expect(request.model_definition == 5030, "glove request should preserve model definition");
         Expect(request.paint_kit == 10018, "glove request should preserve paint");
         Expect(request.explicit_vanilla_finish, "glove request should preserve explicit finish intent");
+        Expect(request.quality == 3, "an explicit glove quality should be preserved");
         Expect(request.custom_name == "Glove", "glove request should preserve a custom name");
         Expect(GloveProfileRequiresModelDefinition(request.mode), "model-and-finish mode requires a model definition");
     }
 
     {
         nskinzcs2::model::GloveProfile profile;
+        profile.paint_kit = 10048;
         const auto request = BuildGloveAppearanceRequest(profile);
         Expect(request.custom_name == "nSkinz CS2", "an empty glove name should resolve to the shared default name");
+        Expect(request.quality == 3,
+            "a painted glove with the editor's zero default must use canonical unusual quality");
+        profile.paint_kit = 0;
+        Expect(BuildGloveAppearanceRequest(profile).quality == 0,
+            "a stock unpainted glove request must retain normal quality");
     }
 
     {
@@ -5053,12 +5091,12 @@ void TestGloveAppearanceModule()
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::FinishOnly, true, true) == GloveCarrierKind::PawnEconGloves,
         "finish-only should always resolve to pawn_econ_gloves when available");
     Expect(
-        ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, true) == GloveCarrierKind::PawnEconGloves,
-        "model-and-finish should prefer the Pawn input consumed by the native visual updater");
+        ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, true) == GloveCarrierKind::Wearable,
+        "model-and-finish should prefer an existing durable wearable");
     Expect(
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, false, true) ==
-            GloveCarrierKind::PawnEconGloves,
-        "model-and-finish should not require a duplicate wearable when Pawn econ-gloves is available");
+            GloveCarrierKind::PawnEconGlovesRenderFallback,
+        "model-and-finish should use a demo-materialized Pawn glove when no wearable exists");
     Expect(
         ResolveCanonicalGloveCarrierKind(GloveSlotMode::ModelAndFinish, true, false) ==
             GloveCarrierKind::Wearable,
@@ -5066,8 +5104,8 @@ void TestGloveAppearanceModule()
 
     using nskinzcs2::runtime::CanUsePawnEconGlovesCarrier;
     Expect(
-        CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 0, false, true),
-        "an empty demo Pawn glove slot should accept a known glove definition for native materialisation");
+        !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 0, false, true),
+        "an empty demo Pawn glove slot must not bypass durable wearable creation");
     Expect(
         !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 0, false, false),
         "an empty pawn econ-gloves slot must reject an unknown target definition");
@@ -5079,13 +5117,27 @@ void TestGloveAppearanceModule()
         "finish-only should keep using a known live pawn glove definition");
     Expect(
         CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 5030, true, true),
-        "model-and-finish should replace an existing Pawn glove definition through the native path");
+        "model-and-finish should use a known glove definition materialized in Pawn m_EconGloves");
     Expect(
         !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 7, false, true),
         "model-and-finish must reject a positive non-glove embedded item definition");
     Expect(
         !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, false, 0, false, true),
         "an unreadable pawn econ-gloves slot must fail closed");
+
+    using nskinzcs2::runtime::ShouldAttemptRuntimeGloveWearableCreation;
+    Expect(
+        !ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::ModelAndFinish, true, 0),
+        "a readable definition-zero source Pawn slot must be left to temporary-demo reconstruction");
+    Expect(
+        ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::ModelAndFinish, true, 5030),
+        "a non-empty model-and-finish slot may retain the guarded wearable compatibility path");
+    Expect(
+        ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::ModelAndFinish, false, 0),
+        "an unavailable Pawn slot may retain the standalone wearable compatibility path");
+    Expect(
+        !ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::FinishOnly, true, 5030),
+        "finish-only must never create a runtime wearable");
 
     using nskinzcs2::runtime::BuildGloveWearableCreationEpoch;
     const auto creation_epoch = BuildGloveWearableCreationEpoch(7, 0x12348001u, 0x100000ull);

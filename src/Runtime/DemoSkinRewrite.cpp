@@ -1,4 +1,5 @@
 #include "Runtime/DemoSkinRewrite.hpp"
+#include "Runtime/GloveAppearance.hpp"
 
 #include "Core/Log.hpp"
 #include "Core/StickerPlacement.hpp"
@@ -958,7 +959,7 @@ DemoSkinRewritePlan nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(
             5028,
             t_target_definition,
             profile.paint_kit,
-            profile.quality,
+            nskinzcs2::runtime::ResolveCanonicalGloveQuality(profile.quality, profile.paint_kit),
             model::NormalizeCosmeticSeed(profile.seed),
             model::NormalizeCosmeticWear(profile.wear),
             "T",
@@ -969,7 +970,7 @@ DemoSkinRewritePlan nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(
             5029,
             ct_target_definition,
             profile.paint_kit,
-            profile.quality,
+            nskinzcs2::runtime::ResolveCanonicalGloveQuality(profile.quality, profile.paint_kit),
             model::NormalizeCosmeticSeed(profile.seed),
             model::NormalizeCosmeticWear(profile.wear),
             "CT",

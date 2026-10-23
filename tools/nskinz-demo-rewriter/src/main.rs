@@ -358,10 +358,11 @@ struct PawnDiscovery {
     glove_item_id_highs: HashSet<u32>,
     glove_item_id_lows: HashSet<u32>,
     glove_account_ids: HashSet<u32>,
+    glove_qualities: HashSet<i32>,
     glove_attribute_counts: HashSet<usize>,
     glove_paint_values: [HashSet<u32>; 3],
     glove_custom_names: HashSet<String>,
-    glove_body_group_choices: HashSet<i32>,
+    glove_body_group_choices: [HashSet<i32>; 2],
     glove_change_counters: HashSet<u8>,
 }
 
@@ -500,6 +501,9 @@ fn discover_glove_state(entity: &Entity, pawn: &mut PawnDiscovery) {
             values.insert(value);
         }
     }
+    if let Some(value) = field_integer(entity, "m_EconGloves.m_iEntityQuality") {
+        pawn.glove_qualities.insert(value as i32);
+    }
     let active_count = field_integer(
         entity,
         "m_EconGloves.m_NetworkedDynamicAttributes.m_Attributes",
@@ -525,11 +529,15 @@ fn discover_glove_state(entity: &Entity, pawn: &mut PawnDiscovery) {
     if let Some(FieldValue::String(name)) = entity.try_get_property("m_EconGloves.m_szCustomName") {
         pawn.glove_custom_names.insert(name.clone());
     }
-    if let Some(value) = field_integer(
-        entity,
-        "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0000",
-    ) {
-        pawn.glove_body_group_choices.insert(value as i32);
+    for (slot, values) in pawn.glove_body_group_choices.iter_mut().enumerate() {
+        if let Some(value) = field_integer(
+            entity,
+            &format!(
+                "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.{slot:04}"
+            ),
+        ) {
+            values.insert(value as i32);
+        }
     }
     if let Some(value) = field_integer(entity, "m_nEconGlovesChanged") {
         pawn.glove_change_counters.insert(value as u8);
@@ -1151,7 +1159,7 @@ struct AnimAsset {
 #[derive(Clone)]
 struct RewritePlan {
     knives: HashMap<u32, KnifeRule>,
-    gloves: HashMap<u32, GloveRule>,
+    gloves: HashMap<u32, HashMap<Team, GloveRule>>,
     weapons: HashMap<u32, WeaponRule>,
     sticker_weapons: HashMap<u32, StickerRule>,
     requested_sticker_slots: usize,
@@ -1220,7 +1228,7 @@ fn build_rewrite_plan(
     cs2_game_dir: Option<&Path>,
 ) -> Result<RewritePlan> {
     let mut knives = HashMap::new();
-    let mut gloves = HashMap::new();
+    let mut gloves: HashMap<u32, HashMap<Team, GloveRule>> = HashMap::new();
     let mut weapons = HashMap::new();
     let mut sticker_weapons: HashMap<u32, StickerRule> = HashMap::new();
     let mut requested_sticker_slots = HashSet::new();
@@ -1255,33 +1263,46 @@ fn build_rewrite_plan(
                 continue;
             }
             selected_pawns.insert(pawn_handle);
-            if let Some(team_plan) = team_plan {
-                if let Some(cosmetic) = &team_plan.glove {
-                    matched_glove_players.insert(*steam);
-                    let team_number = team.and_then(Team::number).unwrap_or_default();
-                    let mut cosmetic = cosmetic.clone();
-                    if cosmetic.preserve_source_definition {
-                        cosmetic.definition = pawn
-                            .glove_definitions_by_team
-                            .get(&team_number)
-                            .copied()
-                            .unwrap_or(cosmetic.definition);
-                    }
-                    let paint_attributes = pawn
-                        .glove_paint_attributes_by_team
+            for glove_team in [Team::T, Team::Ct, Team::Any] {
+                if glove_team
+                    .number()
+                    .is_some_and(|number| !pawn.teams.contains(&number))
+                {
+                    continue;
+                }
+                let Some(cosmetic) = player_plan
+                    .by_team
+                    .get(&glove_team)
+                    .and_then(|team_plan| team_plan.glove.as_ref())
+                else {
+                    continue;
+                };
+                matched_glove_players.insert(*steam);
+                let team_number = glove_team.number().unwrap_or_default();
+                let mut cosmetic = cosmetic.clone();
+                if cosmetic.preserve_source_definition {
+                    cosmetic.definition = pawn
+                        .glove_definitions_by_team
                         .get(&team_number)
                         .copied()
-                        .map(materialize_paint_attributes)
-                        .unwrap_or_else(|| materialize_paint_attributes(Default::default()));
-                    gloves.insert(
-                        pawn_handle,
-                        GloveRule {
-                            steam: *steam,
-                            cosmetic,
-                            paint_attributes,
-                        },
-                    );
+                        .unwrap_or(cosmetic.definition);
                 }
+                let paint_attributes = pawn
+                    .glove_paint_attributes_by_team
+                    .get(&team_number)
+                    .copied()
+                    .map(materialize_paint_attributes)
+                    .unwrap_or_else(|| materialize_paint_attributes(Default::default()));
+                gloves.entry(pawn_handle).or_default().insert(
+                    glove_team,
+                    GloveRule {
+                        steam: *steam,
+                        cosmetic,
+                        paint_attributes,
+                    },
+                );
+            }
+            if let Some(team_plan) = team_plan {
                 if let Some(cosmetic) = &team_plan.knife {
                     matched_knife_players.insert(*steam);
                     let variant = installed_variant(cosmetic.definition).ok_or_else(|| {
@@ -1642,6 +1663,11 @@ fn weapon_fields(rule: &WeaponRule) -> Vec<(String, FieldValue)> {
 fn glove_fields(rule: &GloveRule) -> Vec<(String, FieldValue)> {
     let c = &rule.cosmetic;
     let account = rule.steam as u32;
+    let quality = if c.paint_kit > 0 && c.quality == 0 {
+        3
+    } else {
+        c.quality
+    };
     let (high, low) = fnv_identity(rule.steam, c.definition, 0x474C_4F56_455F_4944);
     let prefix = "m_EconGloves";
     let mut fields = vec![
@@ -1651,7 +1677,7 @@ fn glove_fields(rule: &GloveRule) -> Vec<(String, FieldValue)> {
         ),
         (
             format!("{prefix}.m_iEntityQuality"),
-            FieldValue::Signed32(c.quality),
+            FieldValue::Signed32(quality),
         ),
         (
             format!("{prefix}.m_iEntityLevel"),
@@ -1689,6 +1715,10 @@ fn glove_fields(rule: &GloveRule) -> Vec<(String, FieldValue)> {
             "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0000".into(),
             FieldValue::Signed32(1),
         ),
+        (
+            "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0001".into(),
+            FieldValue::Signed32(1),
+        ),
         ("m_nEconGlovesChanged".into(), FieldValue::Unsigned8(1)),
     ];
     push_attribute(
@@ -1713,6 +1743,21 @@ fn glove_fields(rule: &GloveRule) -> Vec<(String, FieldValue)> {
         c.wear,
     );
     fields
+}
+
+fn entity_team(entity: &Entity) -> Option<Team> {
+    match field_integer(entity, "m_iTeamNum")? as u8 {
+        2 => Some(Team::T),
+        3 => Some(Team::Ct),
+        _ => None,
+    }
+}
+
+fn glove_rule_for_entity<'a>(plan: &'a RewritePlan, entity: &Entity) -> Option<&'a GloveRule> {
+    let rules = plan.gloves.get(&entity.handle())?;
+    entity_team(entity)
+        .and_then(|team| rules.get(&team))
+        .or_else(|| rules.get(&Team::Any))
 }
 
 struct CosmeticRewriter {
@@ -1809,7 +1854,7 @@ impl DemoRewriter for CosmeticRewriter {
                 return Some(replacement);
             }
         }
-        if let Some(rule) = self.plan.gloves.get(&entity.handle()) {
+        if let Some(rule) = glove_rule_for_entity(&self.plan, entity) {
             return replacement_from_fields(glove_fields(rule), field_name);
         }
         if let Some(rule) = self.plan.sticker_weapons.get(&entity.handle()) {
@@ -1834,7 +1879,7 @@ impl DemoRewriter for CosmeticRewriter {
         if let Some(rule) = self.plan.weapons.get(&entity.handle()) {
             fields.extend(weapon_fields(rule));
         }
-        if let Some(rule) = self.plan.gloves.get(&entity.handle()) {
+        if let Some(rule) = glove_rule_for_entity(&self.plan, entity) {
             fields.extend(glove_fields(rule));
         }
         if let Some(rule) = self.plan.sticker_weapons.get(&entity.handle()) {
@@ -1979,63 +2024,81 @@ fn verify_sticker_rewrites(plan: &RewritePlan, discovery: &Discovery) -> Result<
 
 fn verify_glove_rewrites(plan: &RewritePlan, discovery: &Discovery) -> Result<usize> {
     let mut verified = 0;
-    for (handle, rule) in &plan.gloves {
+    for (handle, rules) in &plan.gloves {
         let pawn = discovery
             .pawns
             .get(handle)
             .ok_or_else(|| anyhow!("rewritten demo lost glove pawn handle {handle}"))?;
-        let c = &rule.cosmetic;
-        let (expected_high, expected_low) =
-            fnv_identity(rule.steam, c.definition, 0x474C_4F56_455F_4944);
-        let expected_account = rule.steam as u32;
-        if !pawn.glove_definitions.contains(&c.definition)
-            || !pawn.glove_item_id_highs.contains(&expected_high)
-            || !pawn.glove_item_id_lows.contains(&expected_low)
-            || !pawn.glove_account_ids.contains(&expected_account)
-        {
-            bail!(
-                "glove identity verification failed for pawn handle {handle}: desired definition/id/account {}/{}:{}/{}, observed definitions {:?}, highs {:?}, lows {:?}, accounts {:?}",
-                c.definition,
-                expected_high,
-                expected_low,
-                expected_account,
-                pawn.glove_definitions,
-                pawn.glove_item_id_highs,
-                pawn.glove_item_id_lows,
-                pawn.glove_account_ids
-            );
-        }
-        for (slot, expected) in [
-            (0usize, (c.paint_kit as f32).to_bits()),
-            (1usize, c.seed.to_bits()),
-            (2usize, c.wear.to_bits()),
-        ] {
-            if !pawn.glove_paint_values[slot].contains(&expected) {
+        for (team, rule) in rules {
+            let c = &rule.cosmetic;
+            let quality = if c.paint_kit > 0 && c.quality == 0 {
+                3
+            } else {
+                c.quality
+            };
+            let (expected_high, expected_low) =
+                fnv_identity(rule.steam, c.definition, 0x474C_4F56_455F_4944);
+            let expected_account = rule.steam as u32;
+            let team_definition_matches = team.number().map_or(true, |number| {
+                pawn.glove_definitions_by_team.get(&number) == Some(&c.definition)
+            });
+            if !team_definition_matches
+                || !pawn.glove_definitions.contains(&c.definition)
+                || !pawn.glove_item_id_highs.contains(&expected_high)
+                || !pawn.glove_item_id_lows.contains(&expected_low)
+                || !pawn.glove_account_ids.contains(&expected_account)
+                || !pawn.glove_qualities.contains(&quality)
+            {
                 bail!(
-                    "glove finish verification failed for pawn handle {handle}, attribute definition {}: desired bits {expected}, observed {:?}",
-                    6 + slot,
-                    pawn.glove_paint_values[slot]
+                    "glove identity verification failed for pawn handle {handle}, team {team:?}: desired definition/quality/id/account {}/{}/{}:{}/{}, observed team definitions {:?}, definitions {:?}, qualities {:?}, highs {:?}, lows {:?}, accounts {:?}",
+                    c.definition,
+                    quality,
+                    expected_high,
+                    expected_low,
+                    expected_account,
+                    pawn.glove_definitions_by_team,
+                    pawn.glove_definitions,
+                    pawn.glove_qualities,
+                    pawn.glove_item_id_highs,
+                    pawn.glove_item_id_lows,
+                    pawn.glove_account_ids
                 );
             }
-        }
-        if !pawn
-            .glove_attribute_counts
-            .iter()
-            .any(|count| *count >= rule.paint_attributes.count)
-            || !pawn.glove_custom_names.contains(&c.custom_name)
-            || !pawn.glove_body_group_choices.contains(&1)
-            || !pawn
-                .glove_change_counters
+            for (slot, expected) in [
+                (0usize, (c.paint_kit as f32).to_bits()),
+                (1usize, c.seed.to_bits()),
+                (2usize, c.wear.to_bits()),
+            ] {
+                if !pawn.glove_paint_values[slot].contains(&expected) {
+                    bail!(
+                        "glove finish verification failed for pawn handle {handle}, team {team:?}, attribute definition {}: desired bits {expected}, observed {:?}",
+                        6 + slot,
+                        pawn.glove_paint_values[slot]
+                    );
+                }
+            }
+            if !pawn
+                .glove_attribute_counts
                 .iter()
-                .any(|counter| *counter != 0)
-        {
-            bail!(
-                "glove presentation verification failed for pawn handle {handle}: counts {:?}, names {:?}, body groups {:?}, change counters {:?}",
-                pawn.glove_attribute_counts,
-                pawn.glove_custom_names,
-                pawn.glove_body_group_choices,
-                pawn.glove_change_counters
-            );
+                .any(|count| *count >= rule.paint_attributes.count)
+                || !pawn.glove_custom_names.contains(&c.custom_name)
+                || pawn
+                    .glove_body_group_choices
+                    .iter()
+                    .any(|choices| !choices.contains(&1))
+                || !pawn
+                    .glove_change_counters
+                    .iter()
+                    .any(|counter| *counter != 0)
+            {
+                bail!(
+                    "glove presentation verification failed for pawn handle {handle}, team {team:?}: counts {:?}, names {:?}, body groups {:?}, change counters {:?}",
+                    pawn.glove_attribute_counts,
+                    pawn.glove_custom_names,
+                    pawn.glove_body_group_choices,
+                    pawn.glove_change_counters
+                );
+            }
         }
         verified += 1;
     }
@@ -2636,7 +2699,11 @@ mod tests {
         let weapon = plan.weapons.get(&100).expect("existing weapon rewrite");
         assert_eq!(weapon.paint_attributes.indices, [3, 6, 8]);
         assert_eq!(weapon.paint_attributes.count, 10);
-        let glove = plan.gloves.get(&10).expect("existing glove rewrite");
+        let glove = plan
+            .gloves
+            .get(&10)
+            .and_then(|rules| rules.get(&Team::Ct))
+            .expect("existing CT glove rewrite");
         assert_eq!(glove.paint_attributes.indices, [1, 4, 5]);
         assert_eq!(glove.paint_attributes.count, 7);
         assert!(has_field(
@@ -2957,6 +3024,16 @@ mod tests {
             &glove,
             "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0000",
             FieldValue::Signed32(1)
+        ));
+        assert!(has_field(
+            &glove,
+            "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0001",
+            FieldValue::Signed32(1)
+        ));
+        assert!(has_field(
+            &glove,
+            "m_EconGloves.m_iEntityQuality",
+            FieldValue::Signed32(3)
         ));
         assert!(has_field(
             &glove,

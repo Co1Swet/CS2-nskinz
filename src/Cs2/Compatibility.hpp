@@ -11,21 +11,24 @@
 
 namespace nskinzcs2::compatibility
 {
-inline constexpr std::string_view kVerifiedClientVersion = "2000932";
-inline constexpr std::string_view kVerifiedPatchVersion = "1.41.9.1";
-inline constexpr std::string_view kVerifiedSourceRevision = "11131657";
-inline constexpr std::string_view kVerifiedHlaeVersion = "2.192.6.0";
+inline constexpr std::string_view kVerifiedClientVersion = "2000935";
+inline constexpr std::string_view kVerifiedPatchVersion = "1.41.9.2";
+inline constexpr std::string_view kVerifiedSourceRevision = "11162119";
+inline constexpr std::string_view kVerifiedHlaeVersion = "2.192.8.0";
+// C_EconWearable Schema size retained by the installed build 2000935 class
+// metadata and cross-checked against both allocator immediates.
+inline constexpr std::uint32_t kWearableSchemaClassSize = 0x1920;
 
 inline constexpr char kSource2ClientInterface[] = "Source2Client002";
 inline constexpr char kResourceSystemInterface[] = "ResourceSystem013";
 inline constexpr char kFileSystemInterface[] = "VFileSystem017";
 inline constexpr std::size_t kFrameStageNotifyVtableIndex = 36;
-// ClientFrameStage_t layout re-verified with HLAE 2.192.6. Runtime polling must run at
+// ClientFrameStage_t layout re-verified with HLAE 2.192.8. Runtime polling must run at
 // FRAME_RENDER_PASS; using the previous value (11) leaves every manual Update
 // pending forever even though FrameStageNotify callbacks are active.
 inline constexpr int kFrameStartStage = 0;
 inline constexpr int kFrameRenderPassStage = 12;
-// Source2EngineToClient001 layout verified on HLAE 2.192.6 / CS2 build 2000918.
+// Source2EngineToClient001 layout verified on HLAE 2.192.8 / CS2 build 2000935.
 inline constexpr std::size_t kEngineIsPlayingDemoVtableIndex = 42;
 inline constexpr std::size_t kEngineGetDemoFilePathVtableIndex = 43;
 inline constexpr std::size_t kEngineGetLevelNameShortVtableIndex = 65;
@@ -66,13 +69,16 @@ inline constexpr char kWearableEntityFormalCreatePattern[] =
     "48 89 5C 24 08 48 89 6C 24 10 56 57 41 56 48 83 EC 40 4D 8B F1 49 8B D8 8B EA 48 8B F1 4D 85 C0";
 inline constexpr char kWearableEntityClassLookupPattern[] =
     "48 89 5C 24 08 48 89 74 24 18 48 89 54 24 10 57 48 83 EC 20 49 8B D8 48 8B F9 48 85 D2";
-// CEconWearable's current client-think override calls the base no-op and then
-// tail-calls the definition/model refresh. Runtime resolves it from the
-// reflected primary vtable and validates both relative targets immediately
-// before invocation; this offline signature makes a changed thunk fail the
-// installed-build compatibility scan before the DLL is used in CS2.
+// CEconWearable's definition callback calls the base no-op and then tail-calls
+// the definition/model refresh. Build 2000935 exposes a per-entity dispatcher
+// through the reflected primary vtable and stores this callback at entity+0x318.
+// Runtime verifies the dispatcher, resolves this unique target-shaped callback,
+// publishes it only into runtime-created wearables, and validates both relative
+// targets immediately before invocation.
 inline constexpr char kWearableDefinitionRefreshThunkPattern[] =
     "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 48 8B CB 48 83 C4 20 5B E9 ?? ?? ?? ??";
+inline constexpr char kWearableDefinitionRefreshDispatcherPattern[] =
+    "48 8B 81 18 03 00 00 48 85 C0 74 03 48 FF E0 C3";
 // C_BaseModelEntity::SetModel in the client module.  The current wrapper
 // interns the requested path through the client string service and then calls
 // the adjacent model-state transition.  Runtime-created CEconWearable objects
@@ -127,7 +133,7 @@ struct SignatureSpec
     bool required = true;
 };
 
-inline constexpr std::array<SignatureSpec, 16> kSignatureSpecs {{
+inline constexpr std::array<SignatureSpec, 17> kSignatureSpecs {{
     {"schema_global", L"game\\bin\\win64\\schemasystem.dll", kSchemaGlobalPattern, true},
     {"entity_system_root", L"game\\csgo\\bin\\win64\\client.dll", kEntitySystemRootPattern, true},
     {"get_entity_from_index", L"game\\csgo\\bin\\win64\\client.dll", kGetEntityFromIndexPattern, true},
@@ -140,6 +146,7 @@ inline constexpr std::array<SignatureSpec, 16> kSignatureSpecs {{
     {"wearable_entity_formal_create", L"game\\csgo\\bin\\win64\\client.dll", kWearableEntityFormalCreatePattern, true},
     {"wearable_entity_class_lookup", L"game\\csgo\\bin\\win64\\client.dll", kWearableEntityClassLookupPattern, true},
     {"wearable_definition_refresh_thunk", L"game\\csgo\\bin\\win64\\client.dll", kWearableDefinitionRefreshThunkPattern, true},
+    {"wearable_definition_refresh_dispatcher", L"game\\csgo\\bin\\win64\\client.dll", kWearableDefinitionRefreshDispatcherPattern, true},
     {"base_model_entity_set_model", L"game\\csgo\\bin\\win64\\client.dll", kBaseModelEntitySetModelPattern, true},
     {"base_entity_subclass_changed", L"game\\csgo\\bin\\win64\\client.dll", kBaseEntitySubclassChangedPattern, true},
     {"utl_string_token_make_sret", L"game\\bin\\win64\\tier0.dll", kUtlStringTokenMakeSretPattern, true},

@@ -10,7 +10,7 @@ use source2_demo::writer::{
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -152,6 +152,8 @@ struct Response {
     pawn_count: usize,
     knife_count: usize,
     glove_count: usize,
+    verified_glove_record_count: usize,
+    verified_glove_created_count: usize,
     weapon_count: usize,
     painted_glove_passthrough_count: usize,
     painted_weapon_passthrough_count: usize,
@@ -1753,15 +1755,45 @@ fn entity_team(entity: &Entity) -> Option<Team> {
     }
 }
 
-fn glove_rule_for_entity<'a>(plan: &'a RewritePlan, entity: &Entity) -> Option<&'a GloveRule> {
+fn glove_rule_for_entity_with_team<'a>(
+    plan: &'a RewritePlan,
+    entity: &Entity,
+) -> Option<(Team, &'a GloveRule)> {
     let rules = plan.gloves.get(&entity.handle())?;
-    entity_team(entity)
-        .and_then(|team| rules.get(&team))
-        .or_else(|| rules.get(&Team::Any))
+    if let Some(team) = entity_team(entity) {
+        if let Some(rule) = rules.get(&team) {
+            return Some((team, rule));
+        }
+    }
+    rules.get(&Team::Any).map(|rule| (Team::Any, rule))
+}
+
+fn glove_rule_for_entity<'a>(plan: &'a RewritePlan, entity: &Entity) -> Option<&'a GloveRule> {
+    glove_rule_for_entity_with_team(plan, entity).map(|(_, rule)| rule)
+}
+
+fn should_materialize_glove_rule(
+    materialized_team_by_pawn: &mut HashMap<u32, Team>,
+    pawn_handle: u32,
+    team: Team,
+    event: EntityEvents,
+) -> bool {
+    if event != EntityEvents::Created && materialized_team_by_pawn.get(&pawn_handle) == Some(&team)
+    {
+        return false;
+    }
+    materialized_team_by_pawn.insert(pawn_handle, team);
+    true
 }
 
 struct CosmeticRewriter {
     plan: RewritePlan,
+    // A Pawn's team is not guaranteed to be present in its Created delta.
+    // Remember the last rule that was fully materialized so the first later
+    // update carrying m_iTeamNum can add the missing m_EconGloves subtree.
+    // Every Created record is independent, including seek/full-packet
+    // snapshots that reuse the same handle and team. Never deduplicate those.
+    materialized_glove_team_by_pawn: HashMap<u32, Team>,
 }
 
 fn replacement_from_fields(
@@ -1869,24 +1901,39 @@ impl DemoRewriter for CosmeticRewriter {
         event: EntityEvents,
         entity: &Entity,
     ) -> Result<Vec<(String, FieldValue)>, source2_demo::error::ParserError> {
-        if event != EntityEvents::Created {
-            return Ok(Vec::new());
-        }
         let mut fields = Vec::new();
-        if let Some(rule) = self.plan.knives.get(&entity.handle()) {
-            fields.extend(knife_fields(rule));
+        if event == EntityEvents::Created {
+            self.materialized_glove_team_by_pawn
+                .remove(&entity.handle());
         }
-        if let Some(rule) = self.plan.weapons.get(&entity.handle()) {
-            fields.extend(weapon_fields(rule));
+        // Handle-independent item rules can be materialized as soon as the
+        // entity is created. Glove rules are different: team may arrive in a
+        // later Updated delta, so they are handled below for both events.
+        if event == EntityEvents::Created {
+            if let Some(rule) = self.plan.knives.get(&entity.handle()) {
+                fields.extend(knife_fields(rule));
+            }
+            if let Some(rule) = self.plan.weapons.get(&entity.handle()) {
+                fields.extend(weapon_fields(rule));
+            }
+            if let Some(rule) = self.plan.sticker_weapons.get(&entity.handle()) {
+                fields.extend(sticker_fields(
+                    rule,
+                    !self.plan.weapons.contains_key(&entity.handle()),
+                ));
+            }
         }
-        if let Some(rule) = glove_rule_for_entity(&self.plan, entity) {
-            fields.extend(glove_fields(rule));
-        }
-        if let Some(rule) = self.plan.sticker_weapons.get(&entity.handle()) {
-            fields.extend(sticker_fields(
-                rule,
-                !self.plan.weapons.contains_key(&entity.handle()),
-            ));
+
+        if let Some((team, rule)) = glove_rule_for_entity_with_team(&self.plan, entity) {
+            let handle = entity.handle();
+            if should_materialize_glove_rule(
+                &mut self.materialized_glove_team_by_pawn,
+                handle,
+                team,
+                event,
+            ) {
+                fields.extend(glove_fields(rule));
+            }
         }
         Ok(fields)
     }
@@ -1985,6 +2032,134 @@ fn discover_from_slice(input: &[u8]) -> Result<Discovery> {
 
 fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+// Unlike the sequential Parser observer, DemoWriter decodes every full-packet
+// entity snapshot, including snapshots normally skipped during linear playback.
+// Use its read-only field callbacks to verify actual per-record state as well
+// as every independent seek checkpoint. No bytes are retained or written to disk.
+#[derive(Default)]
+struct VerificationSink {
+    position: u64,
+    length: u64,
+}
+
+impl Write for VerificationSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.position += bytes.len() as u64;
+        self.length = self.length.max(self.position);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for VerificationSink {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let next = match from {
+            SeekFrom::Start(value) => value as i128,
+            SeekFrom::End(value) => self.length as i128 + value as i128,
+            SeekFrom::Current(value) => self.position as i128 + value as i128,
+        };
+        self.position = u64::try_from(next).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid verification seek",
+            )
+        })?;
+        Ok(self.position)
+    }
+}
+
+struct GloveSnapshotVerifier {
+    plan: RewritePlan,
+    expected_fields: HashMap<(u32, Team), Vec<(String, FieldValue)>>,
+    verified_rules: HashSet<(u32, Team)>,
+    created_records: usize,
+    checked_records: usize,
+}
+
+impl GloveSnapshotVerifier {
+    fn new(plan: &RewritePlan) -> Self {
+        let expected_fields = plan
+            .gloves
+            .iter()
+            .flat_map(|(handle, rules)| {
+                rules
+                    .iter()
+                    .map(|(team, rule)| ((*handle, *team), glove_fields(rule)))
+            })
+            .collect();
+        Self {
+            plan: plan.clone(),
+            expected_fields,
+            verified_rules: HashSet::new(),
+            created_records: 0,
+            checked_records: 0,
+        }
+    }
+}
+
+impl DemoRewriter for GloveSnapshotVerifier {
+    fn interests(&self) -> RewriteInterests {
+        RewriteInterests::ENTITY_FIELDS
+    }
+
+    fn should_rewrite_entity(
+        &mut self,
+        _ctx: &Context,
+        _event: EntityEvents,
+        entity: &Entity,
+    ) -> bool {
+        self.plan.gloves.contains_key(&entity.handle())
+    }
+
+    fn additional_entity_fields(
+        &mut self,
+        ctx: &Context,
+        event: EntityEvents,
+        entity: &Entity,
+    ) -> Result<Vec<(String, FieldValue)>, source2_demo::error::ParserError> {
+        if let Some((team, _rule)) = glove_rule_for_entity_with_team(&self.plan, entity) {
+            let handle = entity.handle();
+            for (name, expected) in &self.expected_fields[&(handle, team)] {
+                let actual = entity.try_get_property(name);
+                if actual != Some(expected) {
+                    return Err(source2_demo::error::ParserError::IoError(format!(
+                        "glove snapshot verification failed at tick {}, event {event:?}, pawn handle {handle}, team {team:?}, field {name}: expected {expected:?}, observed {actual:?}",
+                        ctx.tick()
+                    )));
+                }
+            }
+            self.verified_rules.insert((handle, team));
+            self.checked_records += 1;
+            if event == EntityEvents::Created {
+                self.created_records += 1;
+            }
+        }
+        Ok(Vec::new())
+    }
+}
+
+fn verify_glove_snapshots(plan: &RewritePlan, output: &Path) -> Result<(usize, usize)> {
+    if plan.gloves.is_empty() {
+        return Ok((0, 0));
+    }
+    let input = BufReader::with_capacity(IO_BUFFER_CAPACITY, File::open(output)?);
+    let mut writer = DemoWriter::from_reader(input, VerificationSink::default())?;
+    let state = writer.add_rewriter(GloveSnapshotVerifier::new(plan));
+    writer.run()?;
+    let state = state.borrow();
+    for (handle, rules) in &plan.gloves {
+        for team in rules.keys() {
+            if !state.verified_rules.contains(&(*handle, *team)) {
+                bail!("no verified glove snapshot for pawn handle {handle}, team {team:?}");
+            }
+        }
+    }
+    Ok((state.checked_records, state.created_records))
 }
 
 fn verify_sticker_rewrites(plan: &RewritePlan, discovery: &Discovery) -> Result<usize> {
@@ -2168,20 +2343,28 @@ fn rewrite(request: &Request) -> Result<Response> {
     match in_memory.as_deref() {
         Some(bytes) => {
             let mut writer = DemoWriter::from_slice(bytes, output)?;
-            writer.add_rewriter(CosmeticRewriter { plan: plan.clone() });
+            writer.add_rewriter(CosmeticRewriter {
+                plan: plan.clone(),
+                materialized_glove_team_by_pawn: HashMap::new(),
+            });
             writer.run()?;
         }
         None => {
             let input = File::open(&request.input_dem)?;
             let input = BufReader::with_capacity(IO_BUFFER_CAPACITY, input);
             let mut writer = DemoWriter::from_reader(input, output)?;
-            writer.add_rewriter(CosmeticRewriter { plan: plan.clone() });
+            writer.add_rewriter(CosmeticRewriter {
+                plan: plan.clone(),
+                materialized_glove_team_by_pawn: HashMap::new(),
+            });
             writer.run()?;
         }
     }
     let rewrite_ms = elapsed_ms(rewrite_started);
     let verification_started = Instant::now();
     let rewritten_discovery = discover(&request.output_dem)?;
+    let (verified_glove_records, verified_glove_created) =
+        verify_glove_snapshots(&plan, &request.output_dem)?;
     let verified_gloves = verify_glove_rewrites(&plan, &rewritten_discovery)?;
     if verified_gloves != plan.gloves.len() {
         bail!(
@@ -2207,6 +2390,8 @@ fn rewrite(request: &Request) -> Result<Response> {
         pawn_count: counts.0,
         knife_count: counts.1,
         glove_count: verified_gloves,
+        verified_glove_record_count: verified_glove_records,
+        verified_glove_created_count: verified_glove_created,
         weapon_count: counts.3,
         painted_glove_passthrough_count: counts.4,
         painted_weapon_passthrough_count: counts.5,
@@ -2274,6 +2459,8 @@ fn run_main() -> Result<()> {
                 pawn_count: 0,
                 knife_count: 0,
                 glove_count: 0,
+                verified_glove_record_count: 0,
+                verified_glove_created_count: 0,
                 weapon_count: 0,
                 painted_glove_passthrough_count: 0,
                 painted_weapon_passthrough_count: 0,
@@ -2326,6 +2513,204 @@ mod tests {
         fields
             .iter()
             .any(|(field_name, value)| field_name == name && *value == expected)
+    }
+
+    #[test]
+    fn glove_materialization_handles_late_teams_and_independent_created_records() {
+        let handle = 7_471_247;
+        let mut materialized = HashMap::new();
+
+        // An entity that was created before m_iTeamNum arrived gets its full
+        // glove state on the first update where the team-specific rule resolves.
+        assert!(should_materialize_glove_rule(
+            &mut materialized,
+            handle,
+            Team::Ct,
+            EntityEvents::Updated
+        ));
+        assert!(!should_materialize_glove_rule(
+            &mut materialized,
+            handle,
+            Team::Ct,
+            EntityEvents::Updated
+        ));
+
+        // Reused Pawns can cross team epochs. Re-emit once for the new rule,
+        // then avoid adding the same complete subtree to every later update.
+        assert!(should_materialize_glove_rule(
+            &mut materialized,
+            handle,
+            Team::T,
+            EntityEvents::Updated
+        ));
+        assert!(!should_materialize_glove_rule(
+            &mut materialized,
+            handle,
+            Team::T,
+            EntityEvents::Updated
+        ));
+
+        // Seeking decodes another independent Created snapshot with the same
+        // handle/team. It must contain all fields even after a prior rewrite.
+        for _ in 0..4 {
+            assert!(should_materialize_glove_rule(
+                &mut materialized,
+                handle,
+                Team::T,
+                EntityEvents::Created
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires NSKINZ_GLOVE_REGRESSION_REQUEST and NSKINZ_GLOVE_REJECT_DEMO fixtures"]
+    fn real_demo_rejects_missing_seek_snapshots_and_rebuilds_all_epochs() {
+        let request_path = std::env::var_os("NSKINZ_GLOVE_REGRESSION_REQUEST")
+            .expect("set the real-demo rewrite request path");
+        let bad_demo = std::env::var_os("NSKINZ_GLOVE_REJECT_DEMO")
+            .expect("set the known failing output demo path");
+        let request: Request =
+            serde_json::from_slice(&std::fs::read(request_path).expect("read fixture request"))
+                .expect("parse fixture request");
+        let discovery = discover(&request.input_dem).expect("discover source");
+        let plan = build_rewrite_plan(&parse_plans(&request).unwrap(), &discovery, None).unwrap();
+        let failure = verify_glove_snapshots(&plan, Path::new(&bad_demo))
+            .expect_err("a linear-only output must fail independent snapshot verification");
+        assert!(format!("{failure:#}").contains("event Created"));
+        eprintln!("known bad output rejected: {failure:#}");
+        let response = rewrite(&request).expect("rebuild actual demo including seek snapshots");
+        assert!(response.verified_glove_record_count > response.verified_glove_created_count);
+        assert!(
+            response.verified_glove_created_count > 1,
+            "multiple independent snapshots must be checked"
+        );
+        eprintln!(
+            "verified records={}, independent Created records={}",
+            response.verified_glove_record_count, response.verified_glove_created_count
+        );
+    }
+
+    #[test]
+    #[ignore = "requires NSKINZ_DEFAULT_GLOVE_MATRIX with real source/output paths"]
+    fn different_demos_rebuild_default_t_ct_gloves_and_verify_random_access() {
+        #[derive(Deserialize)]
+        struct Fixture {
+            input_dem: PathBuf,
+            output_dem: PathBuf,
+        }
+        let fixtures: Vec<Fixture> = serde_json::from_slice(
+            &std::fs::read(
+                std::env::var_os("NSKINZ_DEFAULT_GLOVE_MATRIX")
+                    .expect("set the real-demo matrix JSON path"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            fixtures.len() >= 3,
+            "use independent recordings, not variants of one Demo"
+        );
+        for fixture in fixtures {
+            let source = discover(&fixture.input_dem).expect("discover matrix source");
+            let mut passes = Vec::new();
+            let accounts: BTreeSet<u64> = source.controller_steam.values().copied().collect();
+            for steam in accounts {
+                let pawns: Vec<_> = player_pawns(&source, steam)
+                    .into_iter()
+                    .filter_map(|handle| source.pawns.get(&handle))
+                    .collect();
+                let default_player = !pawns.is_empty()
+                    && pawns.iter().all(|pawn| {
+                        pawn.glove_definitions
+                            .iter()
+                            .all(|definition| matches!(definition, 5028 | 5029))
+                    });
+                if !default_player
+                    || !pawns
+                        .iter()
+                        .any(|pawn| pawn.teams.iter().any(|team| matches!(team, 2 | 3)))
+                {
+                    continue;
+                }
+                passes.push(RequestPass {
+                    steam_id64: steam.to_string(),
+                    items: [(5028, 5034, 10033, "T"), (5029, 5030, 10037, "CT")]
+                        .into_iter()
+                        .map(|(definition, target, paint, team)| RequestItem {
+                            definition_index: definition,
+                            replacement_definition_index: Some(target),
+                            preserve_source_definition: false,
+                            paint_kit: paint,
+                            quality: 0,
+                            pattern_seed: 321.0,
+                            wear: 0.07,
+                            mesh_group_mask: None,
+                            custom_name: "cross-demo glove regression".into(),
+                            stickers: [0; STICKER_SLOT_COUNT],
+                            sticker_transforms: [StickerTransform::default(); STICKER_SLOT_COUNT],
+                            team: team.into(),
+                        })
+                        .collect(),
+                });
+            }
+            assert!(
+                !passes.is_empty(),
+                "the source fixture must contain a default-glove player"
+            );
+            let request = Request {
+                schema_version: 1,
+                input_dem: fixture.input_dem,
+                output_dem: fixture.output_dem,
+                cs2_game_dir: None,
+                passes,
+            };
+            let plan = build_rewrite_plan(&parse_plans(&request).unwrap(), &source, None).unwrap();
+            let response =
+                rewrite(&request).expect("cross-demo rebuild and complete snapshot verification");
+
+            // Read each location through the Parser's independent seek path,
+            // not through the writer used for production verification. Jump
+            // backwards as well as forwards to exercise checkpoint restoration.
+            let file = File::open(&request.output_dem).unwrap();
+            let mut parser = Parser::from_reader(BufReader::new(file)).unwrap();
+            parser.register_observer::<Discovery>();
+            let last = parser.replay_info().playback_ticks().max(1) as u32;
+            let mut seek_checks = 0;
+            let mut seek_teams = BTreeSet::new();
+            for step in [1, 3, 2, 7, 4, 6] {
+                parser.jump_to_tick(last * step / 8).unwrap();
+                for entity in parser.context().entities().iter() {
+                    let Some((team, rule)) = glove_rule_for_entity_with_team(&plan, entity) else {
+                        continue;
+                    };
+                    for (name, expected) in glove_fields(rule) {
+                        assert_eq!(
+                            entity.try_get_property(&name),
+                            Some(&expected),
+                            "{} seek to {}: handle {}, field {}",
+                            request.input_dem.display(),
+                            last * step / 8,
+                            entity.handle(),
+                            name
+                        );
+                    }
+                    seek_checks += 1;
+                    seek_teams.insert(team.number().unwrap_or_default());
+                }
+            }
+            assert!(
+                seek_checks > 0,
+                "seek must encounter the selected default-glove players"
+            );
+            assert!(
+                seek_teams.contains(&2) && seek_teams.contains(&3),
+                "cross-demo fixture must exercise both default team glove epochs"
+            );
+            eprintln!("MATRIX PASS: {} players={} pawns={} records={} Created={} independent_seek_checks={} teams={:?}",
+                request.input_dem.display(), response.matched_player_count, response.glove_count,
+                response.verified_glove_record_count, response.verified_glove_created_count,
+                seek_checks, seek_teams);
+        }
     }
 
     #[test]

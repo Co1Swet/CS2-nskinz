@@ -1,5 +1,16 @@
 # Changelog / 更新记录
 
+## v0.6.3 — 2026-10-25
+
+- Fixed default T/CT gloves disappearing after seeking a Temporary Demo: every independent Created/full-packet record now materializes its complete glove state even when its Pawn handle and team were seen earlier. Late team assignment remains supported.
+- 修复临时 Demo 跳转后默认 T／CT 手套重建失效：每个独立 Created／完整快照均重新写入完整手套状态，保留队伍字段晚于实体创建到达的兼容逻辑。
+- Added per-record verification of all requested glove fields, including independent seek snapshots. Default, unreadable and generated-Demo glove carriers are now strictly read-only in the injected runtime; mismatches require a new Temporary Demo and cannot enter live writes, native refresh or Wearable creation.
+- 新增逐记录手套字段验证，覆盖独立跳转快照；默认、未读明及生成 Demo 的手套载体在注入端均严格只读，不匹配时要求重新生成临时 Demo，禁止进入实时写入、原生刷新或 Wearable 创建。
+- Validated four independent source recordings with 24 default-glove player/recording combinations, 1,894,511 target records, 702 Created snapshots and 132 independent seek readbacks, covering both T and CT in each recording.
+- 跨四份独立录制完成回归：覆盖 24 人次默认手套玩家、1,894,511 条目标记录、702 个 Created 快照及 132 次独立跳转读回，每份均覆盖 T／CT 两方。
+
+See [bilingual release notes](docs/releases/v0.6.3.md) and [diagnosis and real-Demo regression evidence](docs/diagnostics/default-glove-seek-snapshots.md).
+
 ## v0.6.2 — 2026-10-23
 
 - Rebased every guarded current-CS2 native path on Steam Build `26144732`, Client/Server `2000935`, Patch `1.41.9.2`, Source revision `11162119`. Knife serialization, model/material refresh, skeleton resources, animation graph/arms lifecycle, stock-glove refresh and HUD consumers now use the October 22 client layout with exact call/RIP-window verification.

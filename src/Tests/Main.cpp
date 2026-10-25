@@ -5105,7 +5105,7 @@ void TestGloveAppearanceModule()
     using nskinzcs2::runtime::CanUsePawnEconGlovesCarrier;
     Expect(
         !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 0, false, true),
-        "an empty demo Pawn glove slot must not bypass durable wearable creation");
+        "an empty demo Pawn glove slot must use Temporary Demo reconstruction");
     Expect(
         !CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, 0, false, false),
         "an empty pawn econ-gloves slot must reject an unknown target definition");
@@ -5133,8 +5133,24 @@ void TestGloveAppearanceModule()
         ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::ModelAndFinish, true, 5030),
         "a non-empty model-and-finish slot may retain the guarded wearable compatibility path");
     Expect(
-        ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::ModelAndFinish, false, 0),
-        "an unavailable Pawn slot may retain the standalone wearable compatibility path");
+        !ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::ModelAndFinish, false, 0),
+        "an unreadable Pawn slot must not create a live wearable before its provenance is known");
+    using nskinzcs2::runtime::RequiresTemporaryDemoGloveRebuild;
+    for (const auto definition : {0, 5028, 5029})
+    {
+        Expect(RequiresTemporaryDemoGloveRebuild(false, true, definition),
+            "both stock team definitions and the definition-zero slot must be Demo-only");
+        Expect(!CanUsePawnEconGlovesCarrier(GloveSlotMode::ModelAndFinish, true, definition, true, true),
+            "known stock T/CT definitions must not enter live Pawn mutation");
+        Expect(!ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::ModelAndFinish, true, definition),
+            "stock T/CT definitions must not enter wearable creation");
+    }
+    Expect(RequiresTemporaryDemoGloveRebuild(true, true, 5034),
+        "a generated special-glove carrier must remain read-only even if the profile mismatches");
+    Expect(RequiresTemporaryDemoGloveRebuild(false, false, 5034),
+        "an unreadable carrier must fail closed");
+    Expect(!RequiresTemporaryDemoGloveRebuild(false, true, 5034),
+        "an existing non-generated special glove may retain its established live path");
     Expect(
         !ShouldAttemptRuntimeGloveWearableCreation(GloveSlotMode::FinishOnly, true, 5030),
         "finish-only must never create a runtime wearable");

@@ -64,8 +64,7 @@ GloveCarrierKind ResolveCanonicalGloveCarrierKind(
         // the Pawn before playback constructs its visual output. Prefer a
         // real wearable when one already exists, but otherwise keep that
         // engine-owned Pawn item as the native reconstruction carrier. An
-        // empty/default slot is filtered by CanUsePawnEconGlovesCarrier and
-        // still falls through to the compatibility entity factory.
+        // empty/default slot is left to Temporary Demo reconstruction.
         if (stable_wearable_available)
         {
             return GloveCarrierKind::Wearable;
@@ -86,7 +85,7 @@ bool CanUsePawnEconGlovesCarrier(
     const bool current_definition_is_glove,
     const bool requested_definition_is_glove) noexcept
 {
-    if (!definition_readable)
+    if (RequiresTemporaryDemoGloveRebuild(false, definition_readable, current_definition_index))
     {
         return false;
     }
@@ -101,7 +100,7 @@ bool CanUsePawnEconGlovesCarrier(
         // Only accept an item definition that was already materialized by the
         // demo/network stream. In particular, definition zero must never be
         // treated as a usable model carrier: that is the stock/default slot
-        // and still needs the guarded CEconWearable fallback. Requiring both
+        // and must be rebuilt in the Demo stream. Requiring both
         // definitions to be known glove definitions also prevents an
         // unrelated positive item from suppressing the fallback.
         return current_definition_index > 0 &&
@@ -110,6 +109,17 @@ bool CanUsePawnEconGlovesCarrier(
     }
 
     return false;
+}
+
+bool RequiresTemporaryDemoGloveRebuild(
+    const bool generated_demo,
+    const bool pawn_definition_readable,
+    const int pawn_definition_index) noexcept
+{
+    return generated_demo || !pawn_definition_readable ||
+        pawn_definition_index == 0 ||
+        pawn_definition_index == 5028 ||
+        pawn_definition_index == 5029;
 }
 
 bool ShouldAttemptRuntimeGloveWearableCreation(
@@ -126,7 +136,8 @@ bool ShouldAttemptRuntimeGloveWearableCreation(
     // Its embedded item view is serialized network storage, not a safe owner
     // for runtime-created attributes. The rewrite path must publish the glove
     // before CS2 constructs the Pawn instead.
-    return !pawn_definition_readable || pawn_definition_index != 0;
+    return !RequiresTemporaryDemoGloveRebuild(
+        false, pawn_definition_readable, pawn_definition_index);
 }
 
 std::uint64_t BuildGloveWearableCreationEpoch(

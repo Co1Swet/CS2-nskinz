@@ -27,11 +27,7 @@ fn insert_field(fields: &mut BTreeMap<String, String>, entity: &Entity, name: St
     }
 }
 
-fn collect_fields(
-    class: &str,
-    event: EntityEvents,
-    entity: &Entity,
-) -> BTreeMap<String, String> {
+fn collect_fields(class: &str, event: EntityEvents, entity: &Entity) -> BTreeMap<String, String> {
     let mut fields = BTreeMap::new();
     for name in [
         "m_iTeamNum",
@@ -40,6 +36,7 @@ fn collect_fields(
         "m_bNeedToReApplyGloves",
         "m_nEconGlovesChanged",
         "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0000",
+        "CBodyComponent.m_skeletonInstance.m_modelState.m_nBodyGroupChoices.0001",
         "m_hOwnerEntity",
         "m_hOwner",
     ] {
@@ -65,7 +62,16 @@ fn collect_fields(
     ] {
         insert_field(&mut fields, entity, format!("{prefix}.{suffix}"));
     }
-    for slot in 0..64 {
+    let attribute_count = entity
+        .try_get_property(&format!(
+            "{prefix}.m_NetworkedDynamicAttributes.m_Attributes"
+        ))
+        .and_then(|value| match value {
+            FieldValue::Unsigned32(count) => Some(*count as usize),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for slot in 0..attribute_count.min(256) {
         for suffix in [
             "m_iAttributeDefinitionIndex",
             "m_iRawValue32",
@@ -108,12 +114,7 @@ impl Observer for CosmeticInspector {
         Interests::ENTITY_STATE | Interests::ENTITY_EVENTS | Interests::REPLAY_END
     }
 
-    fn on_entity(
-        &mut self,
-        ctx: &Context,
-        event: EntityEvents,
-        entity: &Entity,
-    ) -> ObserverResult {
+    fn on_entity(&mut self, ctx: &Context, event: EntityEvents, entity: &Entity) -> ObserverResult {
         let class = entity.class().name();
         if class != "CCSPlayerPawn" && !class.contains("Wearable") && !class.contains("Glove") {
             return Ok(());
@@ -145,18 +146,52 @@ impl Observer for CosmeticInspector {
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
-    let input = args.next().map(PathBuf::from).context("usage: inspect_cosmetics <input.dem> <output.json>")?;
-    let output = args.next().map(PathBuf::from).context("usage: inspect_cosmetics <input.dem> <output.json>")?;
-    if args.next().is_some() {
-        anyhow::bail!("usage: inspect_cosmetics <input.dem> <output.json>");
-    }
+    let input = args
+        .next()
+        .map(PathBuf::from)
+        .context("usage: inspect_cosmetics <input.dem> <output.json>")?;
+    let output = args
+        .next()
+        .map(PathBuf::from)
+        .context("usage: inspect_cosmetics <input.dem> <output.json>")?;
+    let seek_ticks = args
+        .map(|value| value.to_string_lossy().parse::<u32>())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     let file = File::open(&input).with_context(|| format!("open {}", input.display()))?;
     let mut parser = Parser::from_reader(BufReader::with_capacity(8 * 1024 * 1024, file))?;
     let state = parser.register_observer::<CosmeticInspector>();
+    if !seek_ticks.is_empty() {
+        let mut snapshots = Vec::new();
+        for tick in seek_ticks {
+            parser.jump_to_tick(tick)?;
+            for entity in parser.context().entities().iter() {
+                if entity.class().name() == "CCSPlayerPawn" {
+                    snapshots.push(Snapshot {
+                        tick,
+                        event: "Seek".into(),
+                        class: entity.class().name().into(),
+                        handle: entity.handle(),
+                        fields: collect_fields(
+                            entity.class().name(),
+                            EntityEvents::Created,
+                            entity,
+                        ),
+                    });
+                }
+            }
+        }
+        std::fs::write(&output, serde_json::to_vec_pretty(&snapshots)?)?;
+        eprintln!("{} seek snapshots -> {}", snapshots.len(), output.display());
+        return Ok(());
+    }
     parser.run_to_end()?;
     let state = state.borrow();
     std::fs::write(&output, serde_json::to_vec_pretty(&state.snapshots)?)?;
-    eprintln!("{} snapshots -> {}", state.snapshots.len(), output.display());
+    eprintln!(
+        "{} snapshots -> {}",
+        state.snapshots.len(),
+        output.display()
+    );
     Ok(())
 }

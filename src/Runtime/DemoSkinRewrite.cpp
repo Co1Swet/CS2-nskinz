@@ -1103,6 +1103,8 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
     std::uint64_t discovery_ms = 0;
     std::uint64_t rewrite_ms = 0;
     std::uint64_t verification_ms = 0;
+    std::uint64_t verified_glove_records = 0;
+    std::uint64_t verified_glove_created = 0;
     std::uint64_t total_ms = 0;
     std::wstring input_mode;
     try
@@ -1128,6 +1130,8 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
             static_cast<std::uint64_t>(plan.sticker_slot_request_count));
         rewritten_knives = response.value("knife_count", std::uint64_t {0});
         rewritten_gloves = response.value("glove_count", std::uint64_t {0});
+        verified_glove_records = response.value("verified_glove_record_count", std::uint64_t {0});
+        verified_glove_created = response.value("verified_glove_created_count", std::uint64_t {0});
         rewritten_weapons = response.value("weapon_count", std::uint64_t {0});
         painted_glove_passthroughs =
             response.value("painted_glove_passthrough_count", std::uint64_t {0});
@@ -1214,6 +1218,8 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         L", knives=" + std::to_wstring(rewritten_knives) +
         L", gloves=" + std::to_wstring(rewritten_gloves) +
         L", painted_glove_passthroughs=" + std::to_wstring(painted_glove_passthroughs) +
+        L", verified_glove_records=" + std::to_wstring(verified_glove_records) +
+        L", verified_glove_created=" + std::to_wstring(verified_glove_created) +
         L", animation_resources=" + std::to_wstring(inserted_animation_resources) +
         L", animation_resource_source=" + animation_resource_source +
         L", mode=" + input_mode +

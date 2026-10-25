@@ -236,6 +236,12 @@ bool CanUsePawnEconGlovesCarrier(
     int current_definition_index,
     bool current_definition_is_glove,
     bool requested_definition_is_glove) noexcept;
+// Generated Demo glove carriers and default/unknown T/CT slots are read-only
+// in the injected runtime. Only Temporary Demo reconstruction may change them.
+bool RequiresTemporaryDemoGloveRebuild(
+    bool generated_demo,
+    bool pawn_definition_readable,
+    int pawn_definition_index) noexcept;
 // A readable definition-zero Pawn slot is owned by the demo/network stream.
 // Writing runtime-owned glove attributes or creating/mirroring a Wearable over
 // it leaves invalid client-only state behind when CS2 destroys the old Pawn on

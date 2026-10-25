@@ -9,19 +9,19 @@ v0.5.4（2026-09-30）沿用单 DLL 加载与枪械换肤方案，基线为 CS2 
 - Windows 10/11 x64、正常工作的 CS2 和 HLAE；仅限 `-insecure` 离线 Demo。
 - 不需要额外安装 Visual C++ Redistributable、DirectX SDK / June 2010 运行库、.NET、Python 或 Visual Studio。
 - 每次只选择一个语言 DLL，放在可写文件夹。目录、配置和日志由 DLL 自动生成，不是需要单独下载的依赖。
-- 当前 v0.6.2 兼容基线：HLAE 2.192.8 / AfxHookSource2 0.41.8；Steam Build 26144732；CS2 Client/Server 2000935 / Patch 1.41.9.2 / Source revision 11162119。已通过当前客户端二进制只读检查、刀／手套严格 PE 证据、完整回归及隔离加载／渲染门禁；不代表地图模型、刀模、动作与默认载体已在所有 Demo 中画面验收。
+- 当前 v0.6.3 兼容基线：HLAE 2.192.8 / AfxHookSource2 0.41.8；Steam Build 26144732；CS2 Client/Server 2000935 / Patch 1.41.9.2 / Source revision 11162119。已通过当前客户端二进制只读检查、刀／手套严格 PE 证据、完整回归及隔离加载／渲染门禁；不代表地图模型、刀模、动作与默认载体已在所有 Demo 中画面验收。
 
-关闭并重新启动 HLAE/CS2，不要向已有旧 DLL 的进程重复加载新版。把中文版放在 `C:\nSkinzCS2\Lyan_nskinz v0.5.4 zh-CN.dll` 后，在游戏控制台输入：
+关闭并重新启动 HLAE/CS2，不要向已有旧 DLL 的进程重复加载新版。把中文版放在 `C:\nSkinzCS2\Lyan_nskinz v0.6.3 zh-CN.dll` 后，在游戏控制台输入：
 
 ```text
-mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.5.4 zh-CN.dll"
+mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.6.3 zh-CN.dll"
 ```
 
-英文版只需把文件名改为 `Lyan_nskinz v0.5.4 EN.dll`。路径是示例，必须指向已经解压的真实 DLL；不要直接指向 ZIP、GitHub 网页或另一台电脑的路径。ZIP 内文件名含空格，必须保留示例中的一对英文半角双引号。
+英文版只需把文件名改为 `Lyan_nskinz v0.6.3 EN.dll`。路径是示例，必须指向已经解压的真实 DLL；不要直接指向 ZIP、GitHub 网页或另一台电脑的路径。ZIP 内文件名含空格，必须保留示例中的一对英文半角双引号。
 
-双语 ZIP 保留上述编译输出名。单独下载使用 `Lyan_nskinz-v0.5.4-EN.dll` / `Lyan_nskinz-v0.5.4-zh-CN.dll`；加载时按磁盘上的实际文件名填写。
+双语 ZIP 保留上述编译输出名。单独下载使用 `Lyan_nskinz-v0.6.3-EN.dll` / `Lyan_nskinz-v0.6.3-zh-CN.dll`；加载时按磁盘上的实际文件名填写。
 
-没有空格的完整路径可以不加引号。路径有空格时只加一对英文半角双引号，例如 `mirv_loadlibrary "D:\My Tools\Lyan_nskinz v0.5.4 zh-CN.dll"`。不要叠加两对引号，也不要使用中文弯引号。
+没有空格的完整路径可以不加引号。路径有空格时只加一对英文半角双引号，例如 `mirv_loadlibrary "D:\My Tools\Lyan_nskinz v0.6.3 zh-CN.dll"`。不要叠加两对引号，也不要使用中文弯引号。
 
 ### 保留的 v0.4.2 加载修复与验证
 
@@ -48,7 +48,7 @@ mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.5.4 zh-CN.dll"
 先确认实际路径、文件大小与 SHA256。可选诊断工具 `nSkinzCS2.LoadCheck.exe` 本身也是 x64 `/MT`，不需要安装；它只在自己的进程中加载 DLL，不启动游戏、不注入、不打开面板。运行：
 
 ```text
-nSkinzCS2.LoadCheck.exe "C:\nSkinzCS2\Lyan_nskinz v0.5.4 zh-CN.dll"
+nSkinzCS2.LoadCheck.exe "C:\nSkinzCS2\Lyan_nskinz v0.6.3 zh-CN.dll"
 ```
 
 请反馈完整输出、准确加载指令、Windows 和 HLAE 版本。不要把诊断程序重命名为 `cs2.exe`，也不要用 `regsvr32` 注册此 DLL。
@@ -70,17 +70,17 @@ v0.5.4 (2026-09-30) retains the single-DLL and firearm paths on the CS2 2000919 
 
 Only Windows 10/11 x64, CS2 and HLAE are required. No separate VC++ redistributable, legacy DirectX runtime/SDK, .NET, Python or compiler installation is needed. Use one language DLL, extracted into a writable folder, with HLAE `-insecure` offline demos only. Restart HLAE/CS2 before upgrading. Generated catalog/config/log files are not additional downloads.
 
-The current v0.6.2 baseline is HLAE 2.192.8 / AfxHookSource2 0.41.8, Steam Build 26144732, CS2 Client/Server 2000935 / Patch 1.41.9.2 / Source revision 11162119. It passes current-client read-only signatures, strict knife/glove PE evidence, the full regression suite and isolated loader/render gates; this is not exhaustive visual certification of every map/knife/glove/demo transition.
+The current v0.6.3 baseline is HLAE 2.192.8 / AfxHookSource2 0.41.8, Steam Build 26144732, CS2 Client/Server 2000935 / Patch 1.41.9.2 / Source revision 11162119. It passes current-client read-only signatures, strict knife/glove PE evidence, the full regression suite and isolated loader/render gates; this is not exhaustive visual certification of every map/knife/glove/demo transition.
 
 ```text
-mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.5.4 EN.dll"
+mirv_loadlibrary "C:\nSkinzCS2\Lyan_nskinz v0.6.3 EN.dll"
 ```
 
-Replace the example path with the extracted DLL location; use `Lyan_nskinz v0.5.4 zh-CN.dll` for Chinese. These filenames contain spaces, so keep exactly one pair of ASCII double quotes.
+Replace the example path with the extracted DLL location; use `Lyan_nskinz v0.6.3 zh-CN.dll` for Chinese. These filenames contain spaces, so keep exactly one pair of ASCII double quotes.
 
-The bilingual ZIP preserves those compiled output names. Standalone downloads use `Lyan_nskinz-v0.5.4-EN.dll` / `Lyan_nskinz-v0.5.4-zh-CN.dll`; load the actual filename on disk.
+The bilingual ZIP preserves those compiled output names. Standalone downloads use `Lyan_nskinz-v0.6.3-EN.dll` / `Lyan_nskinz-v0.6.3-zh-CN.dll`; load the actual filename on disk.
 
-A full path without spaces needs no quotes. For spaces, use exactly one pair of ASCII double quotes, e.g. `mirv_loadlibrary "D:\My Tools\Lyan_nskinz v0.5.4 EN.dll"`. Never double-wrap the path or use typographic quotes.
+A full path without spaces needs no quotes. For spaces, use exactly one pair of ASCII double quotes, e.g. `mirv_loadlibrary "D:\My Tools\Lyan_nskinz v0.6.3 EN.dll"`. Never double-wrap the path or use typographic quotes.
 
 The following describes the retained v0.4.2 loading fix and historical checks. Both v0.5.4 DLLs must pass the isolated loader gate; see the current release notes for the complete regression boundary.
 
@@ -100,13 +100,13 @@ Generated shader headers are checked in; normal builds do not need to run FXC. R
 
 ```text
 python tools/build_embedded_dx11_shaders.py --fxc "<Windows SDK>/x64/fxc.exe" --check
-python tools/audit_portable_dll.py "build/Release/Lyan_nskinz v0.5.4 EN.dll" "build/Release/Lyan_nskinz v0.5.4 zh-CN.dll"
+python tools/audit_portable_dll.py "build/Release/Lyan_nskinz v0.6.3 EN.dll" "build/Release/Lyan_nskinz v0.6.3 zh-CN.dll"
 ```
 
 Build `tools/PortabilityTests.vcxproj` with Release/x64 and each `TestKind` of `Loader`, `Renderer`, `CompilerStub`. Then run:
 
 ```text
-python tools/verify_portable_load.py --english-dll "build/Release/Lyan_nskinz v0.5.4 EN.dll" --chinese-dll "build/Release/Lyan_nskinz v0.5.4 zh-CN.dll" --report build/temp/portable-loader-results.json
+python tools/verify_portable_load.py --english-dll "build/Release/Lyan_nskinz v0.6.3 EN.dll" --chinese-dll "build/Release/Lyan_nskinz v0.6.3 zh-CN.dll" --report build/temp/portable-loader-results.json
 ```
 
 `tools/verify_release_artifacts.py` now also rejects non-inbox direct imports, managed DLLs, wrong architecture and unaudited delay imports. The compiler fixture is testing-only. Keep it out of release packages.

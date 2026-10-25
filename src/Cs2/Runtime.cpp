@@ -51819,6 +51819,15 @@ bool ApplyGloveFinishToPawnEconGloves(
     const int current_definition_index,
     std::wstring* failure_issue = nullptr)
 {
+    if (nskinzcs2::runtime::RequiresTemporaryDemoGloveRebuild(
+            g_hook_state.demo_skin_rewrite_active.load(std::memory_order_acquire),
+            true,
+            current_definition_index))
+    {
+        if (failure_issue != nullptr)
+            *failure_issue = L"temporary_demo_rewrite_required: default/generated glove carriers are read-only";
+        return false;
+    }
     if (pawn_entity == nullptr || glove_item_view == nullptr)
     {
         if (failure_issue != nullptr) *failure_issue = L"pawn/item-view pointer is null";
@@ -80339,6 +80348,7 @@ PawnGloveNativeHookDispatch PreparePawnGloveNativeHookCall(
             ? IsHlaeOfflineHudConsumerAuthorized()
             : IsHlaeOfflineRenderPassAuthorized()) ||
         component == nullptr ||
+        g_hook_state.demo_skin_rewrite_active.load(std::memory_order_acquire) ||
         g_hook_state.pawn_glove_native_hook_faulted.load())
         return dispatch;
 
@@ -83287,14 +83297,11 @@ void PollGameThreadStateModern()
     g_hook_state.demo_skin_rewrite_active.store(generated_demo_skin, std::memory_order_release);
     if (generated_demo_skin)
     {
+        g_hook_state.pawn_glove_visual_refresh_by_xuid.clear();
         // The rewritten stream already contains one coherent definition,
-        // subclass/VData, model and animation transaction. Firearms and gloves
-        // are routed per source item: default carriers are materialized in the
-        // generated stream, while already-painted carriers stay on the live
-        // path. A reconstructed glove whose complete serialized item view
-        // matches the request is authoritative too; replaying the live native
-        // refresh over it can retire the HUD model that Source 2 created while
-        // decoding the demo.
+        // subclass/VData, model and animation transaction. Generated gloves
+        // remain read-only even if playback or a later profile edit mismatches
+        // the requested fields. Only another Demo rewrite may repair them.
         for (auto& profile : config.knife_profiles) profile.enabled = false;
         int reconstructed_firearm_profiles = 0;
         int reconstructed_glove_profiles = 0;
@@ -83330,7 +83337,7 @@ void PollGameThreadStateModern()
                 << reconstructed_firearm_profiles
                 << L" reconstructed firearm profile(s) remain live for one native material initialization per entity generation, and "
                 << reconstructed_glove_profiles
-                << L" reconstructed glove profile(s) use the serialized Pawn item view without a second live write/refresh; only non-matching glove carriers use the guarded live fallback.";
+                << L" reconstructed glove profile(s) are read-only; mismatches require a new Temporary Demo and never enter live glove mutation.";
             nskinzcs2::Logger::Info(stream.str());
         }
     }
@@ -83677,9 +83684,9 @@ void PollGameThreadStateModern()
         target_xuids.insert(profile.xuid);
         target_xuids_by_account[AccountIdFromXuid(profile.xuid)] = profile.xuid;
         has_glove_profile = true;
-        needs_runtime_wearable_factory =
-            needs_runtime_wearable_factory ||
-            profile.mode == nskinzcs2::model::GloveProfileMode::ModelAndFinish;
+        // Request a live wearable factory only after resolving an eligible
+        // non-default source carrier below. Default/generated gloves use Demo
+        // reconstruction and must never arm this factory during config scan.
     }
 
     for (const auto& profile : config.keychain_profiles)
@@ -83791,6 +83798,7 @@ void PollGameThreadStateModern()
     bool stable_wearable_bound = false;
     bool runtime_created_wearable_bound = false;
     bool glove_pawn_fallback_bound = false;
+    bool glove_demo_rebuild_pending = false;
     bool knife_viewmodel_sync_ready = false;
     bool watched_knife_animation_observed = false;
     bool watched_knife_model_path_observed = false;
@@ -86155,10 +86163,9 @@ void PollGameThreadStateModern()
                 }
             }
 
-            // Use the Pawn-owned m_EconGloves item view for the default demo
-            // hands as well as an existing glove. For model-and-finish this is
-            // only the input carrier: the native pawn+0x15F8 component must
-            // rebuild and its world/HUD output is verified below.
+            // Classify the source carrier before any live write, native refresh
+            // or wearable discovery. Defaults and generated Demo records are
+            // read-only; a mismatch requires a new Temporary Demo.
             void* direct_pawn_glove_item_view =
                 ResolveGloveItemView(player_binding.pawn_entity, g_hook_state.schema_offsets);
             int direct_pawn_glove_definition_index = 0;
@@ -86168,6 +86175,40 @@ void PollGameThreadStateModern()
                     direct_pawn_glove_item_view,
                     g_hook_state.schema_offsets,
                     direct_pawn_glove_definition_index);
+            if (nskinzcs2::runtime::RequiresTemporaryDemoGloveRebuild(
+                    generated_demo_skin,
+                    direct_pawn_glove_definition_readable,
+                    direct_pawn_glove_definition_index) ||
+                request.explicit_vanilla_finish)
+            {
+                const auto signature = BuildGloveProfileApplySignature(
+                    effective_glove_profile, xuid,
+                    request.model_definition, kTargetTagGlovePawn);
+                g_hook_state.pawn_glove_visual_refresh_by_xuid.erase(xuid);
+                if (generated_demo_skin &&
+                    direct_pawn_glove_definition_readable &&
+                    DoesGeneratedDemoPawnGloveMatchRequest(
+                        direct_pawn_glove_item_view,
+                        g_hook_state.schema_offsets,
+                        request,
+                        xuid,
+                        direct_pawn_glove_definition_index))
+                {
+                    LogProfileDiagnosticOnce(signature ^ 0x1Dull,
+                        L"Generated Demo glove verified read-only; live glove writes, refresh and wearable creation are disabled for XUID " +
+                        std::to_wstring(xuid) + L".");
+                    glove_applied_xuids.insert(xuid);
+                    ++applied_gloves;
+                }
+                else
+                {
+                    glove_demo_rebuild_pending = true;
+                    WarnOnceForRuntimeSignature(signature ^ 0xD3FA019ull,
+                        L"temporary_demo_rewrite_required for XUID " + std::to_wstring(xuid) +
+                        L": default/generated glove fields do not match; generate a new Temporary Demo. Live glove writes, refresh and wearable creation are disabled.");
+                }
+                continue;
+            }
             const auto direct_pawn_glove_definition_known =
                 direct_pawn_glove_definition_readable &&
                 direct_pawn_glove_definition_index > 0 &&
@@ -86247,37 +86288,6 @@ void PollGameThreadStateModern()
                 if (!compatibility.compatible)
                 {
                     WarnOnceForRuntimeSignature(glove_signature ^ 0x16ull, compatibility_stream.str());
-                    continue;
-                }
-
-                if (generated_demo_skin &&
-                    DoesGeneratedDemoPawnGloveMatchRequest(
-                        glove_item_view,
-                        g_hook_state.schema_offsets,
-                        request,
-                        xuid,
-                        current_definition_index))
-                {
-                    // The temporary demo already published the complete Pawn
-                    // EconItemView, changed counter and bodygroup before CS2
-                    // decoded this entity. Treat that serialized transaction as
-                    // complete. The previous v0.6.2 candidate touched the
-                    // client-only dirty flag and manually replayed the native
-                    // HUD chain here; live evidence showed the correct glove
-                    // model was created only transiently and then retired.
-                    // Never layer that second transaction over an exact
-                    // generated-demo match.
-                    g_hook_state.pawn_glove_visual_refresh_by_xuid.erase(xuid);
-                    RememberAppliedSignature(
-                        g_hook_state.applied_glove_signatures,
-                        player_binding.pawn_entity_index,
-                        glove_signature);
-                    LogProfileDiagnosticOnce(
-                        glove_signature ^ 0x1Dull,
-                        L"Generated demo glove transaction verified and accepted without a second live write/refresh for XUID " +
-                            std::to_wstring(xuid) + L".");
-                    glove_applied_xuids.insert(xuid);
-                    ++applied_gloves;
                     continue;
                 }
 
@@ -87724,7 +87734,12 @@ void PollGameThreadStateModern()
         !stable_wearable_bound &&
         !runtime_created_wearable_bound)
     {
-        if (runtime_entities.client_entity_factory == RuntimeFeatureAvailability::Available)
+        if (glove_demo_rebuild_pending)
+        {
+            runtime_status_lines.push_back(
+                L"temporary_demo_rewrite_required: default/generated gloves are read-only; rebuild the Temporary Demo");
+        }
+        else if (runtime_entities.client_entity_factory == RuntimeFeatureAvailability::Available)
         {
             runtime_status_lines.push_back(L"Wearable client entity factory resolved; runtime glove bind pending");
         }

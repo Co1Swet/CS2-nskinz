@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Instant;
 
+mod keychains;
+use keychains::{KeychainRule, RequestKeychain};
+
 const IO_BUFFER_CAPACITY: usize = 8 * 1024 * 1024;
 const IN_MEMORY_DEMO_LIMIT: u64 = 768 * 1024 * 1024;
 const WEAPON_SLOT_COUNT: usize = 64;
@@ -66,6 +69,8 @@ struct Request {
 struct RequestPass {
     steam_id64: String,
     items: Vec<RequestItem>,
+    #[serde(default)]
+    keychains: Vec<RequestKeychain>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -154,6 +159,9 @@ struct Response {
     glove_count: usize,
     verified_glove_record_count: usize,
     verified_glove_created_count: usize,
+    keychain_weapon_count: usize,
+    verified_keychain_record_count: usize,
+    verified_keychain_created_count: usize,
     weapon_count: usize,
     painted_glove_passthrough_count: usize,
     painted_weapon_passthrough_count: usize,
@@ -221,6 +229,7 @@ struct TeamPlan {
 #[derive(Default)]
 struct PlayerPlan {
     by_team: HashMap<Team, TeamPlan>,
+    keychains: HashMap<u16, RequestKeychain>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -733,6 +742,12 @@ fn parse_plans(request: &Request) -> Result<HashMap<u64, PlayerPlan>> {
             continue;
         }
         let plan = result.entry(steam).or_default();
+        for keychain in &pass.keychains {
+            if !keychains::supported_definition(keychain.definition_index) {
+                bail!("unsupported keychain weapon definition {}", keychain.definition_index);
+            }
+            plan.keychains.insert(keychain.definition_index, keychain.clone());
+        }
         for item in &pass.items {
             if item
                 .mesh_group_mask
@@ -1164,6 +1179,7 @@ struct RewritePlan {
     gloves: HashMap<u32, HashMap<Team, GloveRule>>,
     weapons: HashMap<u32, WeaponRule>,
     sticker_weapons: HashMap<u32, StickerRule>,
+    keychain_weapons: HashMap<u32, KeychainRule>,
     requested_sticker_slots: usize,
     created_sticker_slots: usize,
     missing_sticker_slots: usize,
@@ -1233,6 +1249,7 @@ fn build_rewrite_plan(
     let mut gloves: HashMap<u32, HashMap<Team, GloveRule>> = HashMap::new();
     let mut weapons = HashMap::new();
     let mut sticker_weapons: HashMap<u32, StickerRule> = HashMap::new();
+    let mut keychain_weapons: HashMap<u32, KeychainRule> = HashMap::new();
     let mut requested_sticker_slots = HashSet::new();
     let mut created_sticker_slots = HashSet::new();
     // Kept in the response/manifest schema for compatibility with older UI
@@ -1261,10 +1278,20 @@ fn build_rewrite_plan(
             let team = choose_team(pawn, player_plan);
             let team_plan = team.and_then(|team| player_plan.by_team.get(&team));
             let any_plan = player_plan.by_team.get(&Team::Any);
-            if team_plan.is_none() && any_plan.is_none() {
+            if team_plan.is_none() && any_plan.is_none() && player_plan.keychains.is_empty() {
                 continue;
             }
             selected_pawns.insert(pawn_handle);
+            for handle in &pawn.weapons {
+                let Some(weapon) = discovery.weapons.get(handle) else { continue; };
+                let Some(request) = player_plan.keychains.get(&weapon.definition) else { continue; };
+                if let Some(previous) = keychain_weapons.get(handle) {
+                    if previous.request.kit_id != request.kit_id {
+                        bail!("conflicting keychain requests for shared weapon handle {handle}: {} versus {}", previous.request.kit_id, request.kit_id);
+                    }
+                }
+                keychain_weapons.insert(*handle, KeychainRule { steam: *steam, request: request.clone() });
+            }
             for glove_team in [Team::T, Team::Ct, Team::Any] {
                 if glove_team
                     .number()
@@ -1445,6 +1472,7 @@ fn build_rewrite_plan(
         && painted_glove_passthroughs.is_empty()
         && painted_weapon_passthroughs.is_empty()
         && requested_sticker_slots.is_empty()
+        && keychain_weapons.is_empty()
     {
         if matched_players == 0 && skipped_players > 0 {
             bail!("none of the {skipped_players} configured Steam IDs belong to this demo");
@@ -1495,6 +1523,7 @@ fn build_rewrite_plan(
         gloves,
         weapons,
         sticker_weapons,
+        keychain_weapons,
         requested_sticker_slots: requested_sticker_slots.len(),
         created_sticker_slots: created_sticker_slots.len(),
         missing_sticker_slots: 0,
@@ -1868,6 +1897,7 @@ impl DemoRewriter for CosmeticRewriter {
             || self.plan.gloves.contains_key(&entity.handle())
             || self.plan.weapons.contains_key(&entity.handle())
             || self.plan.sticker_weapons.contains_key(&entity.handle())
+            || self.plan.keychain_weapons.contains_key(&entity.handle())
     }
 
     fn replace_entity_field(
@@ -1934,6 +1964,16 @@ impl DemoRewriter for CosmeticRewriter {
             ) {
                 fields.extend(glove_fields(rule));
             }
+        }
+        if let Some(rule) = self.plan.keychain_weapons.get(&entity.handle()) {
+            let keychain_fields = keychains::fields(
+                entity, &fields, rule,
+            ).map_err(|error| source2_demo::error::ParserError::IoError(format!(
+                "keychain rewrite failed at tick {}, handle {}: {error:#}", _ctx.tick(), entity.handle()
+            )))?;
+            // Keychain allocation sees the complete paint/sticker overlay and
+            // owns the final vector length, so it must be appended last.
+            fields.extend(keychain_fields);
         }
         Ok(fields)
     }
@@ -2079,6 +2119,9 @@ struct GloveSnapshotVerifier {
     verified_rules: HashSet<(u32, Team)>,
     created_records: usize,
     checked_records: usize,
+    verified_keychains: HashSet<u32>,
+    keychain_records: usize,
+    keychain_created: usize,
 }
 
 impl GloveSnapshotVerifier {
@@ -2098,6 +2141,9 @@ impl GloveSnapshotVerifier {
             verified_rules: HashSet::new(),
             created_records: 0,
             checked_records: 0,
+            verified_keychains: HashSet::new(),
+            keychain_records: 0,
+            keychain_created: 0,
         }
     }
 }
@@ -2114,6 +2160,7 @@ impl DemoRewriter for GloveSnapshotVerifier {
         entity: &Entity,
     ) -> bool {
         self.plan.gloves.contains_key(&entity.handle())
+            || self.plan.keychain_weapons.contains_key(&entity.handle())
     }
 
     fn additional_entity_fields(
@@ -2122,6 +2169,14 @@ impl DemoRewriter for GloveSnapshotVerifier {
         event: EntityEvents,
         entity: &Entity,
     ) -> Result<Vec<(String, FieldValue)>, source2_demo::error::ParserError> {
+        if let Some(rule) = self.plan.keychain_weapons.get(&entity.handle()) {
+            keychains::verify(entity, rule).map_err(|error| source2_demo::error::ParserError::IoError(format!(
+                "keychain snapshot verification failed at tick {}, event {event:?}, handle {}: {error:#}", ctx.tick(), entity.handle()
+            )))?;
+            self.verified_keychains.insert(entity.handle());
+            self.keychain_records += 1;
+            if event == EntityEvents::Created { self.keychain_created += 1; }
+        }
         if let Some((team, _rule)) = glove_rule_for_entity_with_team(&self.plan, entity) {
             let handle = entity.handle();
             for (name, expected) in &self.expected_fields[&(handle, team)] {
@@ -2143,9 +2198,9 @@ impl DemoRewriter for GloveSnapshotVerifier {
     }
 }
 
-fn verify_glove_snapshots(plan: &RewritePlan, output: &Path) -> Result<(usize, usize)> {
-    if plan.gloves.is_empty() {
-        return Ok((0, 0));
+fn verify_glove_snapshots(plan: &RewritePlan, output: &Path) -> Result<(usize, usize, usize, usize)> {
+    if plan.gloves.is_empty() && plan.keychain_weapons.is_empty() {
+        return Ok((0, 0, 0, 0));
     }
     let input = BufReader::with_capacity(IO_BUFFER_CAPACITY, File::open(output)?);
     let mut writer = DemoWriter::from_reader(input, VerificationSink::default())?;
@@ -2159,7 +2214,12 @@ fn verify_glove_snapshots(plan: &RewritePlan, output: &Path) -> Result<(usize, u
             }
         }
     }
-    Ok((state.checked_records, state.created_records))
+    for handle in plan.keychain_weapons.keys() {
+        if !state.verified_keychains.contains(handle) {
+            bail!("no verified keychain snapshot for weapon handle {handle}");
+        }
+    }
+    Ok((state.checked_records, state.created_records, state.keychain_records, state.keychain_created))
 }
 
 fn verify_sticker_rewrites(plan: &RewritePlan, discovery: &Discovery) -> Result<usize> {
@@ -2282,7 +2342,7 @@ fn verify_glove_rewrites(plan: &RewritePlan, discovery: &Discovery) -> Result<us
 
 fn rewrite(request: &Request) -> Result<Response> {
     let total_started = Instant::now();
-    if request.schema_version != 1 {
+    if !matches!(request.schema_version, 1 | 2) {
         bail!("unsupported request schema {}", request.schema_version);
     }
     if request.input_dem == request.output_dem {
@@ -2363,7 +2423,7 @@ fn rewrite(request: &Request) -> Result<Response> {
     let rewrite_ms = elapsed_ms(rewrite_started);
     let verification_started = Instant::now();
     let rewritten_discovery = discover(&request.output_dem)?;
-    let (verified_glove_records, verified_glove_created) =
+    let (verified_glove_records, verified_glove_created, verified_keychain_records, verified_keychain_created) =
         verify_glove_snapshots(&plan, &request.output_dem)?;
     let verified_gloves = verify_glove_rewrites(&plan, &rewritten_discovery)?;
     if verified_gloves != plan.gloves.len() {
@@ -2392,6 +2452,9 @@ fn rewrite(request: &Request) -> Result<Response> {
         glove_count: verified_gloves,
         verified_glove_record_count: verified_glove_records,
         verified_glove_created_count: verified_glove_created,
+        keychain_weapon_count: plan.keychain_weapons.len(),
+        verified_keychain_record_count: verified_keychain_records,
+        verified_keychain_created_count: verified_keychain_created,
         weapon_count: counts.3,
         painted_glove_passthrough_count: counts.4,
         painted_weapon_passthrough_count: counts.5,
@@ -2461,6 +2524,9 @@ fn run_main() -> Result<()> {
                 glove_count: 0,
                 verified_glove_record_count: 0,
                 verified_glove_created_count: 0,
+                keychain_weapon_count: 0,
+                verified_keychain_record_count: 0,
+                verified_keychain_created_count: 0,
                 weapon_count: 0,
                 painted_glove_passthrough_count: 0,
                 painted_weapon_passthrough_count: 0,
@@ -2633,6 +2699,7 @@ mod tests {
                     continue;
                 }
                 passes.push(RequestPass {
+                    keychains: Vec::new(),
                     steam_id64: steam.to_string(),
                     items: [(5028, 5034, 10033, "T"), (5029, 5030, 10037, "CT")]
                         .into_iter()
@@ -3166,6 +3233,7 @@ mod tests {
             output_dem: PathBuf::from("output.dem"),
             cs2_game_dir: None,
             passes: vec![RequestPass {
+                keychains: Vec::new(),
                 steam_id64: "76561199840349579".into(),
                 items: vec![
                     RequestItem {

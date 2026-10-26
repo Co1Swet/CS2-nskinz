@@ -63,14 +63,14 @@
   <PropertyGroup>
     <IntDir>$(ProjectDir)build\$(Configuration)\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\$(Configuration)\</OutDir>
-    <TargetName>Lyan_nskinz v0.6.3 EN</TargetName>
+    <TargetName>Lyan_nskinz v0.6.4 EN</TargetName>
     <VCToolsVersion>14.44.35207</VCToolsVersion>
     <IncludePath>$(ProjectDir)src;$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;$(ProjectDir)third_party\json;$(ProjectDir)third_party\MinHook\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseZhCn|x64'">
     <IntDir>$(ProjectDir)build\ReleaseZhCn\$(ProjectName)\</IntDir>
     <OutDir>$(ProjectDir)build\Release\</OutDir>
-    <TargetName>Lyan_nskinz v0.6.3 zh-CN</TargetName>
+    <TargetName>Lyan_nskinz v0.6.4 zh-CN</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>

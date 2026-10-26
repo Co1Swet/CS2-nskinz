@@ -343,64 +343,6 @@ bool HasLegacyGloveProfiles(const ConfigDocument& document)
         });
 }
 
-bool HasEnabledNonKeychainProfiles(const ConfigDocument& document)
-{
-    const auto has_enabled_weapon_profile =
-        std::any_of(
-            document.profiles.begin(),
-            document.profiles.end(),
-            [](const CosmeticProfile& profile)
-            {
-                return profile.enabled && profile.xuid != 0;
-            });
-    if (has_enabled_weapon_profile)
-    {
-        return true;
-    }
-
-    const auto has_enabled_knife_profile =
-        std::any_of(
-            document.knife_profiles.begin(),
-            document.knife_profiles.end(),
-            [](const KnifeProfile& profile)
-            {
-                return profile.enabled && profile.xuid != 0;
-            });
-    if (has_enabled_knife_profile)
-    {
-        return true;
-    }
-
-    return std::any_of(
-        document.glove_profiles.begin(),
-        document.glove_profiles.end(),
-        [](const GloveProfile& profile)
-        {
-            return profile.enabled && profile.xuid != 0;
-        });
-}
-
-bool HasEnabledKeychainProfiles(const ConfigDocument& document)
-{
-    return std::any_of(
-        document.keychain_profiles.begin(),
-        document.keychain_profiles.end(),
-        [](const KeychainProfile& profile)
-        {
-            return profile.enabled && profile.xuid != 0 && profile.keychain_kit > 0;
-        });
-}
-
-bool ShouldUseLightweightDemoKeychainRefresh(
-    const nskinzcs2::runtime::Status& status,
-    const ConfigDocument& document)
-{
-    return status.hook_installed &&
-        status.frame_callbacks_active &&
-        HasEnabledKeychainProfiles(document) &&
-        !HasEnabledNonKeychainProfiles(document);
-}
-
 int CompatibleGloveItemForPaint(const Catalog& catalog, const int paint_kit)
 {
     if (paint_kit == 0)
@@ -2917,7 +2859,8 @@ private:
             plan.weapon_item_count,
             plan.sticker_slot_request_count,
             plan.knife_item_count,
-            plan.glove_item_count);
+            plan.glove_item_count,
+            plan.keychain_item_count);
         if (!plan.validation_issue.empty())
         {
             ImGui::TextColored(
@@ -3661,7 +3604,6 @@ private:
     {
         const auto catalog_snapshot = state_.SnapshotCatalogShared();
         const auto& catalog = *catalog_snapshot;
-        const auto runtime_status = state_.SnapshotStatus();
         std::wstring validation_issue;
         if (!TryValidateKnifeProfilesForApply(working_config_, catalog, validation_issue) ||
             !TryValidateGloveProfilesForApply(working_config_, catalog, validation_issue) ||
@@ -3691,12 +3633,7 @@ private:
             Logger::Warn(L"Unexpected in-process UI update path used.");
         }
         state_.ReplaceConfig(working_config_);
-        if (!external_update &&
-            ShouldUseLightweightDemoKeychainRefresh(runtime_status, working_config_))
-        {
-            state_.RequestDemoKeychainRefresh();
-        }
-        else if (!external_update)
+        if (!external_update)
         {
             state_.RequestManualRefresh();
         }

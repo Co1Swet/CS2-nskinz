@@ -298,13 +298,19 @@ json BuildRequestJson(
         {
             items.push_back(ParseItemJson(item));
         }
+        json keychains = json::array();
+        for (const auto& keychain : pass.keychain_json)
+        {
+            keychains.push_back(ParseItemJson(keychain));
+        }
         passes.push_back({
             {"steam_id64", std::to_string(pass.xuid)},
             {"items", std::move(items)},
+            {"keychains", std::move(keychains)},
         });
     }
     return {
-        {"schema_version", 1},
+        {"schema_version", 2},
         {"input_dem", PathUtf8(input)},
         {"output_dem", PathUtf8(output)},
         {"cs2_game_dir", PathUtf8(cs2_game_directory)},
@@ -460,7 +466,7 @@ bool RunNskinDemoRewriter(
         nullptr,
         nullptr,
         TRUE,
-        CREATE_NO_WINDOW,
+        CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS,
         nullptr,
         request_path.parent_path().c_str(),
         &startup,
@@ -980,6 +986,40 @@ DemoSkinRewritePlan nskinzcs2::runtime::BuildDefaultDemoSkinRewritePlan(
         result.glove_item_count += 2;
     }
 
+    for (const auto& profile : config.keychain_profiles)
+    {
+        if (!profile.enabled || profile.xuid == 0 ||
+            (profile.keychain_kit <= 0 && !profile.explicit_clear))
+        {
+            continue;
+        }
+        constexpr std::array supported_definitions {
+            1, 2, 3, 4, 7, 8, 9, 10, 11, 13, 14, 16, 17, 19, 23, 24, 25,
+            26, 27, 28, 29, 30, 32, 33, 34, 35, 36, 38, 39, 40, 60, 61, 63, 64};
+        if (std::find(supported_definitions.begin(), supported_definitions.end(), profile.base_item) ==
+            supported_definitions.end())
+        {
+            result.validation_issue = L"Keychains require a supported firearm definition.";
+            return result;
+        }
+        if (!profile.explicit_clear && catalog != nullptr &&
+            std::none_of(catalog->keychain_kits.begin(), catalog->keychain_kits.end(),
+                [&](const auto& kit) { return kit.id == profile.keychain_kit; }))
+        {
+            result.validation_issue = L"The selected keychain kit is missing from the installed catalog.";
+            return result;
+        }
+        auto& pass = grouped[profile.xuid];
+        pass.xuid = profile.xuid;
+        // Keep keychain-only intent separate. It must not synthesize a paint,
+        // quality, custom name or sticker request for the same firearm.
+        pass.keychain_json.push_back(json {
+            {"definition_index", profile.base_item},
+            {"kit_id", profile.explicit_clear ? 0 : profile.keychain_kit},
+        }.dump());
+        ++result.keychain_item_count;
+    }
+
     for (auto& [xuid, pass] : grouped)
     {
         static_cast<void>(xuid);
@@ -1105,6 +1145,9 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
     std::uint64_t verification_ms = 0;
     std::uint64_t verified_glove_records = 0;
     std::uint64_t verified_glove_created = 0;
+    std::uint64_t rewritten_keychain_weapons = 0;
+    std::uint64_t verified_keychain_records = 0;
+    std::uint64_t verified_keychain_created = 0;
     std::uint64_t total_ms = 0;
     std::wstring input_mode;
     try
@@ -1132,6 +1175,9 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         rewritten_gloves = response.value("glove_count", std::uint64_t {0});
         verified_glove_records = response.value("verified_glove_record_count", std::uint64_t {0});
         verified_glove_created = response.value("verified_glove_created_count", std::uint64_t {0});
+        rewritten_keychain_weapons = response.value("keychain_weapon_count", std::uint64_t {0});
+        verified_keychain_records = response.value("verified_keychain_record_count", std::uint64_t {0});
+        verified_keychain_created = response.value("verified_keychain_created_count", std::uint64_t {0});
         rewritten_weapons = response.value("weapon_count", std::uint64_t {0});
         painted_glove_passthroughs =
             response.value("painted_glove_passthrough_count", std::uint64_t {0});
@@ -1181,6 +1227,13 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         Logger::Error(result.detail);
         return result;
     }
+    if (plan.keychain_item_count > 0 &&
+        (rewritten_keychain_weapons == 0 || verified_keychain_created == 0))
+    {
+        result.detail = L"No matching keychain weapon snapshots were verified. Check the XUID and firearm; the generated Demo will not be loaded.";
+        Logger::Error(result.detail);
+        return result;
+    }
     if (!std::filesystem::is_regular_file(output, error) || error || !HasDemoMagic(output))
     {
         result.detail = L"The rewrite process returned success but did not produce a valid PBDEMS2 file.";
@@ -1210,6 +1263,9 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         L", skipped_players=" + std::to_wstring(skipped_players) +
         L", pawns=" + std::to_wstring(rewritten_pawns) +
         L", weapons=" + std::to_wstring(rewritten_weapons) +
+        L", keychain_weapons=" + std::to_wstring(rewritten_keychain_weapons) +
+        L", verified_keychain_records=" + std::to_wstring(verified_keychain_records) +
+        L", verified_keychain_created=" + std::to_wstring(verified_keychain_created) +
         L", painted_weapon_passthroughs=" + std::to_wstring(painted_weapon_passthroughs) +
         L", sticker_weapons=" + std::to_wstring(rewritten_sticker_weapons) +
         L", sticker_slots=" + std::to_wstring(rewritten_sticker_slots) +

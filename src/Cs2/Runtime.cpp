@@ -14570,6 +14570,13 @@ RuntimeFeatureAvailability SnapshotOrResolveCachedKeychainFactoryResolution(
 
 void AdvanceWearableFactoryCacheAtFrameRenderPass()
 {
+    // Never copy the complete config at frame rate for an idle factory. In
+    // generated Demos glove reconstruction is authoritative and read-only.
+    if (!g_hook_state.client_entity_factory_requested.load(std::memory_order_acquire) ||
+        g_hook_state.demo_skin_rewrite_active.load(std::memory_order_acquire))
+    {
+        return;
+    }
     RuntimePerfScope performance(RuntimePerfPhase::Factory);
     if (!g_hook_state.demo_playing.load(std::memory_order_acquire) ||
         g_hook_state.app_state == nullptr)
@@ -54729,6 +54736,8 @@ bool ApplyWeaponKeychainModuleFields(
     const ClientSchemaOffsets& offsets,
     const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
+    if (nskinzcs2::runtime::kKeychainsTemporaryDemoOnly && keychain_profile != nullptr)
+        return false;
     if (keychain_module_entity == nullptr || keychain_profile == nullptr)
     {
         return true;
@@ -54917,6 +54926,8 @@ bool ApplyPersistentKeychainAttributeToItemView(
     const ClientSchemaOffsets& offsets,
     const nskinzcs2::model::KeychainProfile* keychain_profile)
 {
+    if (nskinzcs2::runtime::kKeychainsTemporaryDemoOnly && keychain_profile != nullptr)
+        return false;
     if (item_view == nullptr || keychain_profile == nullptr)
     {
         return true;
@@ -55073,6 +55084,9 @@ bool ApplyKeychainStateToWeaponItemView(
 {
     live_keychain_def_id = 0;
     live_keychain_seed = 0;
+
+    if (nskinzcs2::runtime::kKeychainsTemporaryDemoOnly && keychain_profile != nullptr)
+        return false;
 
     if (item_view == nullptr)
     {
@@ -59516,6 +59530,8 @@ void RunDemoKeychainController(
     const std::uint64_t watched_xuid,
     const std::uint64_t now)
 {
+    if constexpr (nskinzcs2::runtime::kKeychainsTemporaryDemoOnly)
+        return;
     const auto previous_controller_state = SnapshotDemoKeychainControllerState();
     auto controller_state = previous_controller_state;
     controller_state.weapon_entity_index = -1;
@@ -60188,6 +60204,8 @@ void ApplyManualDemoKeychainModuleUpdates(
     const std::unordered_set<int>& glove_definition_indices,
     const RuntimeEntityManager& runtime_entities)
 {
+    if constexpr (nskinzcs2::runtime::kKeychainsTemporaryDemoOnly)
+        return;
     if (!g_hook_state.demo_playing.load(std::memory_order_acquire) ||
         config.keychain_profiles.empty())
     {
@@ -83691,7 +83709,8 @@ void PollGameThreadStateModern()
 
     for (const auto& profile : config.keychain_profiles)
     {
-        if (!profile.enabled || profile.xuid == 0 || profile.keychain_kit <= 0)
+        if (nskinzcs2::runtime::kKeychainsTemporaryDemoOnly ||
+            !profile.enabled || profile.xuid == 0 || profile.keychain_kit <= 0)
         {
             continue;
         }
@@ -84647,7 +84666,7 @@ void PollGameThreadStateModern()
                     ? nullptr
                     : nskinzcs2::ConfigStore::FindMatchingProfile(config, xuid, normalized_base_item);
             const auto* keychain_profile =
-                normalized_base_item == 42
+                nskinzcs2::runtime::kKeychainsTemporaryDemoOnly || normalized_base_item == 42
                     ? nullptr
                     : nskinzcs2::ConfigStore::FindMatchingKeychainProfile(config, xuid, normalized_base_item);
             const auto* knife_profile =
@@ -85408,7 +85427,7 @@ void PollGameThreadStateModern()
                         ? nullptr
                         : nskinzcs2::ConfigStore::FindMatchingProfile(config, xuid, normalized_base_item);
                 const auto* keychain_profile =
-                    normalized_base_item == 42
+                    nskinzcs2::runtime::kKeychainsTemporaryDemoOnly || normalized_base_item == 42
                         ? nullptr
                         : nskinzcs2::ConfigStore::FindMatchingKeychainProfile(config, xuid, normalized_base_item);
                 const auto* knife_profile =
@@ -91830,6 +91849,12 @@ void nskinzcs2::RuntimeController::ConsumeDemoKeychainRefresh(runtime::Status& s
 {
     if (!state_.ConsumeDemoKeychainRefreshRequest())
     {
+        return;
+    }
+
+    if constexpr (runtime::kKeychainsTemporaryDemoOnly)
+    {
+        status.diagnostics.push_back(L"Keychain changes require Generate and Load Temporary Demo; live mutation is disabled.");
         return;
     }
 

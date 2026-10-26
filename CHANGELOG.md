@@ -1,5 +1,16 @@
 # Changelog / 更新记录
 
+## v0.6.4 — 2026-10-26
+
+- Added Temporary Demo reconstruction for keychain replacement, addition and explicit removal. Existing position/seed are preserved; new mounts use model-derived DefaultLocation regions for 34 firearm definitions. Keychain-only requests preserve unrequested paint, stickers, quality and names.
+- 挂件替换、新增和明确清除统一接入临时 Demo 重建；保留已有位置和 seed，新增采用 34 种枪械模型的 DefaultLocation 区域。独立挂件请求保留未请求的枪皮、贴纸、品质和名称。
+- Disabled live keychain mutation, module creation and keychain-only entity scans. Idle/generated-Demo factory callbacks now return before copying configuration; the external rewriter runs below normal CPU priority.
+- 关闭实时挂件写入、模块创建和挂件专用扫描；空闲及生成 Demo 的工厂回调在复制配置前返回，外置重写进程降低 CPU 优先级。
+- Verified four independent recordings: 1,317 weapon handles, 506,431 target records and 3,106 Created snapshots for replacement/addition and again for removal, plus 202 independent seek readbacks. A mixed firearm/five-sticker/keychain/T-CT-glove request also passed. Rendered keychain appearance and actual gameplay frame-time improvement remain in-game acceptance items.
+- 四份独立录制通过回归：1,317 把目标枪械、506,431 条挂件记录、3,106 个创建快照；清除阶段再次验证相同规模，另有 202 次独立跳转读回。枪皮、五槽贴纸、挂件及 T／CT 手套混合请求也通过。挂件画面和实际游戏帧时间改善仍需实机验收。
+
+See [bilingual release notes](docs/releases/v0.6.4.md) and [implementation and regression evidence](docs/development/keychain-temporary-demo-20261026.md).
+
 ## v0.6.3 — 2026-10-25
 
 - Fixed default T/CT gloves disappearing after seeking a Temporary Demo: every independent Created/full-packet record now materializes its complete glove state even when its Pawn handle and team were seen earlier. Late team assignment remains supported.

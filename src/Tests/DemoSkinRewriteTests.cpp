@@ -43,6 +43,33 @@ void RunDemoSkinRewriteTests()
         runtime::BuildDefaultDemoSkinRewritePlan(config).passes.empty(),
         "empty config must not create a demo rewrite pass");
 
+    model::ConfigDocument keychain_only;
+    model::KeychainProfile charm;
+    charm.enabled = true;
+    charm.xuid = 76561198800578327ull;
+    charm.base_item = 7;
+    charm.keychain_kit = 17;
+    keychain_only.keychain_profiles.push_back(charm);
+    const auto charm_plan = runtime::BuildDefaultDemoSkinRewritePlan(keychain_only);
+    Check(charm_plan.passes.size() == 1 && charm_plan.keychain_item_count == 1,
+        "keychain-only intent must create a Temporary Demo pass");
+    Check(charm_plan.passes[0].item_json.empty(),
+        "keychain-only requests must preserve unrequested paint, name and sticker state");
+    Check(json::parse(charm_plan.passes[0].keychain_json.at(0)).at("kit_id") == 17,
+        "keychain IDs must be serialized as integers");
+    keychain_only.keychain_profiles[0].explicit_clear = true;
+    const auto clear_plan = runtime::BuildDefaultDemoSkinRewritePlan(keychain_only);
+    Check(json::parse(clear_plan.passes[0].keychain_json.at(0)).at("kit_id") == 0,
+        "explicit keychain clear must override a stale selected kit");
+    keychain_only.keychain_profiles[0].explicit_clear = false;
+    keychain_only.keychain_profiles[0].keychain_kit = 0;
+    Check(runtime::BuildDefaultDemoSkinRewritePlan(keychain_only).passes.empty(),
+        "no-change keychain selection must not create a request");
+    keychain_only.keychain_profiles[0].keychain_kit = 17;
+    keychain_only.keychain_profiles[0].base_item = 42;
+    Check(!runtime::BuildDefaultDemoSkinRewritePlan(keychain_only).validation_issue.empty(),
+        "unsupported keychain carriers must fail before rewriting");
+
     model::KnifeProfile knife;
     knife.enabled = true;
     knife.xuid = 76561198800578327ull;

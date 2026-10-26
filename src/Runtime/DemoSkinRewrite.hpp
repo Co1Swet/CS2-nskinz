@@ -11,6 +11,9 @@
 
 namespace nskinzcs2::runtime
 {
+// All keychain changes are persisted in Temporary Demos. No runtime module
+// writes, missing-module factories or keychain-only entity scans are allowed.
+inline constexpr bool kKeychainsTemporaryDemoOnly = true;
 inline constexpr wchar_t kCurrentDemoPathSidecarName[] = L"nSkinzCS2.current-demo.txt";
 inline constexpr wchar_t kGeneratedDemoDirectoryName[] = L"nskinz_temp";
 inline constexpr wchar_t kGeneratedDemoFilePrefix[] = L"nskinz_skin_";
@@ -20,6 +23,7 @@ struct DemoSkinRewritePass
 {
     std::uint64_t xuid = 0;
     std::vector<std::string> item_json;
+    std::vector<std::string> keychain_json;
 };
 
 struct DemoSkinRewritePlan
@@ -29,6 +33,7 @@ struct DemoSkinRewritePlan
     int sticker_slot_request_count = 0;
     int knife_item_count = 0;
     int glove_item_count = 0;
+    int keychain_item_count = 0;
     std::wstring validation_issue;
 };
 

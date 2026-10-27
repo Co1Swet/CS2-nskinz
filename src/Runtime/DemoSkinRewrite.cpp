@@ -1129,6 +1129,9 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
     std::uint64_t matched_glove_requests = 0;
     std::uint64_t matched_sticker_slot_requests = 0;
     std::uint64_t rewritten_knives = 0;
+    std::uint64_t matched_knife_deaths = 0;
+    std::uint64_t rewritten_knife_deaths = 0;
+    std::uint64_t verified_death_events = 0;
     std::uint64_t rewritten_gloves = 0;
     std::uint64_t rewritten_weapons = 0;
     std::uint64_t painted_glove_passthroughs = 0;
@@ -1172,6 +1175,9 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
             "requested_sticker_slot_count",
             static_cast<std::uint64_t>(plan.sticker_slot_request_count));
         rewritten_knives = response.value("knife_count", std::uint64_t {0});
+        matched_knife_deaths = response.value("matched_knife_death_count", std::uint64_t {0});
+        rewritten_knife_deaths = response.value("rewritten_knife_death_count", std::uint64_t {0});
+        verified_death_events = response.value("verified_death_event_count", std::uint64_t {0});
         rewritten_gloves = response.value("glove_count", std::uint64_t {0});
         verified_glove_records = response.value("verified_glove_record_count", std::uint64_t {0});
         verified_glove_created = response.value("verified_glove_created_count", std::uint64_t {0});
@@ -1272,6 +1278,9 @@ DemoSkinRewriteResult nskinzcs2::runtime::GenerateTemporarySkinnedDemo(
         L", created_sticker_slots=" + std::to_wstring(created_sticker_slots) +
         L", missing_sticker_slots=" + std::to_wstring(missing_sticker_slots) +
         L", knives=" + std::to_wstring(rewritten_knives) +
+        L", knife_killfeed_events=" + std::to_wstring(matched_knife_deaths) +
+        L", knife_killfeed_rewritten=" + std::to_wstring(rewritten_knife_deaths) +
+        L", verified_death_events=" + std::to_wstring(verified_death_events) +
         L", gloves=" + std::to_wstring(rewritten_gloves) +
         L", painted_glove_passthroughs=" + std::to_wstring(painted_glove_passthroughs) +
         L", verified_glove_records=" + std::to_wstring(verified_glove_records) +

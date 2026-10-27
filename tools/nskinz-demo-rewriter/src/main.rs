@@ -16,6 +16,7 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 mod keychains;
+mod killfeed;
 use keychains::{KeychainRule, RequestKeychain};
 
 const IO_BUFFER_CAPACITY: usize = 8 * 1024 * 1024;
@@ -156,6 +157,9 @@ struct Response {
     requested_sticker_slot_count: usize,
     pawn_count: usize,
     knife_count: usize,
+    matched_knife_death_count: usize,
+    rewritten_knife_death_count: usize,
+    verified_death_event_count: usize,
     glove_count: usize,
     verified_glove_record_count: usize,
     verified_glove_created_count: usize,
@@ -2398,6 +2402,9 @@ fn rewrite(request: &Request) -> Result<Response> {
         std::fs::create_dir_all(parent)?;
     }
     let rewrite_started = Instant::now();
+    let killfeed_rewriter = killfeed::KillfeedRewriter::new(&plans)?;
+    let killfeed_enabled = killfeed_rewriter.enabled();
+    let mut killfeed_audit = killfeed::Audit::default();
     let output = File::create(&request.output_dem)?;
     let output = BufWriter::with_capacity(IO_BUFFER_CAPACITY, output);
     match in_memory.as_deref() {
@@ -2407,7 +2414,9 @@ fn rewrite(request: &Request) -> Result<Response> {
                 plan: plan.clone(),
                 materialized_glove_team_by_pawn: HashMap::new(),
             });
+            let killfeed_state = killfeed_enabled.then(|| writer.add_rewriter(killfeed_rewriter));
             writer.run()?;
+            if let Some(state) = killfeed_state { killfeed_audit = std::mem::take(&mut state.borrow_mut().audit); }
         }
         None => {
             let input = File::open(&request.input_dem)?;
@@ -2417,11 +2426,14 @@ fn rewrite(request: &Request) -> Result<Response> {
                 plan: plan.clone(),
                 materialized_glove_team_by_pawn: HashMap::new(),
             });
+            let killfeed_state = killfeed_enabled.then(|| writer.add_rewriter(killfeed_rewriter));
             writer.run()?;
+            if let Some(state) = killfeed_state { killfeed_audit = std::mem::take(&mut state.borrow_mut().audit); }
         }
     }
     let rewrite_ms = elapsed_ms(rewrite_started);
     let verification_started = Instant::now();
+    let verified_death_events = killfeed::verify(&request.output_dem, &killfeed_audit)?;
     let rewritten_discovery = discover(&request.output_dem)?;
     let (verified_glove_records, verified_glove_created, verified_keychain_records, verified_keychain_created) =
         verify_glove_snapshots(&plan, &request.output_dem)?;
@@ -2449,6 +2461,9 @@ fn rewrite(request: &Request) -> Result<Response> {
         requested_sticker_slot_count: plan.requested_sticker_slots,
         pawn_count: counts.0,
         knife_count: counts.1,
+        matched_knife_death_count: killfeed_audit.matched,
+        rewritten_knife_death_count: killfeed_audit.changed,
+        verified_death_event_count: verified_death_events,
         glove_count: verified_gloves,
         verified_glove_record_count: verified_glove_records,
         verified_glove_created_count: verified_glove_created,
@@ -2521,6 +2536,9 @@ fn run_main() -> Result<()> {
                 requested_sticker_slot_count: 0,
                 pawn_count: 0,
                 knife_count: 0,
+                matched_knife_death_count: 0,
+                rewritten_knife_death_count: 0,
+                verified_death_event_count: 0,
                 glove_count: 0,
                 verified_glove_record_count: 0,
                 verified_glove_created_count: 0,

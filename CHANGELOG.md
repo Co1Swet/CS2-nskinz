@@ -1,5 +1,16 @@
 # Changelog / 更新记录
 
+## v0.6.5 — 2026-10-27
+
+- Fixed Temporary Demo knife model changes leaving the original killfeed identity. Resolve each death's attacker/team and synchronize the weapon token plus item/faux-item IDs using dynamic event descriptors and 22 checked knife names.
+- 修复临时 Demo 换刀后击杀信息仍为原刀：按事件攻击者／队伍同步刀名及物品身份，动态解析事件定义，核对 22 种刀型名称。
+- Preserve unconfigured players, firearm kills, assists, flags, timing/order and unknown protobuf fields; independently verify output death events. No new live HUD hooks or per-frame scanning.
+- 保留未配置玩家、枪杀、助攻、标记、时间／顺序和未知字段，输出后独立验证；不增加实时 HUD Hook 或每帧扫描。
+- Two real recordings: 262 deaths, 9 target knife events synchronized, 253 unchanged, 18 seek readbacks. Mixed cosmetic reconstruction, 22 regular Rust tests, full C++ regression and DLL loading/offscreen checks passed. Rendered killfeed icons remain an in-game acceptance item.
+- 两份录制共 262 条死亡记录，9 条刀杀同步、253 条不变、18 次跳转读回通过；混合饰品重建、常规 Rust／完整 C++ 回归及 DLL 加载／离屏检查通过。实际图标仍待实机验收。
+
+See [bilingual release notes](docs/releases/v0.6.5.md) and [diagnosis and regression evidence](docs/development/knife-killfeed-demo-rewrite-20261027.md).
+
 ## v0.6.4 — 2026-10-26
 
 - Added Temporary Demo reconstruction for keychain replacement, addition and explicit removal. Existing position/seed are preserved; new mounts use model-derived DefaultLocation regions for 34 firearm definitions. Keychain-only requests preserve unrequested paint, stickers, quality and names.

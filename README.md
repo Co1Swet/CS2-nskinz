@@ -1,3 +1,7 @@
+仅作留档，该fork与原始仓库无关
+
+
+
 [![nSkinzCS2 offline demo cosmetic toolkit](./docs/assets/nskinz-banner.svg)](./docs/assets/nskinz-banner.svg)
 
 <h3 align="center">Offline Counter-Strike 2 cosmetic overrides for HLAE demo playback</h3>
